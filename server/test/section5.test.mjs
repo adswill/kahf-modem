@@ -288,8 +288,10 @@ test("GET /map: a registered relay gets a panel and counts in the footer", async
   const relayKey = await newKey();
   await handleRequest(post("/register", await signed(relayKey, { area: "N51W1", callsign: "K1AAA" })), s, NOW);
   const html = await (await handleRequest(get("/map"), s, NOW)).text();
-  assert.match(html, /id="m-0"/);
-  assert.match(html, /1 report shown/);
+  assert.match(html, /1 relay, 0 stations reporting/);
+  const feed = JSON.parse(await (await handleRequest(get("/map-data"), s, NOW)).text());
+  assert.equal(feed.relays.length, 1);
+  assert.equal(feed.relays[0].callsign, "K1AAA");
 });
 
 test("POST /schedule: budget misses come back in unplaced, not as slots", async () => {

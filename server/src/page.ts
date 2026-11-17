@@ -7,7 +7,8 @@
 // also runs as plain JavaScript (the tests load it under Node 20).
 import { encodeBase64, radiusDegrees } from "./core.js";
 import { CSS } from "./web/styles.js";
-import { HOME_SCRIPT, MAP_SCRIPT } from "./web/script.js";
+import { HOME_SCRIPT } from "./web/script.js";
+import { LIVE_MAP_SCRIPT } from "./web/live-map.js";
 import { homeBody } from "./web/home.js";
 
 /**
@@ -249,7 +250,7 @@ const EMPTY_STATE = `<p>No relays or stations have reported in the last 48 hours
  * @param {string} script the inline script text for this page
  * @param {boolean} [wide] let the page use the full window width
  */
-function shell(title, description, current, body, script, wide = false) {
+function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "") {
   const homeCurrent = current === "home" ? ' aria-current="page"' : "";
   const mapCurrent = current === "map" ? ' aria-current="page"' : "";
   return `<!doctype html>
@@ -261,6 +262,7 @@ function shell(title, description, current, body, script, wide = false) {
 <meta name="color-scheme" content="light dark">
 <title>${esc(title)}</title>
 <style>${CSS}</style>
+${head}
 </head>
 <body data-page="${current}">
 <a class="skip" href="#main">Skip to content</a>
@@ -284,6 +286,7 @@ ${body}
 <p>KAHF is pre-release software for licensed amateur radio operators. Copyright (c) 2026 adswill.</p>
 </div>
 </footer>
+${beforeScript}
 <script>${script}</script>
 </body>
 </html>`;
@@ -307,56 +310,49 @@ export function renderHome() {
  * @param {string} generatedIso
  * @param {MapRelay[]} [relays]
  */
+/** Map library: pinned version, with its integrity hashes checked by the browser. */
+const MAPLIBRE = "https://unpkg.com/maplibre-gl@5.7.3/dist";
+const MAPLIBRE_CSS_SRI = "sha384-gNYNsUmuZqDYiT3gbirWTV5K7rt71RoveS/yXAaU09d4ZUmeDVTD3XoqB6uJAIFR";
+const MAPLIBRE_JS_SRI = "sha384-58glfsJ+cxARGnts6etFXqTluJx24YUgVY1WQxNLIfLkwT7yJfBORU1dKLD/YFTG";
+
+/** The live map page. The map is drawn by MapLibre; data comes from /map-data once a second. */
 export function renderMap(stations, generatedIso, relays = []) {
-  const nodes = buildNodes(stations, relays);
-  const relayCount = nodes.filter((n) => n.role === "relay").length;
-  const stationCount = nodes.length - relayCount;
-
-  const live = nodes.length === 0
-    ? `<div id="live" data-now="${esc(generatedIso)}"><div class="empty-state" id="map">${EMPTY_STATE}
-<p class="note">0 reports shown. Generated <time datetime="${esc(generatedIso)}">${esc(generatedIso)}</time>.</p></div></div>`
-    : `<div id="live" data-now="${esc(generatedIso)}">
-<div class="stage">
-<div>
-<div class="mapbox" id="map" tabindex="0" role="region" aria-label="Map area, scrolls sideways on small screens">${mapSvg(nodes, stations, generatedIso)}</div>
-<div class="legend"><span>Filled square: relay</span><span>Open square: station</span><span>Dashed circle: area, the station is somewhere inside</span></div>
-</div>
-<aside class="side">
-<div class="sidesec panels">
-${nodes.map((n) => panel(n, generatedIso)).join("\n")}
-<section class="panel empty" id="panel-empty" aria-label="Node details">
-<h2>No node selected</h2>
-<p class="note">Choose a square or a circle on the map, or a callsign in the list, to see its role, when it was last seen and what it shared about its position.</p>
-</section>
-</div>
-<div class="sidesec">
-<div class="filters js-only">
-<label>Role<select id="f-role"><option value="all">All</option><option value="relay">Relays</option><option value="station">Stations</option></select></label>
-<label>Last seen<select id="f-age"><option value="all">Any time</option><option value="1">Last hour</option><option value="6">Last 6 hours</option><option value="24">Last 24 hours</option></select></label>
-</div>
-<p class="count" id="count">${relayCount} relay${relayCount === 1 ? "" : "s"}, ${stationCount} station${stationCount === 1 ? "" : "s"}. ${nodes.length} report${nodes.length === 1 ? "" : "s"} shown. Reports older than 48 hours are removed.</p>
-</div>
-${nodeList(nodes, generatedIso)}
-</aside>
-</div>
-</div>`;
-
+  const reporters = new Set(stations.map((s) => s.reporter_call)).size;
+  const head = `<link rel="stylesheet" href="${MAPLIBRE}/maplibre-gl.css" integrity="${MAPLIBRE_CSS_SRI}" crossorigin="anonymous">`;
+  const beforeScript = `<script src="${MAPLIBRE}/maplibre-gl.js" integrity="${MAPLIBRE_JS_SRI}" crossorigin="anonymous"></script>`;
   const body = `
 <div class="wrap wide">
 <div class="maphead">
 <h1 id="map-t">Live map</h1>
-<p class="status" id="refresh-status" role="status"><span class="dot" aria-hidden="true"></span><span>Checks for new reports every 60 seconds while this page is open. Generated ${esc(generatedIso.replace(/\.\d+Z$/, "Z"))}.</span></p>
+<p class="status" id="refresh-status" role="status"><span class="dot" aria-hidden="true"></span><span>Connecting to the live feed.</span></p>
 </div>
-${live}
-<p class="note">Relays and stations that chose to be listed. The map has no coastlines or tiles; it shows degrees of latitude and longitude only.</p>
+<div class="livestage">
+<div class="livemap" id="map" role="region" aria-label="Map of relays and stations"><noscript>The live map needs JavaScript.</noscript></div>
+<aside class="liveside">
+<section class="panel" aria-live="polite" aria-label="Selected node">
+<h2>Selected</h2>
+<dl class="kv">
+<dt>Callsign</dt><dd id="p-call">None selected</dd>
+<dt>Role</dt><dd id="p-role">-</dd>
+<dt>Last seen</dt><dd id="p-seen">-</dd>
+<dt>Position</dt><dd id="p-loc">-</dd>
+</dl>
+<p class="note">Choose a point on the map to see its details.</p>
+</section>
+<p class="count" id="count">${relays.length} relay${relays.length === 1 ? "" : "s"}, ${reporters} station${reporters === 1 ? "" : "s"} reporting. Updated ${esc(generatedIso.replace(/\.\d+Z$/, "Z"))}.</p>
+<p class="note">Map tiles from OpenStreetMap contributors. Green circles are relays, dark circles are stations, grey circles are stations heard by others. A dashed ring marks a position given only as an area.</p>
+</aside>
+</div>
 </div>`;
   return shell(
     "KAHF live map",
-    "Relays and stations that opted in to the KAHF map, shown as a precise point or as a circle.",
+    "Relays and stations on the KAHF map, updated every second.",
     "map",
     body,
-    MAP_SCRIPT,
+    LIVE_MAP_SCRIPT,
     true,
+    head,
+    beforeScript,
   );
 }
 
@@ -380,7 +376,7 @@ async function cspHash(text) {
  * @returns {Promise<string>}
  */
 export function mapScriptSha256() {
-  return cspHash(MAP_SCRIPT);
+  return cspHash(LIVE_MAP_SCRIPT);
 }
 
 /**

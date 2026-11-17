@@ -39,9 +39,22 @@ import { homeScriptSha256, mapScriptSha256, renderHome, renderMap } from "./page
 const HOME_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/** Same as HOME_CSP, plus the one hashed inline script of the map. */
+/**
+ * The live map's policy: its one hashed inline script; MapLibre from unpkg (pinned,
+ * with integrity hashes on the tags); and OpenStreetMap raster tiles. Nothing else.
+ */
 function mapCsp(scriptSource) {
-  return HOME_CSP.replace("img-src", `script-src ${scriptSource}; img-src`);
+  return [
+    "default-src 'none'",
+    `script-src ${scriptSource} https://unpkg.com`,
+    "style-src 'unsafe-inline' https://unpkg.com",
+    "img-src 'self' data: blob: https://tile.openstreetmap.org",
+    "connect-src 'self' https://tile.openstreetmap.org",
+    "worker-src blob:",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
 }
 
 /**

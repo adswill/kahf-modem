@@ -106,26 +106,28 @@ test("HEAD / is allowed; POST / is refused with the allowed methods", async () =
   assert.match(post_.headers.get("content-type"), /application\/json/);
 });
 
-test("GET /map: the CSP hash matches the one inline script, and nothing else is allowed", async () => {
+test("GET /map: the CSP allows the one inline script by hash, and only the map's own hosts", async () => {
   const store = fakeStore();
   await store.put({ ...REPORT, public_key: "x", refreshed_at: NOW });
   const res = await handleRequest(get("/map"), store, NOW);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type"), /^text\/html/);
   const body = await text(res);
-  const scripts = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-  assert.equal(scripts.length, 1);
+  const inline = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.equal(inline.length, 1);
   const csp = res.headers.get("content-security-policy");
-  const hash = await sha256Base64(scripts[0][1]);
-  assert.ok(csp.includes(`script-src 'sha256-${hash}'`), `CSP should allow the script hash: ${csp}`);
-  assert.equal((csp.match(/script-src/g) || []).length, 1);
-  assert.doesNotMatch(csp, /https?:|'unsafe-inline'[^;]*script|'unsafe-eval'/);
+  const hash = await sha256Base64(inline[0][1]);
+  assert.ok(csp.includes(`'sha256-${hash}'`), `CSP should allow the script hash: ${csp}`);
+  assert.doesNotMatch(csp, /'unsafe-eval'|script-src[^;]*'unsafe-inline'|script-src[^;]*\*/);
+  assert.match(csp, /script-src [^;]*https:\/\/unpkg\.com/);
+  assert.match(csp, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
+  assert.match(csp, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
 });
 
 test("GET /map with no reports still answers with a valid page", async () => {
   const res = await handleRequest(get("/map"), fakeStore(), NOW);
   assert.equal(res.status, 200);
-  assert.match(await text(res), /No relays or stations have reported/);
+  assert.match(await text(res), /0 relays, 0 stations/);
 });
 
 // ---- stations and zones ----------------------------------------------------

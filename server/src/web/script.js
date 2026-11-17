@@ -4,7 +4,7 @@
 // (getJson), and builds no HTML strings.
 // Written with String.raw so the text that is hashed for the CSP is exactly the
 // text that is sent. Do not use backticks or dollar-brace in the parts below.
-const COMMON = String.raw`
+export const COMMON = String.raw`
   "use strict";
   var doc = document, root = doc.documentElement;
   root.classList.add("js");
@@ -313,7 +313,7 @@ const MAP = String.raw`
   }
 `;
 
-function wrap(parts) {
+export function wrap(parts) {
   return "\n(function () {\n  \"use strict\";\n" + parts + "})();";
 }
 

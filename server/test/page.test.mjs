@@ -53,51 +53,45 @@ test("home page has no emoji and no external URL", () => {
   assert.doesNotMatch(html, EXTERNAL);
 });
 
-test("map page has an SVG, the panels and one inline script", () => {
+const MAP_HOSTS = /^(https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)|https:\/\/tile\.openstreetmap\.org\/\{z\}\/\{x\}\/\{y\}\.png)$/;
+
+test("map page loads the pinned MapLibre with integrity hashes, and one inline script", () => {
   const html = renderMap(STATIONS, GENERATED);
-  assert.match(html, /<svg[ >]/);
-  assert.match(html, /class="panel card" id="r-0"/);
-  assert.match(html, /class="panel card" id="h-0"/);
-  assert.match(html, /data-panel="r-0"/);
+  assert.match(html, /<div class="livemap" id="map"/);
+  assert.match(html, /integrity="sha384-[A-Za-z0-9+/=]+" crossorigin="anonymous"/);
+  assert.match(html, /https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.js/);
   assert.equal((html.match(/<script>/g) || []).length, 1);
+  assert.doesNotMatch(html, /<svg[ >]/);
 });
 
-test("map panels list callsign, role, last seen, hops, and messages", () => {
+test("map page status line and selected-node panel are there for the script to fill", () => {
   const html = renderMap(STATIONS, GENERATED);
-  assert.match(html, /<h2 id="r-0-title">KA1RLY<\/h2>/);
-  assert.match(html, /<dt>Role<\/dt><dd>Relay<\/dd>/);
-  assert.match(html, /<dt>Role<\/dt><dd>Station<\/dd>/);
-  assert.match(html, /<dt>Last seen \(UTC\)<\/dt><dd>2026-11-17T11:55:00.000Z<\/dd>/);
-  assert.match(html, /<dt>Hops, last 24 hours<\/dt>/);
-  assert.match(html, /<dt>Messages sent today<\/dt>/);
-  assert.match(html, /<dt>Messages sent in total<\/dt>/);
+  assert.match(html, /id="refresh-status" role="status"/);
+  assert.match(html, /id="p-call"/);
+  assert.match(html, /id="p-loc"/);
+  assert.match(html, /id="count"/);
 });
 
-test("map page has no external script, stylesheet, font or map tile", () => {
-  assert.doesNotMatch(renderMap(STATIONS, GENERATED), EXTERNAL);
+test("map page only loads the map library and map tiles from outside", () => {
+  const html = renderMap(STATIONS, GENERATED);
+  const urls = html.match(/https?:\/\/[^\s"'<>)]+/g) || [];
+  assert.ok(urls.length > 0);
+  for (const u of urls) assert.match(u, MAP_HOSTS, `unexpected URL ${u}`);
+  assert.doesNotMatch(html, /<link\b(?![^>]*maplibre)/);
   assert.doesNotMatch(renderHome(), EXTERNAL);
-  assert.doesNotMatch(renderMap([], GENERATED), EXTERNAL);
 });
 
-test("area markers are dashed circles, precise ones are squares", () => {
-  const html = renderMap(STATIONS, GENERATED);
-  assert.match(html, /<ellipse class="area station"/);
-  assert.match(html, /<rect class="mk relay" x="[\d.]+" y="[\d.]+" width="10" height="10"\/>/);
-});
-
-test("callsigns from reports are escaped", () => {
+test("stored text never appears in the page; it travels as data", () => {
   const evil = [{ ...STATIONS[0], reporter_call: "<img src=x onerror=alert(1)>" }];
   const html = renderMap(evil, GENERATED);
   assert.doesNotMatch(html, /<img src=x/);
-  assert.match(html, /&lt;img src=x/);
+  assert.doesNotMatch(html, /alert\(1\)/);
 });
 
-test("empty map says so, says what to do and has no SVG", () => {
+test("empty map says zero reports and still shows the map", () => {
   const html = renderMap([], GENERATED);
-  assert.match(html, /No relays or stations have reported/);
-  assert.match(html, /location sharing/);
-  assert.doesNotMatch(html, /<svg/);
-  assert.match(html, /0 reports shown/);
+  assert.match(html, /<div class="livemap" id="map"/);
+  assert.match(html, /0 relays, 0 stations/);
 });
 
 test("renderPage is the map for callers that still use the old name", () => {

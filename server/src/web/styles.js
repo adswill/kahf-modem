@@ -155,4 +155,22 @@ figcaption { font: 12px/1.5 var(--mono); color: var(--muted); margin-top: 10px; 
   .dot { animation: none; }
   * { scroll-behavior: auto; transition: none; }
 }
+
+/* live map */
+.mk { position: relative; width: 14px; height: 14px; border: 2px solid var(--bg); padding: 0; margin: 0; cursor: pointer; border-radius: 0; }
+.mk.relay { background: #1f8a65; width: 16px; height: 16px; }
+.mk.station { background: var(--fg); }
+.mk.heard { background: var(--muted); }
+.mk:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.livestage { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
+.livemap { height: min(72vh, 680px); min-height: 420px; border: 1px solid var(--line); background: var(--fill); }
+.liveside { display: grid; gap: 12px; align-content: start; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-family: var(--mono); font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; word-break: break-all; }
+.maplibregl-ctrl-attrib { font-size: 11px; }
+@media (max-width: 860px) {
+  .livestage { grid-template-columns: 1fr; }
+  .livemap { min-height: 380px; height: 58vh; }
+}
 `;

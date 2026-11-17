@@ -1114,13 +1114,13 @@ for (const [label, age, live] of AGES) {
     h.advance(age);
     eq((await stationsOf(h, fields.reporter_call)).length, live ? 1 : 0, "records listed");
   }, { needs: ["clock"] });
-  S(G.exp, `record ${label} old: /map`, live ? "page shows the callsign" : "page does not show it", async (h) => {
+  S(G.exp, `record ${label} old: /map-data`, live ? "feed shows the callsign" : "feed does not show it", async (h) => {
     const { res, fields } = await report(h);
     status(res, 200);
     h.advance(age);
-    const m = await h.get("/map");
+    const m = await h.get("/map-data");
     status(m, 200);
-    eq(m.text.includes(`>${fields.reporter_call}<`), live, "callsign on the map");
+    eq(m.text.includes(`"${fields.reporter_call}"`), live, "callsign in the live feed");
   }, { needs: ["clock"] });
   S(G.exp, `record ${label} old: /zones`, live ? "busy channel still reported" : "not reported although heard_at is fresh", async (h) => {
     // heard_at is one minute before the check, so only the 48 h expiry decides.
@@ -1495,33 +1495,48 @@ S(G.page, "home page ignores query string content", "query not echoed", async (h
   status(r, 200);
   check(!r.text.includes("ZZZMARKERZZZ") && !r.text.includes("alert(1)"), "query echoed in home page");
 });
-S(G.page, "map page: one inline script, allowed only by its hash; no external URL", "exactly one <script>, CSP hash matches", async (h) => {
+const MAP_LIBRARY_RE = /^https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)$/;
+const MAP_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+S(G.page, "map page: MapLibre with integrity, one hashed inline script, only the map's own hosts", "two scripts (library, then the hashed inline one); CSP lists only the map hosts", async (h) => {
   status(await report(h).then((x) => x.res), 200);
   const r = await h.get("/map");
   status(r, 200);
-  const scripts = [...r.text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)];
-  eq(scripts.length, 1, "script elements");
-  check(!/<script[^>]*\bsrc\s*=/i.test(r.text), "script with src");
-  check(/^<script>/.test(scripts[0][0]), "script has attributes");
+  const all = [...r.text.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+  eq(all.length, 2, "script elements");
+  const lib = all[0][1];
+  const src = (lib.match(/\bsrc="([^"]+)"/) || [])[1] ?? "";
+  check(MAP_LIBRARY_RE.test(src), `library script is not the pinned MapLibre 5.7.3 from unpkg: ${src}`);
+  check(/integrity="sha384-[A-Za-z0-9+/=]+"/.test(lib) && /crossorigin="anonymous"/.test(lib), "library script lacks integrity or crossorigin");
+  const inline = all[1];
+  check(!/\bsrc\s*=/i.test(inline[1]), "inline script has a src");
   const csp = r.headers.get("content-security-policy") ?? "";
-  const hash = await sha256B64(scripts[0][1]);
-  check(csp.includes(`script-src 'sha256-${hash}'`), `CSP does not carry the script's hash (${hash}): ${csp}`);
-  eq((csp.match(/script-src/g) || []).length, 1, "script-src directives");
-  check(!/unsafe-eval|script-src[^;]*unsafe-inline|script-src[^;]*\*|https?:|data:/.test(csp.replace(/style-src[^;]*;?/, "")), `CSP too loose: ${csp}`);
-  for (const d of ["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) check(csp.includes(d), `CSP lacks ${d}`);
-  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, ""), "map");
-  scriptCalls(scripts[0][1], "map");
-  check(!/http-equiv\s*=\s*["\']?refresh/i.test(r.text), "meta refresh");
+  const hash = await sha256B64(inline[2]);
+  check(csp.includes(`'sha256-${hash}'`), `CSP does not carry the inline script's hash (${hash}): ${csp}`);
+  check(csp.includes("https://unpkg.com"), "CSP does not allow the library host");
+  check(!/unsafe-eval|script-src[^;]*unsafe-inline|script-src[^;]*\*/.test(csp), `CSP too loose: ${csp}`);
+  check(/default-src 'none'/.test(csp), "CSP lacks default-src 'none'");
+  for (const d of ["frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) check(csp.includes(d), `CSP lacks ${d}`);
+  // every URL in the page is one of the map's own
+  const urls = [...(r.text.match(/https?:\/\/[^\s"'<>)]+/g) || [])];
+  for (const u of urls) check(MAP_LIBRARY_RE.test(u) || u === MAP_TILE_URL || u.startsWith("https://kahf.dev") || u.startsWith("https://www.kahf.dev") || u.startsWith("https://github.com/adswill/"), `map page contains an unexpected URL: ${u}`);
+  // our script: one fetch, to /map-data, and the one tile URL
+  const js = inline[2];
+  const fetches = js.match(/\bfetch\(/g) || [];
+  eq(fetches.length, 2, "fetch calls: the shared helper and the live poll");
+  check(/window\.fetch\("\/map-data"/.test(js), "live script does not fetch /map-data");
+  check(!/XMLHttpRequest|eval\(|new Function|document\.write|innerHTML|WebSocket|sendBeacon|import\(|http-equiv/i.test(js), "live script uses a forbidden API");
+  check(!/https?:\/\//.test(js.replace(MAP_TILE_URL, "")), "live script contains a URL other than the tile URL");
+  check(!/<meta[^>]+http-equiv/i.test(r.text) && !/http-equiv\s*=\s*["']?refresh/i.test(r.text), "meta refresh");
   eq(r.headers.get("referrer-policy"), "no-referrer", "referrer-policy");
 });
-S(G.page, "map page with no stations", "200 valid page with at most one script", async (h) => {
+S(G.page, "map page with no stations", "200 valid page with at most two scripts", async (h) => {
   const r = await h.get("/map");
   status(r, 200);
-  check([...r.text.matchAll(/<script\b/gi)].length <= 1, "more than one script");
+  check([...r.text.matchAll(/<script\b/gi)].length <= 2, "more than two scripts");
   check(/default-src 'none'/.test(r.headers.get("content-security-policy") ?? ""), "CSP");
 });
 for (const [i, evil] of HOSTILE.entries()) {
-  S(G.page, `hostile string #${i + 1} ${snip(evil, 30)} in stored fields (callsigns, mode, times), via the store`, "/map escapes every one; still one script", async (h) => {
+  S(G.page, `hostile string #${i + 1} ${snip(evil, 30)} in stored fields (callsigns, mode, times), via the store`, "/map carries no stored text; two scripts", async (h) => {
     const k = await h.key();
     const f = reportFields(h);
     await h.seedRecord({
@@ -1531,29 +1546,26 @@ for (const [i, evil] of HOSTILE.entries()) {
     });
     const r = await h.get("/map");
     status(r, 200);
-    const stripped = r.text.replace(/<script>[\s\S]*?<\/script>/, "");
-    eq([...r.text.matchAll(/<script\b/gi)].length, 1, "script elements");
+    const stripped = r.text.replace(/<script\b[\s\S]*?<\/script>/gi, "");
+    eq([...r.text.matchAll(/<script\b/gi)].length, 2, "script elements");
     for (const marker of ["<script>alert", "<img src=x", "<svg onload", "</title><script", "</section><script", "<!--"]) {
       if (evil.includes(marker)) check(!r.text.includes(marker), `raw ${marker} in map HTML`);
     }
-    if (evil.includes("<") || evil.includes('"') || evil.includes("'")) {
-      check(!stripped.includes(evil), `raw hostile string appears in map HTML: ${snip(evil, 40)}`);
-      const esc = evil.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-      check(stripped.includes(esc), `escaped form not found in map HTML: ${snip(esc, 40)}`);
-    }
-    noExternal(stripped, "map with hostile data");
+    check(!stripped.includes(evil), `stored text appears in map HTML: ${snip(evil, 40)}`);
+    check(!/\son[a-z]+\s*=/i.test(stripped), "map with hostile data has an inline event handler");
     const st = await h.get("/stations");
     status(st, 200);
     check(/^application\/json/.test(st.contentType) && st.headers.get("x-content-type-options") === "nosniff", "stations JSON must be JSON with nosniff");
   }, { needs: ["seed"] });
 }
-S(G.page, "legal radio-mode and callsign characters appear on the map exactly and safely", "mode 'A+B/C.D_E-F G' and call with /P visible", async (h) => {
+S(G.page, "legal radio-mode and callsign characters appear in the live feed exactly", "mode 'A+B/C.D_E-F G' and call with /P in /map-data", async (h) => {
   const call = h.call() + "/P";
   const { res } = await report(h, { reporter_call: call, mode: "A+B/C.D_E-F G" });
   status(res, 200);
-  const m = await h.get("/map");
+  const m = await h.get("/map-data");
   status(m, 200);
-  check(m.text.includes(call) && m.text.includes("A+B/C.D_E-F G"), "values not shown as sent");
+  const feed = JSON.parse(m.text);
+  check(feed.stations.some((x) => x.reporter_call === call && x.mode === "A+B/C.D_E-F G"), "values not in the feed as sent");
   const s = (await stationsOf(h, call))[0];
   eq(s.mode, "A+B/C.D_E-F G", "stored mode");
 });
@@ -1567,12 +1579,14 @@ S(G.page, "map with 300 stations", "200, one script, no NaN/Infinity, every href
       public_key: k.publicKey, refreshed_at: h.now(),
     });
   }
-  const r = await h.get("/map");
+  const page = await h.get("/map");
+  status(page, 200);
+  eq([...page.text.matchAll(/<script\b/gi)].length, 2, "scripts");
+  const r = await h.get("/map-data");
   status(r, 200);
-  eq([...r.text.matchAll(/<script\b/gi)].length, 1, "scripts");
-  check(!/NaN|Infinity|undefined/.test(r.text.replace(/<script>[\s\S]*?<\/script>/, "")), "NaN/Infinity/undefined in page");
-  check(r.text.length < 3_000_000, `page is ${r.text.length} bytes`);
-  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, ""), "map");
+  check(!/NaN|Infinity|undefined/.test(r.text), "NaN/Infinity/undefined in the feed");
+  check(r.text.length < 3_000_000, `feed is ${r.text.length} bytes`);
+  eq(JSON.parse(r.text).stations.length, 300, "stations in the feed");
 }, { needs: ["seed"] });
 S(G.page, "map and stations at the poles and the antimeridian", "no NaN, no negative radius, ellipse sizes finite", async (h) => {
   const k = await h.key();
@@ -1584,11 +1598,15 @@ S(G.page, "map and stations at the poles and the antimeridian", "no NaN, no nega
       public_key: k.publicKey, refreshed_at: h.now(),
     });
   }
-  const r = await h.get("/map");
+  const r = await h.get("/map-data");
   status(r, 200);
-  const body = r.text.replace(/<script>[\s\S]*?<\/script>/, "");
-  check(!/NaN|Infinity|undefined/.test(body), "NaN/Infinity/undefined in page");
-  for (const m of body.matchAll(/\b(rx|ry)="(-?[\d.]+)"/g)) check(Number(m[2]) >= 0 && Number.isFinite(Number(m[2])), `bad ${m[1]}=${m[2]}`);
+  check(!/NaN|Infinity|undefined/.test(r.text), "NaN/Infinity/undefined in the feed");
+  const feed = JSON.parse(r.text);
+  const points = [...feed.stations.map((x) => x.reporter_location), ...feed.stations.map((x) => x.heard_location)].filter(Boolean);
+  for (const loc of points) {
+    check(Math.abs(loc.latitude) <= 90 && Math.abs(loc.longitude) <= 180, `out of range: ${loc.latitude},${loc.longitude}`);
+    if (loc.radius_km !== undefined) check(loc.radius_km >= 0 && Number.isFinite(loc.radius_km), `bad radius ${loc.radius_km}`);
+  }
 }, { needs: ["seed"] });
 S(G.page, "/stations never exposes public keys or signatures", "no key material in the JSON", async (h) => {
   const { res, body } = await report(h);

@@ -16,7 +16,8 @@ export async function load(url, context, nextLoad) {
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOK));
 const { renderHome, renderMap, mapScriptSha256, homeScriptSha256 } = await import("../src/page.ts");
-const { HOME_SCRIPT, MAP_SCRIPT } = await import("../src/web/script.js");
+const { HOME_SCRIPT } = await import("../src/web/script.js");
+const { LIVE_MAP_SCRIPT: MAP_SCRIPT } = await import("../src/web/live-map.js");
 const { CSS } = await import("../src/web/styles.js");
 const { handleRequest } = await import("../src/routes.js");
 const { fakeStore } = await import("../tools/fake-store.mjs");
@@ -98,69 +99,61 @@ test("system fonts only, a serif display face and a mono face for data", () => {
   assert.match(CSS, /--mono: ui-monospace/);
 });
 
-test("the map: no tiles, squares for points, dashed circles for areas without a centre mark", () => {
+const MAP_LIB = /https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)/;
+const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+test("the map is MapLibre with OpenStreetMap raster tiles and the pinned library", () => {
   const html = renderMap([STATION], NOW, [RELAY]);
-  assert.match(html, /<rect class="mk relay" x="[\d.]+" y="[\d.]+" width="10" height="10"\/>/);
-  assert.match(html, /<ellipse class="area station"/);
-  assert.match(html, /<ellipse class="area relay"/);
-  assert.doesNotMatch(html, /<circle/);
-  assert.match(CSS, /stroke-dasharray/);
-  assert.match(html, /25\.2048, 55\.2708/);
-  assert.doesNotMatch(html, /24\.4539|54\.3773/);
-  assert.match(html, /class="side"/);
-  assert.match(html, /id="f-role"/);
-  assert.match(html, /id="f-age"/);
-  assert.match(html, /class="list"/);
+  assert.match(html, MAP_LIB);
+  assert.match(MAP_SCRIPT, /maplibregl/);
+  assert.ok(MAP_SCRIPT.includes(TILES));
+  assert.match(MAP_SCRIPT, /attribution: "© OpenStreetMap contributors"/);
+  assert.match(html, /<div class="livemap" id="map"/);
 });
 
-test("map handles an empty /map-data: empty state with a next step", () => {
-  const html = renderMap([], NOW, []);
-  assert.match(html, /No relays or stations have reported in the last 48 hours/);
-  assert.match(html, /turns on location sharing/);
-  assert.doesNotMatch(html, /<svg/);
-  assert.match(html, /0 reports shown/);
+test("the map polls /map-data once a second and only sets data when it changed", () => {
+  assert.doesNotThrow(() => new vm.Script(MAP_SCRIPT));
+  assert.match(MAP_SCRIPT, /var POLL_MS = 1000;/);
+  assert.match(MAP_SCRIPT, /window\.setInterval\(poll, POLL_MS\)/);
+  assert.match(MAP_SCRIPT, /window\.fetch\("\/map-data", \{ cache: "no-store", credentials: "omit"/);
+  assert.match(MAP_SCRIPT, /if \(text !== lastBody\)/);
+  assert.match(MAP_SCRIPT, /syncMarkers\(\);/);
+  assert.doesNotMatch(MAP_SCRIPT, /location\.reload|setInterval\(refresh, 60000\)/);
+  assert.doesNotMatch(MAP_SCRIPT, /\beval\(|new Function|document\.write|sendBeacon|WebSocket|XMLHttpRequest|innerHTML/);
+});
+
+test("the map draws precise stations as points and area positions as dashed circles", () => {
+  assert.match(MAP_SCRIPT, /function ring\(lat, lon, km\)/);
+  assert.match(MAP_SCRIPT, /id: "area-line"/);
+  assert.match(MAP_SCRIPT, /"line-dasharray": \[3, 2\]/);
+  assert.match(MAP_SCRIPT, /new window\.maplibregl\.Marker\(\{ element: el, anchor: "center" \}\)/);
+  assert.match(MAP_SCRIPT, /el\.className = "mk " \+ p\.role/);
+});
+
+test("the map script makes only the feed fetch and loads only the tiles it names", () => {
+  const fetches = MAP_SCRIPT.match(/\bfetch\(/g) || [];
+  assert.equal(fetches.length, 2, "the shared helper and the live poll");
+  const urls = MAP_SCRIPT.match(/https?:\/\/[^\s"'`)]+/g) || [];
+  assert.deepEqual([...new Set(urls)], [TILES]);
+});
+
+test("the map page has its status line, the selected-node panel and the count", () => {
+  const html = renderMap([STATION], NOW, [RELAY]);
   assert.match(html, /id="refresh-status" role="status"/);
+  assert.match(html, /id="p-call"/);
+  assert.match(html, /id="count"/);
 });
 
-test("map panel says 'Not available yet' for numbers the API does not give, never zero", () => {
-  const html = renderMap([STATION], NOW, []);
-  const panel = html.match(/<section class="panel card" id="r-0"[\s\S]*?<\/section>/)[0];
-  assert.match(panel, /Hops, last 24 hours<\/dt><dd><span class="na">Not available yet/);
-  assert.match(panel, /Messages sent today<\/dt><dd><span class="na">Not available yet/);
-  assert.match(panel, /Messages sent in total<\/dt><dd><span class="na">Not available yet/);
-  assert.match(panel, /Role<\/dt><dd>Relay/);
-  assert.match(panel, /Last seen \(UTC\)<\/dt><dd>2026-11-17T11:55:00.000Z/);
-  assert.match(html, /id="panel-empty"/);
-  assert.match(html, /No node selected/);
-});
-
-test("a relay seen in several reports is one node", () => {
-  const second = { ...STATION, heard_call: "A63XYZ", heard_location: { ...AREA, latitude: 25.9 } };
-  const html = renderMap([STATION, second], NOW, []);
-  assert.equal((html.match(/data-row="/g) || []).length, 3);
-});
-
-test("a registered relay that also reported is not listed twice", () => {
-  const html = renderMap([STATION], NOW, [{ ...RELAY, callsign: "A61RLY" }]);
-  assert.equal((html.match(/<span class="cs">A61RLY<\/span>/g) || []).length, 1);
-});
-
-test("hostile callsigns never reach an attribute", () => {
-  const evil = { ...STATION, reporter_call: '"><img src=x onerror=alert(1)>' };
-  const html = renderMap([evil], NOW, []).replace(/<script>[\s\S]*?<\/script>/, "");
-  assert.doesNotMatch(html, /<img src=x/);
-  assert.doesNotMatch(html, /<[a-z][^>]*\son[a-z]+\s*=/i);
-});
-
-test("no external URL anywhere, and the only image is /operate.png", () => {
+test("no external URL except the map library and its tiles, and the only image is /operate.png", () => {
   const pages = [renderHome(), renderMap([STATION], NOW, [RELAY]), renderMap([], NOW, [])];
   for (const html of pages) {
-    assert.doesNotMatch(html.replace(/<script>[\s\S]*?<\/script>/, ""), EXTERNAL);
+    const allowed = /^(https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)|https:\/\/tile\.openstreetmap\.org\/\{z\}\/\{x\}\/\{y\}\.png)$/;
+    for (const u of html.match(/https?:\/\/[^\s"'<>)]+/g) || []) assert.match(u, allowed, u);
     assert.doesNotMatch(html, /<(?:iframe|object|embed|base|form|audio|video|source)\b/i);
     assert.doesNotMatch(html, /<meta[^>]+http-equiv/i);
     for (const m of html.matchAll(/<img\b[^>]*>/g)) assert.match(m[0], /src="\/operate\.png"/);
   }
-  for (const js of [HOME_SCRIPT, MAP_SCRIPT]) assert.doesNotMatch(js, /https?:\/\//);
+  assert.doesNotMatch(HOME_SCRIPT, /https?:\/\//);
 });
 
 test("the strict CSP is still applied to both pages and the image", async () => {
@@ -173,18 +166,18 @@ test("the strict CSP is still applied to both pages and the image", async () => 
     assert.match(csp, /form-action 'none'/);
     assert.match(csp, /frame-ancestors 'none'/);
     assert.match(csp, /style-src 'unsafe-inline'/);
-    assert.equal((csp.match(/script-src/g) || []).length, 1);
-    assert.doesNotMatch(csp, /https?:|\*|'unsafe-eval'|script-src[^;]*unsafe-inline/);
+    assert.doesNotMatch(csp, /'unsafe-eval'|script-src[^;]*'unsafe-inline'|script-src[^;]*\*/);
   }
   assert.match(home, /img-src 'self'/);
   assert.match(home, /connect-src 'self'/);
-  assert.match(map, /img-src 'none'/);
-  assert.doesNotMatch(map, /connect-src 'none'; |img-src 'self'/);
+  assert.match(map, /script-src 'sha256-[^']+' https:\/\/unpkg\.com/);
+  assert.match(map, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
+  assert.match(map, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
   assert.ok(home.includes(`script-src ${await homeScriptSha256()}`));
   assert.ok(map.includes(`script-src ${await mapScriptSha256()}`));
 });
 
-test("each page carries exactly one inline script, and its hash is available", async () => {
+test("the home page has one inline script; the map has its library and one inline script", async () => {
   const home = renderHome();
   const map = renderMap([STATION], NOW, []);
   assert.equal(scriptsOf(home).length, 1);
@@ -193,17 +186,6 @@ test("each page carries exactly one inline script, and its hash is available", a
   assert.equal(scriptsOf(map)[0], MAP_SCRIPT);
   assert.match(await homeScriptSha256(), /^'sha256-[A-Za-z0-9+/=]+'$/);
   assert.notEqual(await homeScriptSha256(), await mapScriptSha256());
-});
-
-test("the map script makes a single fetch, to /map-data, every 60 seconds", () => {
-  assert.doesNotThrow(() => new vm.Script(MAP_SCRIPT));
-  assert.equal((MAP_SCRIPT.match(/\bfetch\(/g) || []).length, 1);
-  assert.match(MAP_SCRIPT, /window\.fetch\(url, \{.{0,120}credentials: "omit"/);
-  assert.deepEqual([...MAP_SCRIPT.matchAll(/getJson\("([^"]+)"\)/g)].map((m) => m[1]), ["/map-data"]);
-  assert.match(MAP_SCRIPT, /setInterval\(refresh, 60000\)/);
-  assert.match(MAP_SCRIPT, /Could not refresh the map/);
-  assert.doesNotMatch(MAP_SCRIPT, /location\.reload/);
-  assert.doesNotMatch(MAP_SCRIPT, /\beval\(|new Function|document\.write|sendBeacon|WebSocket|XMLHttpRequest|innerHTML/);
 });
 
 test("the home script adds a downloads section only when /release reports a version", () => {
