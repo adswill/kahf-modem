@@ -11,7 +11,7 @@ use crate::sample::{self, Chat, FileRow, FileState, Hop, Kind as MsgKind, Mail};
 use crate::spectrum::{self, SpectrumPlot, WaterfallMarker};
 use crate::strings as s;
 use crate::theme::{self, Kind};
-use crate::view::{btn, chip, freq_readout, hline, label_caps, muted, num, small, tip, vline, El};
+use crate::view::{btn, chip, freq_readout, hline, label_caps, muted, num, small, strip, tip, vline, El};
 
 /// Payload bytes carried by one frame.
 pub const FRAME_BYTES: u32 = 48;
@@ -188,7 +188,7 @@ pub fn message_bursts(chat: &Chat, hops: &[Hop]) -> Vec<Burst> {
 // ------------------------------------------------------------ small widgets
 
 fn kv_inline<'a>(label: &'static str, value: String) -> El<'a> {
-    column![label_caps(label), num(value).size(13)].spacing(2).into()
+    column![label_caps(label), num(value).size(12)].spacing(2).into()
 }
 
 fn dcell<'a>(content: impl Into<String>, w: Length, color: Option<Color>) -> El<'a> {
@@ -204,7 +204,7 @@ fn dheader<'a>(cols: &[(&str, Length)]) -> El<'a> {
     for (label, w) in cols {
         r = r.push(label_caps(label).size(10).width(*w));
     }
-    container(r).padding([4, 8]).width(Fill).style(theme::header_row).into()
+    container(r).padding([2, 6]).width(Fill).style(theme::header_row).into()
 }
 
 fn drow<'a>(cells: Vec<El<'a>>) -> El<'a> {
@@ -349,10 +349,10 @@ impl App {
 
     fn nearest_channel(&self) -> String {
         let hz = self.tuned_hz();
-        spectrum::MARKS
-            .iter()
+        spectrum::channels()
+            .into_iter()
             .min_by(|a, b| (a.0 - hz).abs().total_cmp(&(b.0 - hz).abs()))
-            .map(|(_, n)| n.to_string())
+            .map(|(_, n)| format!("Ch {n}"))
             .unwrap_or_default()
     }
 
@@ -410,56 +410,43 @@ impl App {
         col.into()
     }
 
-    fn monitor_line(&self) -> El<'_> {
-        let (rx_frames, rx_on) = self.rx_burst();
-        let (tx_sent, tx_total, tx_on) = self.tx_burst();
-        let rx = if rx_on {
-            format!("RX  {rx_frames} frames  {} bytes", rx_frames * FRAME_BYTES)
-        } else {
-            "RX  idle".to_string()
-        };
-        let tx = if tx_on {
-            format!("TX  {tx_sent} of {tx_total} frames  {} bytes", tx_sent * FRAME_BYTES)
-        } else if self.listen_only {
-            "TX  blocked".to_string()
-        } else {
-            "TX  ready".to_string()
-        };
-        row![
-            num(rx).size(12).color(if rx_on { theme::ACCENT } else { theme::MUTED }),
-            num(tx).size(12).color(if tx_on { theme::DANGER } else { theme::MUTED }),
-            num(format!("Channel {}", self.nearest_channel())).size(12),
-            num(format!("SNR {:.0} dB", self.snr_now())).size(12),
-            num(format!("Level {:.0} dBFS", self.sim.peak_db)).size(12),
-        ]
-        .spacing(24)
-        .into()
-    }
-
-    /// The band shown on every screen: frequency, spectrum and waterfall, transmit and receive monitor.
+    /// The band shown on every screen: frequency and level, spectrum and waterfall, monitor.
+    /// Collapses to the single header row.
     pub fn tech_band(&self) -> El<'_> {
         let full = self.section == Section::Operate;
-        let offset = self.tuned_hz() - spectrum::CENTRE_HZ;
+        let offset = self.tuned_hz() - spectrum::centre_hz();
         let header = row![
-            freq_readout(self.tuned_hz(), if full { 30.0 } else { 22.0 }),
-            kv_inline(s::BAND_LABEL, s::BAND_VALUE.to_string()),
+            freq_readout(self.tuned_hz(), 30.0),
+            column![
+                label_caps(s::INPUT_LEVEL_SHORT),
+                canvas(LevelBar { level: self.level_now, peak: self.level_peak }).width(110).height(12),
+                num(format!("{:.0} dBFS", self.sim.peak_db)).size(11).color(theme::MUTED),
+            ]
+            .spacing(2),
+            column![
+                label_caps(s::BAND_LABEL),
+                iced::widget::pick_list(spectrum::Band::ALL, Some(self.band), Message::BandChosen).style(theme::dropdown),
+            ]
+            .spacing(2),
+            kv_inline(s::SEGMENT_LABEL, spectrum::segment_text(self.tuned_hz())),
             kv_inline(s::MODE_LABEL, s::MODE_VALUE.to_string()),
             kv_inline(s::WIDTH_LABEL, format!("{:.1} kHz", spectrum::BANDWIDTH_HZ / 1000.0)),
             kv_inline(s::OFFSET_LABEL, format!("{offset:+.0} Hz")),
             kv_inline("Span", format!("{:.0} kHz", spectrum::SPAN_HZ / 1000.0)),
             space().width(Fill),
-            tip(chip(s::SIMULATED_INPUT, theme::WARNING), s::SIMULATED_HINT),
+            tip(chip(s::SIMULATED_INPUT, theme::AMBER), s::SIMULATED_HINT),
             tip(
                 btn(if self.band_open { "Hide spectrum" } else { "Show spectrum" }, Kind::Secondary)
                     .on_press(Message::ToggleBand),
                 "Collapse or expand the spectrum and waterfall. The choice is remembered.",
             ),
         ]
-        .spacing(22)
+        .spacing(18)
         .align_y(iced::Center);
 
-        let body: El<'_> = if self.band_open {
-            let (sh, wh) = if full { (150.0, 112.0) } else { (78.0, 58.0) };
+        let mut out = column![container(header).padding([3, 8])];
+        if self.band_open {
+            let (sh, wh) = if full { (170.0, 120.0) } else { (78.0, 58.0) };
             let plot = canvas(SpectrumPlot {
                 data: &self.bins,
                 peak_bin: self.sim.peak_bin,
@@ -472,35 +459,30 @@ impl App {
                 image(self.wf_handle.clone()).width(Fill).height(wh).content_fit(ContentFit::Fill),
                 canvas(WaterfallMarker { tune: self.tune, scale: full }).width(Fill).height(wh),
             ];
-            let mut monitor = column![self.monitor_table()].spacing(6);
+            let mut monitor = column![strip(s::MONITOR_HEADING), self.monitor_table()].spacing(0);
             if full {
+                monitor = monitor.push(strip(s::SNR_HISTORY_HEADING));
                 monitor = monitor.push(
                     container(
                         column![
-                            row![label_caps("SNR, last 60 s"), space().width(Fill), num(format!("{:.0} dB", self.snr_now())).size(12)],
+                            row![space().width(Fill), num(format!("{:.0} dB", self.snr_now())).size(12)],
                             canvas(Sparkline { data: &self.snr_hist }).width(Fill).height(34),
-                            canvas(LevelBar { level: self.level_now, peak: self.level_peak }).width(Fill).height(8),
                         ]
-                        .spacing(4),
+                        .spacing(2),
                     )
-                    .padding([0, 8]),
+                    .padding(6),
                 );
             }
-            row![
-                column![plot, waterfall].spacing(1).width(Fill),
-                vline(),
-                container(monitor).width(340),
-            ]
-            .height(Length::Shrink)
-            .into()
-        } else {
-            self.monitor_line()
-        };
-
-        container(column![container(header).padding([6, 12]), hline(), container(body).padding(if self.band_open { 0 } else { 6 })])
-            .width(Fill)
-            .style(theme::bar)
-            .into()
+            out = out.push(hline()).push(
+                row![
+                    column![plot, hline(), waterfall].width(Fill),
+                    vline(),
+                    container(monitor).width(300),
+                ]
+                .height(Length::Shrink),
+            );
+        }
+        container(out).width(Fill).style(theme::bar).into()
     }
 
     // ----------------------------------------------------------- side panels
@@ -613,7 +595,10 @@ impl App {
             FileState::Cancelled => "Cancelled",
             FileState::Waiting => "Waiting",
         };
-        let mut items = vec![section("File", kv("Name", f.name.clone(), None))];
+        let mut items = vec![section(
+            "File",
+            column![kv("Name", f.name.clone(), None), kv("To", if f.to.is_empty() { "-".to_string() } else { f.to.clone() }, None)],
+        )];
         items.extend(transfer_panel(&tr, state));
         side_panel("Technical detail", Column::with_children(items))
     }
@@ -645,13 +630,33 @@ mod shots {
             (Section::Mail, "mail"),
             (Section::Files, "files"),
             (Section::Map, "map"),
+            (Section::Settings, "settings"),
+            (Section::Operate, "setup"),
+            (Section::Operate, "relay-start"),
+            (Section::Operate, "bandplan"),
+            (Section::Operate, "bandplan-in"),
+            (Section::Operate, "20m"),
         ] {
             let mut app = App::init();
             app.section = sec;
+            let _ = app.update(crate::app::Message::ShowSample(true));
+            app.setup_open = name == "setup";
+            if name == "20m" {
+                let _ = app.update(crate::app::Message::BandChosen(crate::spectrum::Band::M20));
+            }
+            if name == "bandplan" {
+                app.tune = 0.93;
+            }
+            if name == "relay-start" {
+                let _ = app.update(crate::app::Message::RoleChosen(crate::app::Role::Relay));
+                app.modal_alpha = 1.0;
+            }
+            app.attach_open = name == "operate";
             let settings = iced::Settings { default_font: crate::theme::UI_FONT, ..Default::default() };
             let mut sim = iced_test::Simulator::with_size(settings, iced::Size::new(1512.0, 940.0), app.view());
             let snap = sim.snapshot(&app.theme()).unwrap();
             let path = dir.join(format!("{name}.png"));
+            let _ = std::fs::remove_file(dir.join(format!("{name}-tiny-skia.png")));
             let _ = std::fs::remove_file(&path);
             snap.matches_image(&path).unwrap();
         }

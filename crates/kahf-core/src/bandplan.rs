@@ -300,6 +300,66 @@ pub fn check(freq_hz: u64, region: Region) -> Check {
     }
 }
 
+/// Width of one KAHF channel in Hz (the 2.7 kHz channel grid in select.rs).
+pub const KAHF_CHANNEL_WIDTH_HZ: u64 = 2_700;
+
+/// A sub-segment of the band plan where KAHF channels may sit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    pub name: &'static str,
+    pub lower_hz: u64,
+    pub upper_hz: u64,
+}
+
+/// Segments KAHF uses by default, IARU Region 1, ascending order.
+///
+/// SOURCE NOTE: these values come from the 2002-era IARU Region 1 band plan text.
+/// The owner must confirm them against the current IARU Region 1 document before release.
+///
+/// Left out on purpose:
+/// - 14.070 to 14.100 MHz (digital beacons) and 14.230 MHz (SSTV and FAX calling).
+/// - 30 m: its only digital segment is 500 Hz wide, too narrow for KAHF's 2.4 kHz signal.
+pub static KAHF_SEGMENTS: &[Segment] = &[
+    Segment {
+        name: "40 m, 7.040 to 7.045 MHz",
+        lower_hz: 7_040_000,
+        upper_hz: 7_045_000,
+    },
+    Segment {
+        name: "20 m, 14.101 to 14.112 MHz",
+        lower_hz: 14_101_000,
+        upper_hz: 14_112_000,
+    },
+];
+
+/// Name of the KAHF segment that holds the whole channel, or `None`.
+///
+/// The channel is `centre_hz` plus or minus half of `width_hz`. Both edges must lie inside
+/// the same segment, inclusive. Region 1 only. Never blocks anything: callers decide.
+pub fn allowed_segment(centre_hz: u64, width_hz: u64) -> Option<&'static str> {
+    let half = width_hz / 2;
+    let lo = centre_hz.checked_sub(half)?;
+    let hi = centre_hz.checked_add(width_hz - half)?;
+    KAHF_SEGMENTS
+        .iter()
+        .find(|s| lo >= s.lower_hz && hi <= s.upper_hz)
+        .map(|s| s.name)
+}
+
+/// Plain English warning for a tuning outside the planned segments, or `None` when it is inside.
+///
+/// This is a warning only. Transmit is never refused for band or licence reasons.
+pub fn tuning_warning(centre_hz: u64, width_hz: u64) -> Option<String> {
+    match allowed_segment(centre_hz, width_hz) {
+        Some(_) => None,
+        None => Some(
+            "This tuning is outside the planned KAHF segments (14.101 to 14.112 MHz and \
+             7.040 to 7.045 MHz). Check the band plan before you transmit."
+                .to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +423,60 @@ mod tests {
     fn six_metre_region1_stops_at_52_mhz() {
         assert_eq!(check(52_500_000, Region::Region1), Check::OutOfBand);
         assert_eq!(check(52_500_000, Region::Region2), Check::InBand { band: "6m" });
+    }
+
+    const N20: &str = "20 m, 14.101 to 14.112 MHz";
+    const N40: &str = "40 m, 7.040 to 7.045 MHz";
+
+    #[test]
+    fn segment_20m_lower_edge_inclusive() {
+        // Centre 14_102_350 with 2.7 kHz width: lower edge is exactly 14_101_000.
+        assert_eq!(allowed_segment(14_102_350, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
+        assert_eq!(allowed_segment(14_102_349, KAHF_CHANNEL_WIDTH_HZ), None);
+    }
+
+    #[test]
+    fn segment_20m_upper_edge_inclusive() {
+        // Centre 14_110_650: upper edge is exactly 14_112_000.
+        assert_eq!(allowed_segment(14_110_650, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
+        assert_eq!(allowed_segment(14_110_651, KAHF_CHANNEL_WIDTH_HZ), None);
+    }
+
+    #[test]
+    fn segment_40m_edges() {
+        assert_eq!(allowed_segment(7_041_350, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
+        assert_eq!(allowed_segment(7_041_349, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(allowed_segment(7_043_650, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
+        assert_eq!(allowed_segment(7_043_651, KAHF_CHANNEL_WIDTH_HZ), None);
+    }
+
+    #[test]
+    fn channel_must_fit_fully_not_just_its_centre() {
+        // Centre inside 20 m but the lower half of the channel is below 14.101 MHz.
+        assert_eq!(allowed_segment(14_101_500, KAHF_CHANNEL_WIDTH_HZ), None);
+        // Centre inside the segment, width larger than the segment is not allowed.
+        assert_eq!(allowed_segment(14_106_000, 12_000), None);
+    }
+
+    #[test]
+    fn beacons_sstv_and_30m_are_not_allowed() {
+        assert_eq!(allowed_segment(14_085_000, KAHF_CHANNEL_WIDTH_HZ), None); // beacons
+        assert_eq!(allowed_segment(14_230_000, KAHF_CHANNEL_WIDTH_HZ), None); // SSTV and FAX
+        assert_eq!(allowed_segment(10_120_000, KAHF_CHANNEL_WIDTH_HZ), None); // 30 m
+        assert_eq!(allowed_segment(14_200_000, KAHF_CHANNEL_WIDTH_HZ), None);
+    }
+
+    #[test]
+    fn extreme_inputs_do_not_panic() {
+        assert_eq!(allowed_segment(0, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(allowed_segment(u64::MAX, KAHF_CHANNEL_WIDTH_HZ), None);
+    }
+
+    #[test]
+    fn tuning_warning_is_only_a_warning() {
+        assert_eq!(tuning_warning(14_105_050, KAHF_CHANNEL_WIDTH_HZ), None);
+        let w = tuning_warning(14_230_000, KAHF_CHANNEL_WIDTH_HZ).expect("warning expected");
+        assert!(w.contains("outside the planned"));
+        assert!(!w.contains("refused"));
     }
 }

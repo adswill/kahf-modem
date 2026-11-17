@@ -1,0 +1,11 @@
+[package]
+name = "radio-stress"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+# Standalone: not a member of the main workspace, so it can live under tests/.
+[workspace]
+
+[dependencies]
+kahf-radio = { path = "../../crates/kahf-radio" }

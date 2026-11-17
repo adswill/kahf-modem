@@ -21,7 +21,25 @@ use std::ops::{Add, Mul, Sub};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Modulation { Qpsk, Qam16, Qam64 }
+pub enum Modulation {
+    Qpsk,
+    Qam16,
+    Qam64,
+}
+
+/// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`).
+/// Thresholds are the lowest 0.5 dB points where the frame error rate of the mode
+/// is below 1 percent (1000 frames per point, unit-power PHY, LDPC 50 iterations).
+/// 16QAM first clears 1 percent at 6.5 dB; 64QAM at 10.5 dB.
+pub fn choose_modulation(snr_db: f32) -> Modulation {
+    if snr_db >= 10.5 {
+        Modulation::Qam64
+    } else if snr_db >= 6.5 {
+        Modulation::Qam16
+    } else {
+        Modulation::Qpsk
+    }
+}
 
 const FS: f64 = 8000.0;
 const N: usize = 512;
@@ -34,30 +52,78 @@ const LAST_BIN: usize = 172;
 const NACT: usize = LAST_BIN - FIRST_BIN + 1;
 const PILOT_EVERY: usize = 4;
 const MAX_BPS: usize = 6;
-const MIN_CORR: f64 = 0.5;
+const MIN_CORR: f64 = 0.25;
 const PEAK: f64 = 0.95;
+/// Channel model for the estimate: an impulse response of this many samples.
+/// Least-squares projection onto it averages noise over the carriers without
+/// the bias of a boxcar, so echoes up to this delay are followed exactly.
+const CIR_TAPS: usize = 24;
+/// Scale on the max-log LLRs. 1.0 is the exact max-log value (distance difference over
+/// the complex noise power). With the previous 0.4 the offset min-sum decoder gave
+/// about 10 percent frame errors on the two-path echo at 1 dB.
+const LLR_SCALE: f64 = 1.0;
+/// Decision-directed channel refinement passes after the first equalisation.
+const DD_PASSES: usize = 2;
+/// Search room, in samples, beyond one frame for `demodulate_frame` (64 symbols, about 4.6 s).
+/// Smaller margins change the power and edge estimates enough to flip a few marginal
+/// frames in fade and clock-offset runs.
+const SEARCH_MARGIN: usize = 64 * SYM;
+/// Decay length (taps) of the exponential power-delay profile used as the channel prior.
+const PDP_DECAY: f64 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C { re: f64, im: f64 }
+struct C {
+    re: f64,
+    im: f64,
+}
 
 impl C {
     const ZERO: C = C { re: 0.0, im: 0.0 };
-    fn new(re: f64, im: f64) -> C { C { re, im } }
-    fn conj(self) -> C { C::new(self.re, -self.im) }
-    fn norm2(self) -> f64 { self.re * self.re + self.im * self.im }
+    fn new(re: f64, im: f64) -> C {
+        C { re, im }
+    }
+    fn conj(self) -> C {
+        C::new(self.re, -self.im)
+    }
+    fn norm2(self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
     /// Division with a floor on |h|^2 to avoid blow-up on dead carriers.
-    fn div(self, h: C) -> C { self * h.conj() * (1.0 / h.norm2().max(1e-12)) }
+    fn div(self, h: C) -> C {
+        self * h.conj() * (1.0 / h.norm2().max(1e-12))
+    }
 }
-impl Add for C { type Output = C; fn add(self, o: C) -> C { C::new(self.re + o.re, self.im + o.im) } }
-impl Sub for C { type Output = C; fn sub(self, o: C) -> C { C::new(self.re - o.re, self.im - o.im) } }
+impl Add for C {
+    type Output = C;
+    fn add(self, o: C) -> C {
+        C::new(self.re + o.re, self.im + o.im)
+    }
+}
+impl Sub for C {
+    type Output = C;
+    fn sub(self, o: C) -> C {
+        C::new(self.re - o.re, self.im - o.im)
+    }
+}
 impl Mul for C {
     type Output = C;
-    fn mul(self, o: C) -> C { C::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re) }
+    fn mul(self, o: C) -> C {
+        C::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
+    }
 }
-impl Mul<f64> for C { type Output = C; fn mul(self, k: f64) -> C { C::new(self.re * k, self.im * k) } }
+impl Mul<f64> for C {
+    type Output = C;
+    fn mul(self, k: f64) -> C {
+        C::new(self.re * k, self.im * k)
+    }
+}
 
 /// Iterative radix-2 FFT plan (forward, e^{-j}), twiddles and bit reversal precomputed.
-struct Fft { n: usize, tw: Vec<C>, rev: Vec<usize> }
+struct Fft {
+    n: usize,
+    tw: Vec<C>,
+    rev: Vec<usize>,
+}
 
 impl Fft {
     fn new(n: usize) -> Fft {
@@ -107,8 +173,8 @@ fn analytic(x: &[f64]) -> Vec<C> {
         *b = C::new(v, 0.0);
     }
     plan.forward(&mut buf);
-    for k in 1..m / 2 {
-        buf[k] = buf[k] * 2.0;
+    for c in buf[1..m / 2].iter_mut() {
+        *c = *c * 2.0;
     }
     for c in buf[m / 2 + 1..].iter_mut() {
         *c = C::ZERO;
@@ -132,29 +198,50 @@ fn pn_sign(i: u64) -> f64 {
     x ^= x >> 31;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 29;
-    if x & 1 == 1 { 1.0 } else { -1.0 }
+    if x & 1 == 1 {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
-fn pilot_value(i: usize) -> f64 { pn_sign(i as u64 + 1000) }
+fn pilot_value(i: usize) -> f64 {
+    pn_sign(i as u64 + 1000)
+}
 
-fn is_pilot(i: usize) -> bool { i % PILOT_EVERY == 0 }
+fn is_pilot(i: usize) -> bool {
+    i.is_multiple_of(PILOT_EVERY)
+}
 
 fn bits_per_axis(m: Modulation) -> usize {
-    match m { Modulation::Qpsk => 1, Modulation::Qam16 => 2, Modulation::Qam64 => 3 }
+    match m {
+        Modulation::Qpsk => 1,
+        Modulation::Qam16 => 2,
+        Modulation::Qam64 => 3,
+    }
 }
 
 fn mod_idx(m: Modulation) -> usize {
-    match m { Modulation::Qpsk => 0, Modulation::Qam16 => 1, Modulation::Qam64 => 2 }
+    match m {
+        Modulation::Qpsk => 0,
+        Modulation::Qam16 => 1,
+        Modulation::Qam64 => 2,
+    }
 }
 
 /// Gray-coded PAM level for `k` bits on one axis (M = 2^k levels, odd, centred).
 fn axis_level(bits: &[u8], mm: usize) -> f64 {
     let mut b = 0usize;
-    for &x in bits { b = (b << 1) | (x & 1) as usize; }
+    for &x in bits {
+        b = (b << 1) | (x & 1) as usize;
+    }
     // inverse Gray code: binary index whose Gray code is b
     let mut i = b;
     let mut s = b >> 1;
-    while s > 0 { i ^= s; s >>= 1; }
+    while s > 0 {
+        i ^= s;
+        s >>= 1;
+    }
     2.0 * i as f64 - (mm as f64 - 1.0)
 }
 
@@ -163,7 +250,10 @@ fn map_symbol(bits: &[u8], m: Modulation) -> C {
     let k = bits_per_axis(m);
     let mm = 1usize << k;
     let norm = (2.0 * ((mm * mm - 1) as f64) / 3.0).sqrt();
-    C::new(axis_level(&bits[..k], mm) / norm, axis_level(&bits[k..2 * k], mm) / norm)
+    C::new(
+        axis_level(&bits[..k], mm) / norm,
+        axis_level(&bits[k..2 * k], mm) / norm,
+    )
 }
 
 /// All constellation points as (bit pattern, point); bit j of the pattern is bits[j].
@@ -191,6 +281,8 @@ struct Phy {
     /// Time-domain channel symbol B (CP + body).
     sym_b: Vec<f64>,
     cons: [Vec<(usize, C)>; 3],
+    /// DFT basis of the channel model: `cir[i * CIR_TAPS + n]` = e^{-j 2 pi k n / N}, k = FIRST_BIN + i.
+    cir: Vec<C>,
 }
 
 static PHY: OnceLock<Phy> = OnceLock::new();
@@ -204,9 +296,12 @@ impl Phy {
         let pilots: Vec<usize> = (0..NACT).filter(|&i| is_pilot(i)).collect();
         let data: Vec<usize> = (0..NACT).filter(|&i| !is_pilot(i)).collect();
         let pre: Vec<f64> = (0..NACT).map(|i| pn_sign(i as u64)).collect();
+        // Sync symbol A carries only the pilots, so boost them to the power of a
+        // full data symbol. Otherwise its SNR sits about 5 dB below the frame's.
+        let boost = (NACT as f64 / pilots.len() as f64).sqrt();
         let mut sync_vals = vec![C::ZERO; NACT];
         for &i in &pilots {
-            sync_vals[i] = C::new(pilot_value(i), 0.0);
+            sync_vals[i] = C::new(pilot_value(i) * boost, 0.0);
         }
         let b_vals: Vec<C> = pre.iter().map(|&s| C::new(s, 0.0)).collect();
         let mut p = Phy {
@@ -221,6 +316,13 @@ impl Phy {
                 constellation(Modulation::Qam16),
                 constellation(Modulation::Qam64),
             ],
+            cir: (0..NACT * CIR_TAPS)
+                .map(|j| {
+                    let (i, n) = (j / CIR_TAPS, j % CIR_TAPS);
+                    let a = -2.0 * PI * ((FIRST_BIN + i) * n) as f64 / N as f64;
+                    C::new(a.cos(), a.sin())
+                })
+                .collect(),
         };
         let mut buf = vec![C::ZERO; N];
         let mut a = Vec::with_capacity(SYM);
@@ -259,152 +361,99 @@ impl Phy {
     }
 }
 
-/// Map coded bits to audio samples (frame = sync A + channel B + data symbols).
-pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
-    let p = phy();
-    let bps = 2 * bits_per_axis(m);
-    let per_sym = p.data.len() * bps;
-    let n_sym = (coded.len() + per_sym - 1) / per_sym;
-
-    let mut out: Vec<f64> = Vec::with_capacity(SYM * (2 + n_sym));
-    out.extend_from_slice(&p.sym_a);
-    out.extend_from_slice(&p.sym_b);
-
-    let mut buf = vec![C::ZERO; N];
-    let mut vals = vec![C::ZERO; NACT];
-    for &i in &p.pilots {
-        vals[i] = C::new(pilot_value(i), 0.0);
-    }
-    let mut bits = [0u8; MAX_BPS];
-    for s in 0..n_sym {
-        for (d, &ci) in p.data.iter().enumerate() {
-            let base = s * per_sym + d * bps;
-            for j in 0..bps {
-                bits[j] = coded.get(base + j).map_or(0, |b| b & 1);
-            }
-            vals[ci] = map_symbol(&bits[..bps], m);
+/// Solve a x = b for a small complex system by Gaussian elimination with partial pivoting.
+fn solve(mut a: Vec<Vec<C>>, mut b: Vec<C>) -> Vec<C> {
+    let n = b.len();
+    for col in 0..n {
+        let piv = (col..n)
+            .max_by(|&i, &j| a[i][col].norm2().total_cmp(&a[j][col].norm2()))
+            .unwrap_or(col);
+        a.swap(col, piv);
+        b.swap(col, piv);
+        let d = a[col][col];
+        if d.norm2() < 1e-30 {
+            continue;
         }
-        p.synth_into(&vals, &mut buf, &mut out);
+        for row in col + 1..n {
+            let f = a[row][col].div(d);
+            let (upper, lower) = a.split_at_mut(row);
+            for (dst, &src) in lower[0][col..n].iter_mut().zip(&upper[col][col..n]) {
+                *dst = *dst - f * src;
+            }
+            b[row] = b[row] - f * b[col];
+        }
     }
-
-    let peak = out.iter().fold(0f64, |a, v| a.max(v.abs()));
-    let g = if peak > 0.0 { PEAK / peak } else { 1.0 };
-    out.iter().map(|&v| (v * g) as f32).collect()
+    let mut x = vec![C::ZERO; n];
+    for row in (0..n).rev() {
+        let mut s = b[row];
+        for k in row + 1..n {
+            s = s - a[row][k] * x[k];
+        }
+        x[row] = if a[row][row].norm2() < 1e-30 {
+            C::ZERO
+        } else {
+            s.div(a[row][row])
+        };
+    }
+    x
 }
 
-/// Find the frame in `samples`, equalise, return coded-bit LLRs (positive = 0), or None.
-pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option<Vec<f32>> {
-    let p = phy();
-    let x: Vec<f64> = samples.iter().map(|&v| v as f64).collect();
-    if x.len() < SYM {
-        return None;
-    }
-    let power = x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64;
-    if power <= 0.0 {
-        return None;
-    }
-
-    // 1. Coarse timing: complex Schmidl-Cox metric with lag PER and window PER.
-    //    M is about 1 from the symbol A start on, and ramps up over the PER samples before it.
-    //    The first offset that clears MIN_CORR (on a non-silent window) is taken.
-    let z = analytic(&x);
-    let last = x.len().checked_sub(2 * PER)?;
-    let floor = 0.5 * PER as f64 * power;
-    let mut pc = C::ZERO;
-    let mut rc = 0f64;
-    for n in 0..PER {
-        pc = pc + z[n].conj() * z[n + PER];
-        rc += z[n + PER].norm2();
-    }
-    let mut coarse = None;
-    for d in 0..=last {
-        if rc > floor && pc.norm2() >= MIN_CORR * rc * rc {
-            coarse = Some(d);
-            break;
+/// Weighted least-squares fit of the raw per-carrier estimates `est` (weights `wgt`)
+/// to a channel impulse response of `CIR_TAPS` samples. Returns the fitted response
+/// on every active carrier.
+fn smooth_channel(p: &Phy, est: &[C], wgt: &[f64]) -> Vec<C> {
+    let l = CIR_TAPS;
+    let mut g = vec![vec![C::ZERO; l]; l];
+    let mut r = vec![C::ZERO; l];
+    for i in 0..NACT {
+        let row = &p.cir[i * l..(i + 1) * l];
+        for n in 0..l {
+            let cn = row[n].conj() * wgt[i];
+            r[n] = r[n] + cn * est[i];
+            for m in 0..l {
+                g[n][m] = g[n][m] + cn * row[m];
+            }
         }
-        if d == last {
-            break;
-        }
-        pc = pc + z[d + PER].conj() * z[d + 2 * PER] - z[d].conj() * z[d + PER];
-        rc += z[d + 2 * PER].norm2() - z[d + PER].norm2();
     }
-    let d_c = coarse?;
-
-    // 2. CFO from the phase of the lag-PER product over symbol A.
-    //    Unambiguous to +-FS / (2 PER) = +-31.25 Hz.
-    let span = (SYM - PER).min(z.len() - d_c - PER);
-    let mut acc = C::ZERO;
-    for n in 0..span {
-        acc = acc + z[d_c + n].conj() * z[d_c + n + PER];
+    // Gaussian prior on the taps with an exponential power-delay profile: tap n has
+    // power exp(-n / PDP_DECAY). The ridge term 1 / power pulls the late taps toward zero,
+    // so the estimate does not carry noise from taps that carry no energy.
+    for (n, row) in g.iter_mut().enumerate() {
+        row[n] = row[n] + C::new((n as f64 / PDP_DECAY).exp(), 0.0);
     }
-    let cfo = acc.im.atan2(acc.re) * FS / (2.0 * PI * PER as f64);
-    drop(z);
-
-    // 3. Mix the real signal down by the CFO. Carriers land on their nominal
-    //    bins; the mirror image lands far outside the active bins.
-    let w0 = -2.0 * PI * cfo / FS;
-    let step = C::new(w0.cos(), w0.sin());
-    let mut ph = C::new(1.0, 0.0);
-    let y: Vec<C> = x
-        .iter()
-        .map(|&v| {
-            let s = ph * v;
-            ph = ph * step;
-            s
+    let h = solve(g, r);
+    (0..NACT)
+        .map(|i| {
+            p.cir[i * l..(i + 1) * l]
+                .iter()
+                .zip(&h)
+                .fold(C::ZERO, |s, (&f, &hn)| s + f * hn)
         })
-        .collect();
+        .collect()
+}
 
-    // 4. Fine timing: magnitude of the correlation with symbol A over one PER window.
-    let tpl = &p.sym_a;
-    let tpl_e: f64 = tpl.iter().map(|v| v * v).sum();
-    let mut start = d_c;
-    let mut best = -1.0;
-    for t in d_c..=d_c + PER {
-        if t + SYM > y.len() {
-            break;
-        }
-        let mut acc = C::ZERO;
-        let mut e = 0f64;
-        for (n, &tv) in tpl.iter().enumerate() {
-            let v = y[t + n];
-            acc = acc + v * tv;
-            e += v.norm2();
-        }
-        let r = acc.norm2() / (e * tpl_e).max(1e-30);
-        if r > best {
-            best = r;
-            start = t;
-        }
-    }
+/// Output of one equalisation pass over the data symbols.
+struct Equalised {
+    /// Equalised data carriers, symbol by symbol.
+    zs: Vec<C>,
+    /// Weighted pilot residual sum and pilot count (noise estimate).
+    resid: f64,
+    cnt: usize,
+}
 
-    if n_bits == 0 {
-        return Some(Vec::new());
-    }
-    let bps = 2 * bits_per_axis(m);
-    let nd = p.data.len();
-    let per_sym = nd * bps;
-    let n_sym = (n_bits + per_sym - 1) / per_sym;
-    if start + SYM * (2 + n_sym) > y.len() {
-        return None;
-    }
-
+/// Equalise `n_sym` data symbols with channel `h` (weights `hw` = |h|^2). Per symbol, a
+/// weighted pilot fit of phase = a + b*i (common phase and sample-clock slope) is removed.
+fn equalise(p: &Phy, y: &[C], start: usize, n_sym: usize, h: &[C], hw: &[f64]) -> Equalised {
     let mut fb = vec![C::ZERO; N];
     let mut yv = vec![C::ZERO; NACT];
-
-    // 5. Channel estimate from symbol B (known BPSK on every active carrier).
-    p.analyse(&y, start + SYM, &mut fb, &mut yv);
-    let h: Vec<C> = yv.iter().zip(&p.pre).map(|(v, &s)| *v * s).collect();
-    let hw: Vec<f64> = h.iter().map(|c| c.norm2()).collect();
-
-    // 6. Equalise each data symbol. Fit phase = a + b*i over the pilots
-    //    (|H|^2 weighted): a is the common phase, b the sample-clock slope.
-    //    Remove it from every carrier and accumulate a pilot noise estimate.
-    let mut zs: Vec<C> = Vec::with_capacity(n_sym * nd);
-    let mut resid = 0f64;
-    let mut cnt = 0usize;
+    let mut out = Equalised {
+        zs: Vec::with_capacity(n_sym * p.data.len()),
+        resid: 0.0,
+        cnt: 0,
+    };
     let mut z = vec![C::ZERO; NACT];
     for s in 0..n_sym {
-        p.analyse(&y, start + SYM * (2 + s), &mut fb, &mut yv);
+        p.analyse(y, start + SYM * (2 + s), &mut fb, &mut yv);
         for i in 0..NACT {
             z[i] = yv[i].div(h[i]);
         }
@@ -433,17 +482,234 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
         }
         for &i in &p.pilots {
             let e = z[i] - C::new(pilot_value(i), 0.0);
-            resid += e.norm2() * hw[i];
-            cnt += 1;
+            out.resid += e.norm2() * hw[i];
+            out.cnt += 1;
         }
         for &i in &p.data {
-            zs.push(z[i]);
+            out.zs.push(z[i]);
         }
     }
-    let sigma2 = (resid / cnt as f64).max(1e-12);
+    out
+}
+
+/// Pseudo-random order of the transmitted bit slots, fixed for a given length. Slot t
+/// carries coded bit `order[t]`, so a group of faded carriers does not hit one codeword.
+fn slot_order(total: usize) -> Vec<usize> {
+    let mut v: Vec<usize> = (0..total).collect();
+    for i in (1..total).rev() {
+        let mut x = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        x ^= x >> 31;
+        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^= x >> 29;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+    v
+}
+
+/// Map coded bits to audio samples (frame = sync A + channel B + data symbols).
+pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
+    let p = phy();
+    let bps = 2 * bits_per_axis(m);
+    let per_sym = p.data.len() * bps;
+    let n_sym = coded.len().div_ceil(per_sym);
+
+    let mut out: Vec<f64> = Vec::with_capacity(SYM * (2 + n_sym));
+    out.extend_from_slice(&p.sym_a);
+    out.extend_from_slice(&p.sym_b);
+
+    let mut buf = vec![C::ZERO; N];
+    let mut vals = vec![C::ZERO; NACT];
+    for &i in &p.pilots {
+        vals[i] = C::new(pilot_value(i), 0.0);
+    }
+    let order = slot_order(n_sym * per_sym);
+    let mut bits = [0u8; MAX_BPS];
+    for s in 0..n_sym {
+        for (d, &ci) in p.data.iter().enumerate() {
+            let base = s * per_sym + d * bps;
+            for (j, slot) in bits[..bps].iter_mut().enumerate() {
+                *slot = coded.get(order[base + j]).map_or(0, |b| b & 1);
+            }
+            vals[ci] = map_symbol(&bits[..bps], m);
+        }
+        p.synth_into(&vals, &mut buf, &mut out);
+    }
+
+    let peak = out.iter().fold(0f64, |a, v| a.max(v.abs()));
+    let g = if peak > 0.0 { PEAK / peak } else { 1.0 };
+    out.iter().map(|&v| (v * g) as f32).collect()
+}
+
+/// Find the frame in `samples`, equalise, return coded-bit LLRs (positive = 0), or None.
+pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option<Vec<f32>> {
+    let p = phy();
+    // Only the region this frame can occupy is analysed: the frame itself plus
+    // SEARCH_MARGIN samples of search room. Converting and transforming the whole
+    // remaining stream on every call made stream decoding quadratic in its length.
+    let frame_span = if n_bits == 0 {
+        0
+    } else {
+        let bps = 2 * bits_per_axis(m);
+        SYM * (2 + n_bits.div_ceil(p.data.len() * bps))
+    };
+    let win = samples.len().min(frame_span + SEARCH_MARGIN);
+    let x: Vec<f64> = samples[..win].iter().map(|&v| v as f64).collect();
+    if x.len() < SYM {
+        return None;
+    }
+    let power = x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64;
+    if power <= 0.0 {
+        return None;
+    }
+
+    // 1. Coarse timing: complex Schmidl-Cox metric with lag PER and window PER.
+    //    M is about 1 from the symbol A start on, and ramps up over the PER samples before it.
+    //    The first offset that clears MIN_CORR (on a non-silent window) is taken.
+    // The window spans the whole periodic part of symbol A, so noise averages over
+    // about SYM - PER samples. The first offset over MIN_CORR starts a search, which
+    // keeps the best metric while it stays over MIN_CORR. The peak is the symbol start.
+    let z = analytic(&x);
+    let lw = SYM - PER;
+    let floor = 0.5 * lw as f64 * power;
+    let mut pc = C::ZERO;
+    let mut rc = 0f64;
+    for n in 0..lw {
+        pc = pc + z[n].conj() * z[n + PER];
+        rc += z[n + PER].norm2();
+    }
+    let mut coarse: Option<(f64, usize)> = None;
+    let mut d = 0usize;
+    loop {
+        let met = if rc > floor { pc.norm2() / (rc * rc) } else { 0.0 };
+        match coarse {
+            None if met >= MIN_CORR * MIN_CORR => coarse = Some((met, d)),
+            Some((best, _)) if met >= MIN_CORR * MIN_CORR => {
+                if met > best {
+                    coarse = Some((met, d));
+                }
+            }
+            Some(_) => break,
+            None => {}
+        }
+        if d + lw + PER >= z.len() {
+            break;
+        }
+        pc = pc - z[d].conj() * z[d + PER] + z[d + lw].conj() * z[d + lw + PER];
+        rc += z[d + lw + PER].norm2() - z[d + PER].norm2();
+        d += 1;
+    }
+    let d_c = coarse?.1;
+
+    // 2. CFO from the phase of the lag-PER product over symbol A.
+    //    Unambiguous to +-FS / (2 PER) = +-31.25 Hz.
+    let span = (SYM - PER).min(z.len() - d_c - PER);
+    let mut acc = C::ZERO;
+    for n in 0..span {
+        acc = acc + z[d_c + n].conj() * z[d_c + n + PER];
+    }
+    let cfo = acc.im.atan2(acc.re) * FS / (2.0 * PI * PER as f64);
+
+    // 3. Mix the analytic signal down by the CFO. Carriers land on their nominal
+    //    bins. Mixing the real signal instead leaves a mirror image that rotates at
+    //    twice the CFO; it corrupts the time-domain fine timing (wrong start).
+    let w0 = -2.0 * PI * cfo / FS;
+    let step = C::new(w0.cos(), w0.sin());
+    let mut ph = C::new(1.0, 0.0);
+    let y: Vec<C> = z
+        .iter()
+        .map(|&v| {
+            let s = ph * v;
+            ph = ph * step;
+            s
+        })
+        .collect();
+
+    // 4. Fine timing: magnitude of the correlation with symbol A over one PER window.
+    let tpl = &p.sym_a;
+    let tpl_e: f64 = tpl.iter().map(|v| v * v).sum();
+    let mut start = d_c;
+    let mut best = -1.0;
+    // Symbol A repeats every PER samples, so a window of one period holds exactly one
+    // copy of each phase. A wider window can pick a copy one period away from the frame.
+    for t in d_c.saturating_sub(PER / 2)..d_c + PER / 2 {
+        if t + SYM > y.len() {
+            break;
+        }
+        let mut acc = C::ZERO;
+        let mut e = 0f64;
+        for (n, &tv) in tpl.iter().enumerate() {
+            let v = y[t + n];
+            acc = acc + v * tv;
+            e += v.norm2();
+        }
+        let r = acc.norm2() / (e * tpl_e).max(1e-30);
+        if r > best {
+            best = r;
+            start = t;
+        }
+    }
+
+    if n_bits == 0 {
+        return Some(Vec::new());
+    }
+    let bps = 2 * bits_per_axis(m);
+    let nd = p.data.len();
+    let per_sym = nd * bps;
+    let n_sym = n_bits.div_ceil(per_sym);
+    if start + SYM * (2 + n_sym) > y.len() {
+        return None;
+    }
+
+    let mut fb = vec![C::ZERO; N];
+    let mut yv = vec![C::ZERO; NACT];
+
+    // 5. Channel estimate from symbol B (known BPSK on every active carrier).
+    p.analyse(&y, start + SYM, &mut fb, &mut yv);
+    let eb: Vec<C> = yv.iter().zip(&p.pre).map(|(v, &s)| *v * s).collect();
+    // Sync A (pilots only, boosted by `boost`) adds an estimate on each pilot.
+    // Its weight is boost^2 (each pilot has that much more SNR than a data carrier).
+    p.analyse(&y, start, &mut fb, &mut yv);
+    let boost = (NACT as f64 / p.pilots.len() as f64).sqrt();
+    let wa = boost * boost;
+    let mut num = eb.clone();
+    let mut den = vec![1.0f64; NACT];
+    for &i in &p.pilots {
+        let ea = yv[i] * (pilot_value(i) / boost);
+        num[i] = eb[i] + ea * wa;
+        den[i] = 1.0 + wa;
+    }
+    // 6. Smooth the estimate with the channel model, then equalise each data symbol.
+    let raw: Vec<C> = num.iter().zip(&den).map(|(&n, &d)| n * (1.0 / d)).collect();
+    let mut h = smooth_channel(p, &raw, &den);
+    let mut hw: Vec<f64> = h.iter().map(|c| c.norm2()).collect();
+    let mut eq = equalise(p, &y, start, n_sym, &h, &hw);
+    // 6b. Decision-directed refinement: every data carrier of every data symbol adds an
+    //     observation (its nearest constellation point from the previous pass), so the
+    //     estimate averages over the whole frame. Repeated, each pass re-decides on the
+    //     refined channel.
+    let table = &p.cons[mod_idx(m)];
+    for _ in 0..DD_PASSES {
+        let mut num2 = num.clone();
+        let mut den2 = den.clone();
+        for (k, &zk) in eq.zs.iter().enumerate() {
+            let i = p.data[k % nd];
+            let dec = table
+                .iter()
+                .map(|&(_, pt)| pt)
+                .min_by(|a, b| (zk - *a).norm2().total_cmp(&(zk - *b).norm2()))
+                .unwrap_or(C::ZERO);
+            num2[i] = num2[i] + (zk * h[i]) * dec.conj();
+            den2[i] += dec.norm2();
+        }
+        let raw2: Vec<C> = num2.iter().zip(&den2).map(|(&n, &d)| n * (1.0 / d)).collect();
+        h = smooth_channel(p, &raw2, &den2);
+        hw = h.iter().map(|c| c.norm2()).collect();
+        eq = equalise(p, &y, start, n_sym, &h, &hw);
+    }
+    let zs = eq.zs;
+    let sigma2 = (eq.resid / eq.cnt as f64).max(1e-12);
 
     // 7. Max-log LLRs, scaled by channel gain over noise: s2_k = sigma2 / |H_k|^2.
-    let table = &p.cons[mod_idx(m)];
     let mut llr: Vec<f32> = Vec::with_capacity(n_sym * per_sym);
     for (k, &zk) in zs.iter().enumerate() {
         let i = p.data[k % nd];
@@ -453,18 +719,29 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
         for &(v, pt) in table.iter() {
             let dist = (zk - pt).norm2();
             for j in 0..bps {
-                let t = if ((v >> (bps - 1 - j)) & 1) == 0 { &mut d0 } else { &mut d1 };
+                let t = if ((v >> (bps - 1 - j)) & 1) == 0 {
+                    &mut d0
+                } else {
+                    &mut d1
+                };
                 if dist < t[j] {
                     t[j] = dist;
                 }
             }
         }
         for j in 0..bps {
-            llr.push(((d1[j] - d0[j]) / s2) as f32);
+            llr.push((LLR_SCALE * (d1[j] - d0[j]) / s2) as f32);
         }
     }
-    llr.truncate(n_bits);
-    Some(llr)
+    // Undo the slot order: slot t holds coded bit order[t].
+    let order = slot_order(llr.len());
+    let mut out = vec![0f32; n_bits];
+    for (t, &l) in llr.iter().enumerate() {
+        if order[t] < n_bits {
+            out[order[t]] = l;
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -606,7 +883,10 @@ mod tests {
         }
         let llr = demodulate_frame(&rx, Modulation::Qpsk, bits.len()).expect("preamble not found");
         let errs = hard(&llr).iter().zip(&bits).filter(|(a, b)| a != b).count();
-        eprintln!("QPSK at 50 ppm sample clock offset: {errs} bit errors / {}", bits.len());
+        eprintln!(
+            "QPSK at 50 ppm sample clock offset: {errs} bit errors / {}",
+            bits.len()
+        );
         assert_eq!(errs, 0);
     }
 
@@ -637,5 +917,74 @@ mod tests {
             modt
         );
         assert_eq!(ok, rounds);
+    }
+
+    /// Two-path channel: the direct path plus one echo `delay` samples later at `gain`.
+    fn two_path(x: &[f32], delay: usize, gain: f32) -> Vec<f32> {
+        let mut y = x.to_vec();
+        y.resize(x.len() + delay, 0.0);
+        for (i, &v) in x.iter().enumerate() {
+            y[i + delay] += gain * v;
+        }
+        y
+    }
+
+    /// AWGN at `snr_db` against the mean power of `x`, as `kahf_sim::awgn` does.
+    fn awgn_db(x: &[f32], snr_db: f64, rng: &mut Rng) -> Vec<f32> {
+        let p = x.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / x.len() as f64;
+        let sigma = (p / 10f64.powf(snr_db / 10.0)).sqrt();
+        x.iter()
+            .map(|&v| (v as f64 + sigma * rng.gauss()) as f32)
+            .collect()
+    }
+
+    /// Frame errors over `frames` LDPC-coded QPSK frames through the given channel.
+    /// The chain matches `kahf_sim::run_point`: payload, LDPC, PHY, channel, PHY, LDPC, payload.
+    fn frame_errors(frames: usize, snr_db: f64, seed: u64, chan: impl Fn(&[f32]) -> Vec<f32>) -> usize {
+        (0..frames)
+            .filter(|&i| {
+                let mut rng = Rng(seed.wrapping_add(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let payload: Vec<u8> = (0..36).map(|_| (rng.next_u64() >> 56) as u8).collect();
+                let info = crate::frame::build_payload(&payload);
+                let coded = crate::ldpc::encode(&info);
+                let tx = modulate_frame(&coded, Modulation::Qpsk);
+                let rx = awgn_db(&chan(&tx), snr_db, &mut rng);
+                let decoded = demodulate_frame(&rx, Modulation::Qpsk, crate::ldpc::N)
+                    .and_then(|llr| crate::ldpc::decode(&llr, 50))
+                    .and_then(|bits| crate::frame::parse_payload(&bits));
+                decoded.as_deref() != Some(payload.as_slice())
+            })
+            .count()
+    }
+
+    /// Zero-pad a frame by 100 samples each side, so the receiver sees silence before and after.
+    fn padded(x: &[f32]) -> Vec<f32> {
+        let mut p = vec![0f32; 100];
+        p.extend_from_slice(x);
+        p.extend(vec![0f32; 100]);
+        p
+    }
+
+    /// Two-path channel, 2 ms echo (16 samples) at -6 dB, 100 frames at 2 dB.
+    /// Frame error rate must stay at 1 percent or less.
+    #[test]
+    fn phy_two_path_echo_fer_100_frames() {
+        let errors = frame_errors(100, 2.0, 4242, |x| two_path(x, 16, 0.5012));
+        eprintln!("two-path 2 ms -6 dB, 2 dB SNR: {errors}/100 frame errors");
+        assert!(
+            errors <= 1,
+            "{errors}/100 frames in error on the two-path channel"
+        );
+    }
+
+    /// Carrier frequency offset of 5 Hz either way, 100 frames at 1 dB.
+    /// Frame error rate must stay at 1 percent or less.
+    #[test]
+    fn phy_cfo_5hz_fer_100_frames() {
+        for hz in [5.0, -5.0] {
+            let errors = frame_errors(100, 1.0, 777, |x| cfo(&padded(x), hz));
+            eprintln!("CFO {hz} Hz, 1 dB SNR: {errors}/100 frame errors");
+            assert!(errors <= 1, "{errors}/100 frames in error at CFO {hz} Hz");
+        }
     }
 }

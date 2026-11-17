@@ -7,4 +7,5 @@ edition.workspace = true
 kahf-core = { path = "../kahf-core" }
 kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
+kahf-radio = { path = "../kahf-radio" }
 kahf-log = { path = "../kahf-log" }

@@ -9,7 +9,7 @@ use iced::widget::{
 use iced::{Fill, Length};
 
 use crate::app::{
-    App, FileCmd, Location, Message, Role, RigControl, TxAction, KINDS, PROFILES,
+    App, FileCmd, Location, Message, Role, TxAction, KINDS, PROFILES,
 };
 use crate::icons::{self, Icon};
 use crate::sample::{self, Chat, FileState};
@@ -199,11 +199,11 @@ impl App {
         };
         let snr = self.snr_now();
         let mut link = column![
-            text(state_text).size(12).font(iced::Font::MONOSPACE).color(state_color),
-            text(format!("{} {}", s::MODE_VALUE, self.profile)).size(22).font(iced::Font::MONOSPACE),
+            iced::widget::text(state_text).size(12).font(iced::Font::MONOSPACE).color(state_color),
+            iced::widget::text(format!("{} {}", s::MODE_VALUE, self.profile)).size(22).font(iced::Font::MONOSPACE),
             row![
                 label_caps(s::SNR_LABEL),
-                iced::widget::canvas(crate::icons::LevelBar { level: snr / 36.0, peak: snr / 36.0 })
+                iced::widget::canvas(crate::icons::LevelBar { level: snr / 60.0, peak: snr / 60.0 })
                     .width(Fill)
                     .height(10),
                 num(format!("{snr:.0} dB")).size(12),
@@ -295,8 +295,17 @@ impl App {
                 section_box(s::LINK_HEADING, link),
                 section_box(s::TRANSMIT_HEADING, transmit),
                 section_box(
-                    s::LAST_MESSAGE_HEADING,
-                    t(self.last_sent.clone().unwrap_or_else(|| s::NO_MESSAGES_SENT.to_string())),
+                    s::RIG_HEADING,
+                    column![
+                        key_value(s::SET_RIG_CONTROL, self.rig.to_string()),
+                        key_value(s::RIG_ADDR_LABEL, if self.rig_addr.is_empty() { "-".to_string() } else { self.rig_addr.clone() }),
+                    ]
+                    .spacing(5),
+                ),
+                section_box(s::AUDIO_HEADING, self.volume_controls()),
+                section_box(
+                    s::HOPS_HEADING,
+                    t(self.last_sent.clone().unwrap_or_else(|| s::NO_HOPS.to_string())),
                 ),
             ]
             .spacing(10),
@@ -712,6 +721,15 @@ impl App {
             tip(btn(s::MAP_BUTTON, Kind::Primary).on_press(Message::OpenMap), s::TIP_MAP_OPEN),
             num(s::MAP_URL).color(theme::MUTED),
             muted(s::MAP_PRIVACY).size(12),
+            section_box(
+                s::MAP_SUMMARY,
+                column![
+                    key_value(s::MAP_LOC_LABEL, self.location.label()),
+                    key_value(s::MAP_HEARD_LABEL, if self.sample { crate::sample::STATIONS.len().to_string() } else { "0".to_string() }),
+                    key_value(s::MAP_LINK_LABEL, self.link.clone().unwrap_or_else(|| s::NO_LINK_TEXT.to_string())),
+                ]
+                .spacing(5),
+            ),
         ]
         .spacing(12)
         .max_width(520);
@@ -746,34 +764,11 @@ impl App {
         ]
         .spacing(12);
 
-        let audio = column![
-            muted(s::SET_AUDIO_DESC),
-            field(
-                s::SET_AUDIO_IN,
-                pick_list(self.audio_options(), Some(if self.audio_in.is_empty() { s::DEVICE_SYSTEM.to_string() } else { self.audio_in.clone() }), Message::AudioIn).style(theme::dropdown),
-            ),
-            field(
-                s::SET_AUDIO_OUT,
-                pick_list(self.audio_options(), Some(if self.audio_out.is_empty() { s::DEVICE_SYSTEM.to_string() } else { self.audio_out.clone() }), Message::AudioOut).style(theme::dropdown),
-            ),
-        ]
-        .spacing(10);
+        let audio = column![muted(s::SET_AUDIO_DESC), self.step_controls(3)].spacing(10);
 
-        let rig = column![
-            muted(s::SET_RIG_DESC),
-            field(
-                s::SET_RIG_CONTROL,
-                pick_list(RigControl::ALL, Some(self.rig), Message::RigChosen).style(theme::dropdown),
-            ),
-            self.step_controls(1),
-        ]
-        .spacing(10);
+        let rig = column![muted(s::SET_RIG_DESC), field(s::SET_RIG_CONTROL, self.step_controls(1))].spacing(10);
 
-        let sdr = column![
-            muted(s::SET_SDR_DESC),
-            field(s::SET_SDR_DEVICE, pick_list(self.sdr_options(), Some(self.sdr_selected()), Message::SdrChosen).style(theme::dropdown)),
-        ]
-        .spacing(10);
+        let sdr = column![muted(s::SET_SDR_DESC), field(s::SET_SDR_DEVICE, self.step_controls(2))].spacing(10);
 
         let data = column![muted(s::SET_DATA_DESC), key_value(s::SET_DATA_PATH, s::DATA_NOT_CHOSEN)].spacing(10);
 

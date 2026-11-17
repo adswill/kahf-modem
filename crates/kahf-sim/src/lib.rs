@@ -285,6 +285,15 @@ pub fn eb_n0_db(snr_db: f32, samples_per_frame: usize, info_bits: usize) -> f32 
 ///
 /// Returns (frame errors, frames).
 pub fn run_point(snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
+    run_point_profile(Profile::Awgn, snr_db, frames, seed)
+}
+
+/// Monte-Carlo frame error point on a named channel profile. Same trial as `run_point`,
+/// but the modulated frame goes through `apply(profile, snr_db)` instead of plain AWGN.
+/// For `Profile::Awgn` the result equals `run_point`.
+///
+/// Returns (frame errors, frames).
+pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
     const PAYLOAD_BYTES: usize = 36;
     let errors = (0..frames)
         .into_par_iter()
@@ -295,7 +304,7 @@ pub fn run_point(snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
             let info = kahf_core::frame::build_payload(&payload);
             let coded = kahf_core::ldpc::encode(&info);
             let tx = kahf_core::phy::modulate_frame(&coded, BLER_MOD);
-            let rx = awgn(&tx, snr_db, trial_seed);
+            let rx = apply(&tx, profile, snr_db, trial_seed);
             let decoded = kahf_core::phy::demodulate_frame(&rx, BLER_MOD, kahf_core::ldpc::N)
                 .and_then(|llr| kahf_core::ldpc::decode(&llr, BLER_MAX_ITER))
                 .and_then(|bits| kahf_core::frame::parse_payload(&bits));
@@ -465,5 +474,29 @@ mod tests {
         let sig = vec![0.5f32; 64];
         assert_eq!(awgn(&sig, 6.0, 7), awgn(&sig, 6.0, 7));
         assert_ne!(awgn(&sig, 6.0, 7), awgn(&sig, 6.0, 8));
+    }
+
+    /// Manual measurement, not run in CI. Set KAHF_FER_PROFILE (awgn, two-path, freq-offset,
+    /// clock-offset, fade), KAHF_FER_SNR and KAHF_FER_FRAMES, then run with --ignored.
+    #[test]
+    #[ignore]
+    fn measure_profile_fer() {
+        let name = std::env::var("KAHF_FER_PROFILE").unwrap_or_else(|_| "two-path".into());
+        let snr: f32 = std::env::var("KAHF_FER_SNR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let frames: usize = std::env::var("KAHF_FER_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+        let seed: u64 = std::env::var("KAHF_FER_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let profile = match name.as_str() {
+            "awgn" => Profile::Awgn,
+            "two-path" => Profile::TwoPath,
+            "freq-offset" => Profile::FreqOffset,
+            "clock-offset" => Profile::ClockOffset,
+            "fade" => Profile::Fade,
+            other => panic!("unknown profile {other}"),
+        };
+        let (errors, n) = run_point_profile(profile, snr, frames, seed);
+        println!(
+            "FER profile={name} snr={snr} dB frames={n} errors={errors} fer={:.4}",
+            errors as f64 / n as f64
+        );
     }
 }

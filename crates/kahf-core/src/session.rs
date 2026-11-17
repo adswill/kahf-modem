@@ -146,6 +146,38 @@ pub struct Signed {
     /// Private to the addressee: the app delivers it only to that station's inbox.
     /// A routing rule, not encryption; the content is readable on air.
     pub private: bool,
+    /// True when the message carried a signature block (valid or not).
+    pub has_signature: bool,
+}
+
+/// Short status text for the message view: "Signed by CALL", "Signature not verified",
+/// or "Not signed". Used by every interface so the words stay the same.
+pub fn signature_label(s: &Signed) -> String {
+    if !s.has_signature {
+        return "Not signed".to_string();
+    }
+    match (&s.verified, &s.signer) {
+        (true, Some(call)) => format!("Signed by {call}"),
+        _ => "Signature not verified".to_string(),
+    }
+}
+
+/// Whether this station's app should show the message in its inbox. Public messages are
+/// shown to everyone who receives them. Private messages are shown only to the addressee
+/// (case-insensitive callsign match). This is an app routing rule, not encryption.
+pub fn inbox_for(s: &Signed, my_call: &str) -> bool {
+    !s.private || addressee(&s.message).eq_ignore_ascii_case(my_call)
+}
+
+/// Default for signing when the operator has not chosen: on for mail, off for chat and files.
+pub fn sign_by_default(msg: &Message) -> bool {
+    matches!(msg, Message::Mail { .. })
+}
+
+fn addressee(msg: &Message) -> &str {
+    match msg {
+        Message::Chat { to, .. } | Message::Mail { to, .. } | Message::File { to, .. } => to,
+    }
 }
 
 /// Reassemble chunks; returns Some(message) once complete and verified.
@@ -166,6 +198,7 @@ pub fn decode_signed(chunks: &[Vec<u8>]) -> Option<Signed> {
     Some(Signed {
         verified: signer.is_some(),
         signer,
+        has_signature: d.auth.is_some(),
         message: d.message,
         private: d.private,
     })
@@ -743,8 +776,103 @@ mod tests {
                 signer: None,
                 verified: false,
                 private: false,
+                has_signature: false,
             }
         );
+    }
+
+    /// Serialised auth block for `msg`, signed by `signer` with the test key.
+    fn auth_for(msg: &Message, signer: &str) -> Vec<u8> {
+        auth::sign(&signing_key(), signer, &serialise(msg))
+    }
+
+    #[test]
+    fn session_tampered_signature_bytes_fail() {
+        let msg = chat();
+        let base = auth_for(&msg, "KA1ABC");
+        // Flip one bit in the last byte of the 64-byte signature.
+        let mut bad_sig = base.clone();
+        let last = bad_sig.len() - 1;
+        bad_sig[last] ^= 0x01;
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &bad_sig, &serialise(&msg));
+        let got = decode_signed(&chunks).unwrap();
+        assert!(!got.verified);
+        assert!(got.has_signature);
+        assert_eq!(got.signer, None);
+        assert_eq!(signature_label(&got), "Signature not verified");
+    }
+
+    #[test]
+    fn session_tampered_public_key_fails() {
+        let msg = chat();
+        let mut block = auth_for(&msg, "KA1ABC");
+        // Public key starts after the callsign length byte and the callsign.
+        let key_at = 1 + "KA1ABC".len();
+        block[key_at] ^= 0x80;
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &serialise(&msg));
+        let got = decode_signed(&chunks).unwrap();
+        assert!(!got.verified);
+        assert_eq!(signature_label(&got), "Signature not verified");
+    }
+
+    #[test]
+    fn session_changed_sender_fails() {
+        // Signed as KA1ABC, then the from field is changed to another station.
+        let msg = chat();
+        let block = auth_for(&msg, "KA1ABC");
+        let mut forged = msg.clone();
+        if let Message::Chat { from, .. } = &mut forged {
+            *from = "KA9ZZZ".into();
+        }
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &serialise(&forged));
+        let got = decode_signed(&chunks).unwrap();
+        assert!(!got.verified);
+        assert_eq!(signature_label(&got), "Signature not verified");
+    }
+
+    #[test]
+    fn session_signed_file_with_wrong_hash_is_dropped() {
+        // A signed file whose data changed after hashing: the hash check rejects the whole message.
+        let msg = file(300);
+        let block = auth::sign(&signing_key(), "a", &serialise(&msg));
+        let mut body = serialise(&msg);
+        let last = body.len() - 1;
+        body[last] ^= 0x01;
+        let chunks = raw_stream(META_SIGNED | (KIND_FILE << 1), &block, &body);
+        assert_eq!(decode_signed(&chunks), None);
+    }
+
+    #[test]
+    fn session_signature_label_states() {
+        let signed_ok = decode_signed(&encode_signed(&chat(), Some(&signing_key()), false)).unwrap();
+        assert_eq!(signature_label(&signed_ok), "Signed by KA1ABC");
+
+        let unsigned = decode_signed(&encode(&chat())).unwrap();
+        assert_eq!(signature_label(&unsigned), "Not signed");
+
+        let msg = chat();
+        let forged_block = auth_for(&msg, "KA9ZZZ");
+        let forged = decode_signed(&raw_stream(META_SIGNED | (KIND_CHAT << 1), &forged_block, &serialise(&msg))).unwrap();
+        assert_eq!(signature_label(&forged), "Signature not verified");
+    }
+
+    #[test]
+    fn session_inbox_private_only_for_addressee() {
+        let msg = chat(); // to KA2XYZ
+        let private = decode_signed(&encode_signed(&msg, None, true)).unwrap();
+        assert!(inbox_for(&private, "KA2XYZ"));
+        assert!(inbox_for(&private, "ka2xyz"));
+        assert!(!inbox_for(&private, "KA3QQQ"));
+
+        let public = decode_signed(&encode(&msg)).unwrap();
+        assert!(inbox_for(&public, "KA3QQQ"));
+    }
+
+    #[test]
+    fn session_sign_by_default_is_mail_only() {
+        assert!(sign_by_default(&mail()));
+        assert!(!sign_by_default(&chat()));
+        assert!(!sign_by_default(&file(10)));
     }
 
     #[test]

@@ -20,15 +20,62 @@ pub const DB_MAX: f32 = -45.0;
 const WF_DB_MIN: f32 = -111.0;
 const WF_DB_MAX: f32 = -62.0;
 pub const SPAN_HZ: f64 = 12_000.0;
-pub const CENTRE_HZ: f64 = 7_078_000.0;
-pub const BANDWIDTH_HZ: f64 = 2_400.0;
+static CENTRE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7_042_500);
+
+/// Centre of the shown span in Hz. Follows the chosen band.
 pub const FRAMES_PER_SECOND: u64 = 25;
 
 const MONO: Font = Font::MONOSPACE;
 
 /// Frequency in Hz at a fraction 0..1 of the span.
 pub fn hz_at(frac: f32) -> f64 {
-    CENTRE_HZ - SPAN_HZ / 2.0 + f64::from(frac) * SPAN_HZ
+    centre_hz() - SPAN_HZ / 2.0 + f64::from(frac) * SPAN_HZ
+}
+
+pub fn centre_hz() -> f64 {
+    CENTRE.load(std::sync::atomic::Ordering::Relaxed) as f64
+}
+
+pub fn set_centre_hz(hz: f64) {
+    CENTRE.store(hz as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The two bands of the selector, each centred on its KAHF segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    M20,
+    M40,
+}
+
+impl Band {
+    pub const ALL: [Band; 2] = [Band::M20, Band::M40];
+    fn segment(self) -> &'static kahf_core::bandplan::Segment {
+        let i = if self == Band::M40 { 0 } else { 1 };
+        &kahf_core::bandplan::KAHF_SEGMENTS[i]
+    }
+    pub fn centre_hz(self) -> f64 {
+        let s = self.segment();
+        (s.lower_hz + s.upper_hz) as f64 / 2.0
+    }
+}
+
+impl std::fmt::Display for Band {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.segment().name)
+    }
+}
+/// The modem's carriers run from 312 Hz to 2.69 kHz above the tuned frequency.
+pub const PASS_LO_HZ: f64 = 312.0;
+pub const PASS_HI_HZ: f64 = 2_690.0;
+pub const BANDWIDTH_HZ: f64 = PASS_HI_HZ - PASS_LO_HZ;
+/// Segment name (from the core band plan) of the tuned frequency, or None.
+pub fn segment_at(hz: f64) -> Option<&'static str> {
+    kahf_core::bandplan::allowed_segment(hz as u64, kahf_core::bandplan::KAHF_CHANNEL_WIDTH_HZ)
+}
+
+/// Segment for the readout, or "No segment".
+pub fn segment_text(hz: f64) -> String {
+    segment_at(hz).map_or_else(|| "No segment".to_string(), str::to_string)
 }
 
 /// "7 078.000" style: kHz with a space grouping the thousands.
@@ -177,19 +224,44 @@ fn click_to_tune(event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Opt
     None
 }
 
-/// Channel markers shown as dashed lines across both plots.
-pub const MARKS: [(f64, &str); 2] = [(7_074_000.0, "Ch 1"), (7_081_000.0, "Ch 2")];
+/// Channels of the core default plan that fall inside the visible span. that fall inside the visible span.
+/// Each is (centre in Hz, number counted from 1 at the band start).
+pub fn channels() -> Vec<(f64, usize)> {
+    let lo = centre_hz() - SPAN_HZ / 2.0;
+    let hi = centre_hz() + SPAN_HZ / 2.0;
+    kahf_core::select::Plan::default_plan()
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, (hz, _))| (f64::from(*hz), i + 1))
+        .filter(|(hz, _)| *hz >= lo && *hz <= hi)
+        .collect()
+}
 
-fn band_markers(frame: &mut canvas::Frame, size: Size, labels: bool) {
-    for (hz, name) in MARKS {
-        let x = ((hz - (CENTRE_HZ - SPAN_HZ / 2.0)) / SPAN_HZ) as f32 * size.width;
+/// "Ch 12  7 075.0" label.
+pub fn channel_label(hz: f64, n: usize) -> String {
+    format!("Ch {n}  {}", khz_text(hz))
+}
+
+/// Number of the channel nearest the tuned frequency (within half a spacing).
+pub fn selected_channel(tuned_hz: f64) -> Option<usize> {
+    let half = f64::from(kahf_core::select::DEFAULT_SPACING_HZ) / 2.0;
+    channels().into_iter().find(|(hz, _)| (hz - tuned_hz).abs() <= half).map(|(_, n)| n)
+}
+
+fn band_markers(frame: &mut canvas::Frame, size: Size, labels: bool, tune: f32) {
+    let sel = selected_channel(hz_at(tune));
+    for (hz, n) in channels() {
+        let x = ((hz - (centre_hz() - SPAN_HZ / 2.0)) / SPAN_HZ) as f32 * size.width;
+        let on = sel == Some(n);
+        let color = if on { theme::AMBER } else { theme::with_alpha(theme::MUTED, 0.45) };
         let dash = canvas::LineDash { segments: &[3.0, 4.0], offset: 0 };
         frame.stroke(
             &Path::line(Point::new(x, 0.0), Point::new(x, size.height)),
-            Stroke { line_dash: dash, ..Stroke::default().with_color(theme::with_alpha(theme::WARNING, 0.55)).with_width(1.0) },
+            Stroke { line_dash: dash, ..Stroke::default().with_color(color).with_width(if on { 1.5 } else { 1.0 }) },
         );
         if labels {
-            let mut t = text(name.to_string(), Point::new(x + 4.0, 4.0), 10.0, theme::WARNING);
+            let mut t = text(channel_label(hz, n), Point::new(x + 4.0, size.height - 14.0), 10.0, color);
             t.align_x = iced::alignment::Horizontal::Left.into();
             frame.fill_text(t);
         }
@@ -204,7 +276,7 @@ fn time_scale(frame: &mut canvas::Frame, size: Size) {
         let y = (s / total * size.height).min(size.height - 1.0);
         frame.fill_rectangle(Point::new(0.0, y), Size::new(6.0, 1.0), theme::with_alpha(theme::TEXT, 0.6));
         let label = if s == 0.0 { "now".to_string() } else { format!("-{s:.0}s") };
-        let ty = if s == 0.0 { y + 2.0 } else { (y - 12.0).max(1.0) };
+        let ty = y + 3.0;
         frame.fill_rectangle(Point::new(0.0, ty - 1.0), Size::new(34.0, 13.0), theme::with_alpha(theme::BACKGROUND, 0.6));
         frame.fill_text(text(label, Point::new(8.0, ty), 10.0, theme::TEXT));
         s += 2.0;
@@ -212,9 +284,8 @@ fn time_scale(frame: &mut canvas::Frame, size: Size) {
 }
 
 fn passband(frame: &mut canvas::Frame, size: Size, tune: f32) {
-    let half = (BANDWIDTH_HZ / SPAN_HZ) as f32 / 2.0;
-    let x0 = ((tune - half) * size.width).max(0.0);
-    let x1 = ((tune + half) * size.width).min(size.width);
+    let x0 = (tune + (PASS_LO_HZ / SPAN_HZ) as f32).max(0.0) * size.width;
+    let x1 = (tune + (PASS_HI_HZ / SPAN_HZ) as f32).min(1.0) * size.width;
     frame.fill_rectangle(
         Point::new(x0, 0.0),
         Size::new((x1 - x0).max(0.0), size.height),
@@ -301,7 +372,7 @@ impl canvas::Program<Message> for SpectrumPlot<'_> {
                 &Path::line(Point::new(0.0, plot_h), Point::new(w, plot_h)),
                 Stroke::default().with_color(theme::MUTED).with_width(1.0),
             );
-            band_markers(frame, Size::new(w, plot_h), true);
+            band_markers(frame, Size::new(w, plot_h), true, self.tune);
         });
 
         let mut frame = canvas::Frame::new(renderer, size);
@@ -367,7 +438,7 @@ impl canvas::Program<Message> for WaterfallMarker {
     fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let size = bounds.size();
         let mut frame = canvas::Frame::new(renderer, size);
-        band_markers(&mut frame, size, false);
+        band_markers(&mut frame, size, false, self.tune);
         passband(&mut frame, size, self.tune);
         if self.scale {
             time_scale(&mut frame, size);

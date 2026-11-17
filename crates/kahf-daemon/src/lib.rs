@@ -19,7 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
 use kahf_core::frame;
-use kahf_core::io::{IqSink, IqSource, RigControl, RigctldClient};
+use kahf_core::access::{self, CarrierSense};
+use kahf_core::auth::{self, StationKey};
+use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
+use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
@@ -30,7 +33,17 @@ use kahf_core::session::{self, Message};
 use kahf_core::spectrum::Analyser;
 use kahf_log::contacts::{self, Contact};
 use kahf_log::{valid_call, Qso};
-use kahf_sdr::hackrf::{HackrfRx, HackrfTx};
+use kahf_radio::{GainSetting, RadioSpec, RxRadio};
+use kahf_sdr::hackrf::HackrfTx;
+
+/// What the operator confirms before relay mode starts. Both must be true.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RelayAck {
+    /// The operator holds an amateur licence that covers this station.
+    pub licence_held: bool,
+    /// The operator accepts the terms of relay operation.
+    pub terms_accepted: bool,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -111,7 +124,7 @@ const TX_TAIL_S: f64 = 0.1;
 /// Wait after a failed RX read before trying the radio again.
 const RX_RETRY: Duration = Duration::from_millis(200);
 
-/// HackRF sample rate (2.4 Msps = 300 x 8 kHz). Audio is real, sent as I with Q = 0.
+/// HackRF sample rate (2.4 Msps = 300 x 8 kHz). Transmit is single sideband: I is the audio, Q its Hilbert transform.
 const SDR_RATE_HZ: u32 = 2_400_000;
 const SDR_OVERSAMPLE: usize = (SDR_RATE_HZ / RATE) as usize;
 /// Half-length of the interpolation filter, in audio samples.
@@ -149,22 +162,47 @@ struct Shared {
     /// Outbox snapshot for `outbox_pending`, written by the worker.
     pending: Mutex<Vec<(u64, String)>>,
     flags: Flags,
+    /// Station key from the data folder, loaded at start-up. None when it could not be loaded.
+    station_key: Option<StationKey>,
+    /// Why the station key could not be loaded; logged once by the worker.
+    key_error: Mutex<Option<String>>,
+    /// Relay role and schedule (plan 4). None until a role is configured.
+    relay: Mutex<Option<Relay>>,
+    /// Forwards sent by this station as a relay (plan 4).
+    relay_stats: Mutex<Stats>,
+    /// One entry per forward, keyed by the public message id.
+    hops: Mutex<HopLog>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
 struct Flags {
+    /// Outgoing mail is signed with the station key (plan 4). On by default.
+    sign_mail: AtomicBool,
+    /// Relay mode is running. Set by `start_relay`, cleared by `stop_relay`. Never saved.
+    relay_running: AtomicBool,
+    /// The operator started a connection and has not disconnected. Only then do outbox
+    /// sends go out without relay mode.
+    operator_link: AtomicBool,
     listen_only: AtomicBool,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
+    /// Relay other stations' messages (setting B). On by default; no effect yet.
+    third_party_relay: AtomicBool,
     relay_timeout_ms: AtomicU64,
 }
 
 impl Flags {
     fn new() -> Self {
         Flags {
+            sign_mail: AtomicBool::new(true),
+            relay_running: AtomicBool::new(false),
+            operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
             update_locked: AtomicBool::new(false),
-            internet_relay: AtomicBool::new(false),
+            // Setting D: on by default. The gateway is a stub, so nothing leaves the station
+            // until the gateway exists and the operator sends that way.
+            internet_relay: AtomicBool::new(true),
+            third_party_relay: AtomicBool::new(true),
             relay_timeout_ms: AtomicU64::new(RELAY_TIMEOUT_MS),
         }
     }
@@ -245,10 +283,12 @@ impl Engine {
         if let Some(why) = tx_refusal(&self.shared.flags) {
             return Err(why.into());
         }
+        self.shared.flags.operator_link.store(true, Ordering::SeqCst);
         self.send_cmd(Cmd::Connect { peer })
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
+        self.shared.flags.operator_link.store(false, Ordering::SeqCst);
         self.send_cmd(Cmd::Disconnect)
     }
 
@@ -262,9 +302,88 @@ impl Engine {
         self.shared.flags.update_locked.store(on, Ordering::SeqCst);
     }
 
-    /// Internet relay (plan 6.1). Off by default; when off, no traffic leaves over the internet.
+    /// Mail signing (plan 4). On by default; the station key signs each outgoing mail body.
+    pub fn set_mail_signing(&self, on: bool) {
+        self.shared.flags.sign_mail.store(on, Ordering::SeqCst);
+    }
+
+    /// Relay role (plan 4): sets the role, the radio class and the assigned channels in kHz.
+    /// Replaces any earlier role and schedule.
+    pub fn configure_relay(
+        &self,
+        role: Role,
+        radio: relay::Radio,
+        channels_khz: &[f32],
+    ) -> Result<(), String> {
+        let r = Relay::new(&self.config.callsign, role, radio, channels_khz)?;
+        *lock(&self.shared.relay) = Some(r);
+        Ok(())
+    }
+
+    /// Starts relay mode for this run only (plan 4). Refused unless a relay role is set and
+    /// both acknowledgements are true. Nothing is saved: relay stops on `stop_relay` or when
+    /// the app quits.
+    pub fn start_relay(&self, ack: RelayAck) -> Result<(), String> {
+        if !(ack.licence_held && ack.terms_accepted) {
+            return Err(
+                "Relay mode did not start. Confirm that you hold a licence and accept the terms, then try again."
+                    .to_string(),
+            );
+        }
+        if lock(&self.shared.relay).is_none() {
+            return Err("Relay mode did not start. Set a relay role first.".to_string());
+        }
+        self.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Stops relay mode (plan 4). Unattended sends stop with it.
+    pub fn stop_relay(&self) {
+        self.shared.flags.relay_running.store(false, Ordering::SeqCst);
+    }
+
+    /// True while relay mode is running (plan 4).
+    pub fn relay_running(&self) -> bool {
+        self.shared.flags.relay_running.load(Ordering::SeqCst)
+    }
+
+    /// Relay schedule from the server (plan 4). A rejected schedule leaves the old one in place.
+    pub fn accept_relay_schedule(&self, slots: Vec<Slot>) -> Result<(), String> {
+        match lock(&self.shared.relay).as_mut() {
+            Some(r) => r.accept_schedule(slots),
+            None => Err("no relay role is set; configure one first".to_string()),
+        }
+    }
+
+    /// Forward counters for this station as a relay (plan 4).
+    pub fn relay_stats(&self) -> Stats {
+        lock(&self.shared.relay_stats).clone()
+    }
+
+    /// Forwards recorded for one message, in order (plan 4). `message_id` is the public id.
+    pub fn relay_hops(&self, message_id: u64) -> Vec<Hop> {
+        lock(&self.shared.hops).chain_for(message_id)
+    }
+
+    /// Internet relay (plan 6.1). On by default (setting D). The gateway is still a stub:
+    /// nothing goes over the internet until it exists and the operator sends a message that way.
+    /// When off, no traffic leaves over the internet.
     pub fn set_internet_relay(&self, on: bool) {
         self.shared.flags.internet_relay.store(on, Ordering::SeqCst);
+    }
+
+    /// Label of setting B, shown next to the switch.
+    pub const THIRD_PARTY_RELAY_LABEL: &'static str = "Relay other stations' messages";
+
+    /// Third-party relaying (setting B). On by default. It has no effect yet: forwarding
+    /// other stations' traffic is not built. TODO: the rules must be checked before release.
+    pub fn set_third_party_relay(&self, on: bool) {
+        self.shared.flags.third_party_relay.store(on, Ordering::SeqCst);
+    }
+
+    /// True when setting B is on.
+    pub fn third_party_relay(&self) -> bool {
+        self.shared.flags.third_party_relay.load(Ordering::SeqCst)
     }
 
     /// Test only: how long a message waits for its station before the relay step.
@@ -325,11 +444,15 @@ impl Engine {
         let names = files.iter().map(|(n, _)| n.clone()).collect();
         let to = to.trim().to_string();
         let from = self.config.callsign.clone();
+        let body = match (&self.shared.station_key, self.shared.flags.sign_mail.load(Ordering::SeqCst)) {
+            (Some(key), true) => sign_body(key, &from, body),
+            _ => body.to_string(),
+        };
         let mut msgs = vec![Message::Mail {
             from: from.clone(),
             to: to.clone(),
             subject: subject.to_string(),
-            body: body.to_string(),
+            body,
             attachments: names,
         }];
         msgs.extend(files.into_iter().map(|(name, data)| Message::File {
@@ -375,10 +498,20 @@ impl Engine {
 
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
+        // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
+        let (station_key, key_error) = match auth::load_or_create(&config.data_dir) {
+            Ok(k) => (Some(k), None),
+            Err(e) => (None, Some(format!("station key not loaded, mail will not be signed: {e}"))),
+        };
         let shared = Arc::new(Shared {
             events: Mutex::new(EventQueue::default()),
             pending: Mutex::new(Vec::new()),
             flags: Flags::new(),
+            station_key,
+            key_error: Mutex::new(key_error),
+            relay: Mutex::new(None),
+            relay_stats: Mutex::new(Stats::default()),
+            hops: Mutex::new(HopLog::new()),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -598,12 +731,13 @@ impl Backend for AudioBackend {
     }
 }
 
-/// HackRF over libhackrf. Real audio goes out as I with Q = 0, after
-/// interpolation to 2.4 Msps. Receive takes I and decimates to 8 kHz.
+/// SDR receive through kahf-radio (any driver the operator names); transmit stays on the
+/// HackRF path for now. Transmit is single sideband: I is the audio, Q its Hilbert transform.
+/// Receive takes I and decimates to 8 kHz.
 /// The HackRF cannot receive and transmit at once, so RX is closed while sending.
 struct SdrBackend {
     spec: SdrSpec,
-    rx: Option<HackrfRx>,
+    rx: Option<Box<dyn RxRadio>>,
     tx: Option<HackrfTx>,
     rx_resampler: Resampler,
     iq: Vec<(f32, f32)>,
@@ -619,35 +753,72 @@ impl SdrBackend {
             iq: vec![(0.0, 0.0); 16_384],
         }
     }
+
+    /// Stops and drops the receiver, if one is open.
+    fn close_rx(&mut self) {
+        if let Some(mut rx) = self.rx.take() {
+            rx.stop();
+        }
+    }
+}
+
+/// Sets the gains the receive path wants: LNA and VGA by name where the driver has them,
+/// automatic for any other stage the driver can leave to itself.
+fn set_rx_gains(rx: &mut dyn RxRadio) -> Result<(), String> {
+    for stage in rx.gain_stages() {
+        let name = stage.name.to_ascii_lowercase();
+        let want = if name.contains("lna") {
+            Some(SDR_RX_LNA_DB as f32)
+        } else if name.contains("vga") {
+            Some(SDR_RX_VGA_DB as f32)
+        } else {
+            None
+        };
+        match want {
+            Some(db) => rx.set_gain(&stage.name, GainSetting::Manual(db))?,
+            None if stage.auto => rx.set_gain(&stage.name, GainSetting::Auto)?,
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 impl Backend for SdrBackend {
     fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
         if self.rx.is_none() {
-            let rx = HackrfRx::open(
-                self.spec.serial.as_deref(),
-                self.spec.freq_hz,
-                SDR_RATE_HZ as f64,
-                SDR_RX_LNA_DB,
-                SDR_RX_VGA_DB,
-                false,
-            )?;
+            let mut rx = kahf_radio::open(&self.spec.radio)?;
+            rx.set_frequency_hz(self.spec.freq_hz)?;
+            let rate = rx.set_sample_rate(SDR_RATE_HZ)?;
+            set_rx_gains(rx.as_mut())?;
+            rx.start()?;
+            self.rx_resampler = Resampler::new(rate, RATE);
             self.rx = Some(rx);
-            self.rx_resampler = Resampler::new(SDR_RATE_HZ, RATE);
         }
         let Some(rx) = self.rx.as_mut() else {
             return Ok(());
         };
-        let n = rx.read_iq(&mut self.iq)?;
+        let n = match rx.read_iq(&mut self.iq) {
+            Ok(n) => n,
+            Err(e) => {
+                self.close_rx();
+                return Err(e);
+            }
+        };
         let mono: Vec<f32> = self.iq[..n].iter().map(|s| s.0).collect();
         self.rx_resampler.process(&mono, out);
         Ok(())
     }
 
     fn tx_start(&mut self) -> Result<(), String> {
-        self.rx = None;
+        if self.spec.radio.driver != "hackrf" {
+            return Err(format!(
+                "transmit needs a HackRF; {} is receive only",
+                self.spec.radio.driver
+            ));
+        }
+        self.close_rx();
         let tx = HackrfTx::open(
-            self.spec.serial.as_deref(),
+            self.spec.radio.id.as_deref(),
             self.spec.freq_hz,
             SDR_RATE_HZ as f64,
             SDR_TX_VGA_DB,
@@ -676,25 +847,17 @@ impl Backend for SdrBackend {
 
 #[derive(Clone, Debug, PartialEq)]
 struct SdrSpec {
-    serial: Option<String>,
+    radio: RadioSpec,
     freq_hz: u64,
 }
 
-/// Parses "hackrf[:serial][@freq_hz]", for example "hackrf@14074000".
+/// Parses "driver[:id][@freq_hz]", for example "hackrf:0000abc@14074000" or "rtlsdr@145500000".
 fn parse_sdr(s: &str) -> Result<SdrSpec, String> {
     let (dev, freq) = match s.split_once('@') {
         Some((d, f)) => (d, Some(f)),
         None => (s, None),
     };
-    let (kind, serial) = match dev.split_once(':') {
-        Some((k, sn)) => (k, Some(sn)),
-        None => (dev, None),
-    };
-    if kind.trim() != "hackrf" {
-        return Err(format!(
-            "unsupported SDR {kind:?}: only \"hackrf[:serial][@freq_hz]\" is wired up"
-        ));
-    }
+    let radio = kahf_radio::parse_spec(dev)?;
     let freq_hz = match freq {
         Some(f) => f
             .trim()
@@ -704,11 +867,7 @@ fn parse_sdr(s: &str) -> Result<SdrSpec, String> {
             .ok_or_else(|| format!("bad SDR frequency {f:?}"))?,
         None => DEFAULT_SDR_FREQ_HZ,
     };
-    let serial = serial
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    Ok(SdrSpec { serial, freq_hz })
+    Ok(SdrSpec { radio, freq_hz })
 }
 
 /// Windowed-sinc polyphase kernel: one row per fractional phase of the
@@ -745,20 +904,65 @@ fn sdr_kernel() -> &'static [Vec<f32>] {
     })
 }
 
+/// The whole audio buffer (8 kHz) as the HackRF transmits it: 2.4 Msps single-sideband IQ.
+pub fn audio_to_iq(samples: &[f32]) -> Vec<(f32, f32)> {
+    sdr_iq_range(samples, 0, samples.len())
+}
+
+/// Half-length of the Hilbert filter in audio samples (only odd taps are non-zero).
+const SDR_HILBERT_HALF: usize = 127;
+
+/// Hann-windowed ideal Hilbert taps, index k = 0..=SDR_HILBERT_HALF. Zero for even k.
+fn hilbert_taps() -> &'static [f32] {
+    static TAPS: OnceLock<Vec<f32>> = OnceLock::new();
+    TAPS.get_or_init(|| {
+        (0..=SDR_HILBERT_HALF)
+            .map(|k| {
+                if k == 0 || k % 2 == 0 {
+                    return 0.0;
+                }
+                let kf = k as f64;
+                let win = 0.5 * (1.0 + (PI * kf / (SDR_HILBERT_HALF as f64 + 1.0)).cos());
+                ((2.0 / (PI * kf)) * win) as f32
+            })
+            .collect()
+    })
+}
+
+/// Hilbert transform of audio at index idx (zero outside the buffer).
+fn hilbert_at(x: &[f32], idx: isize) -> f32 {
+    let at = |i: isize| usize::try_from(i).ok().and_then(|u| x.get(u)).copied().unwrap_or(0.0);
+    let taps = hilbert_taps();
+    let mut acc = 0f32;
+    for k in (1..=SDR_HILBERT_HALF).step_by(2) {
+        acc += taps[k] * (at(idx - k as isize) - at(idx + k as isize));
+    }
+    acc
+}
+
 /// IQ samples for audio input samples m0..m1 (taps reach outside the range).
+/// The output is single sideband: I is the audio and Q is its Hilbert transform,
+/// so the carrier has only the upper sideband and no mirror image.
 fn sdr_iq_range(x: &[f32], m0: usize, m1: usize) -> Vec<(f32, f32)> {
     let kernel = sdr_kernel();
     let mut out = Vec::with_capacity((m1 - m0) * SDR_OVERSAMPLE);
+    let mut quad = [0f32; 2 * SDR_HALF];
     for m in m0..m1 {
+        let base = m as isize - (SDR_HALF as isize - 1);
+        for (j, q) in quad.iter_mut().enumerate() {
+            *q = hilbert_at(x, base + j as isize);
+        }
         for taps in kernel {
-            let mut acc = 0f32;
+            let mut acc_i = 0f32;
+            let mut acc_q = 0f32;
             for (j, &t) in taps.iter().enumerate() {
-                let idx = m as isize + j as isize - (SDR_HALF as isize - 1);
+                let idx = base + j as isize;
                 if let Some(&v) = usize::try_from(idx).ok().and_then(|i| x.get(i)) {
-                    acc += t * v;
+                    acc_i += t * v;
                 }
+                acc_q += t * quad[j];
             }
-            out.push((acc, 0.0));
+            out.push((acc_i, acc_q));
         }
     }
     out
@@ -1184,6 +1388,10 @@ struct Worker {
     sense: Sense,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
+    /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
+    carrier: HashMap<u64, CarrierSense>,
+    /// When the carrier sense was last fed (one frame per FRAME_S).
+    carrier_fed: Option<Instant>,
     /// Failed channel checks for the next transmit (plan 2.3).
     access_failures: u32,
     /// No transmit starts before this time after a busy channel asked us to wait.
@@ -1218,6 +1426,48 @@ struct Worker {
     unreached_noted: HashSet<u64>,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
+}
+
+/// Line that separates a mail body from its signature block.
+const SIG_MARK: &str = "\n-----KAHF SIGNATURE-----\n";
+
+/// The body with its signature block appended: the mark, then the auth block as hex.
+fn sign_body(key: &StationKey, callsign: &str, body: &str) -> String {
+    let block = auth::sign(key, callsign, body.as_bytes());
+    let hex: String = block.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{body}{SIG_MARK}{hex}\n")
+}
+
+/// Splits a received mail body into the text and a label for the signature.
+/// The label says who signed it, or why the signature does not count.
+fn split_signature(body: &str, sender: &str) -> (String, String) {
+    let Some(at) = body.rfind(SIG_MARK) else {
+        return (body.to_string(), "Not signed".to_string());
+    };
+    let text = &body[..at];
+    let hex = body[at + SIG_MARK.len()..].trim();
+    let block: Option<Vec<u8>> = (hex.len() % 2 == 0 && hex.is_ascii())
+        .then(|| {
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+                .collect::<Option<Vec<u8>>>()
+        })
+        .flatten();
+    let label = match block.map(|b| auth::verify(&b, text.as_bytes())) {
+        Some(Ok((call, public))) if call.eq_ignore_ascii_case(sender) => {
+            format!("Signed by {call}, key {}", auth::fingerprint(&public))
+        }
+        Some(Ok((call, _))) => format!("Signed by {call}, which is not the sender {sender}"),
+        Some(Err(e)) => format!("Signature not valid: {e}"),
+        None => "Signature not valid: not hex".to_string(),
+    };
+    (text.to_string(), label)
+}
+
+/// Key for a channel in the carrier-sense map: its frequency in whole Hz.
+fn carrier_key(channel_hz: f32) -> u64 {
+    channel_hz.round().max(0.0) as u64
 }
 
 /// Result of one channel check (plan 2.3).
@@ -1269,6 +1519,8 @@ impl Worker {
             tuned_hz,
             sense: Sense::new(RATE as f32),
             plan: select::Plan::default_plan(),
+            carrier: HashMap::new(),
+            carrier_fed: None,
             access_failures: 0,
             access_retry_at: None,
             callsign: config.callsign.clone(),
@@ -1303,6 +1555,10 @@ impl Worker {
     /// Transmit runs in small steps here, so commands and receive keep moving.
     fn run(mut self) {
         self.log("engine started");
+        let key_error = lock(&self.shared.key_error).take();
+        if let Some(e) = key_error {
+            self.log(e);
+        }
         'main: loop {
             self.tick_link();
             loop {
@@ -1472,6 +1728,48 @@ impl Worker {
         }
     }
 
+    /// Plan 4: a station with a relay role sends only inside one of its transmit slots.
+    /// A station without a relay role, or with no schedule yet, is never held.
+    fn relay_slot_open(&self) -> bool {
+        match lock(&self.shared.relay).as_ref() {
+            None => true,
+            Some(r) if r.role == Role::Station => true,
+            // A relay role is held unless relay mode runs and a transmit slot covers now.
+            // With no schedule there is no slot, so it is held.
+            Some(r) => {
+                self.shared.flags.relay_running.load(Ordering::SeqCst)
+                    && !r.slots().is_empty()
+                    && r.may_relay_transmit_at(now_unix_secs().max(0) as u64)
+            }
+        }
+    }
+
+    /// Plan: only relay mode may transmit unattended. An outbox or control send goes out
+    /// when relay mode runs, or when the operator started a connection and has not
+    /// disconnected. Listen only is checked separately and always wins.
+    fn transmit_allowed(&self) -> bool {
+        self.shared.flags.relay_running.load(Ordering::SeqCst)
+            || self.shared.flags.operator_link.load(Ordering::SeqCst)
+    }
+
+    /// Counts one forward as a relay and records its hop. Only for a station with a relay role.
+    fn record_forward(&self, public_id: u64) {
+        let guard = lock(&self.shared.relay);
+        let Some(r) = guard.as_ref().filter(|r| r.role != Role::Station) else {
+            return;
+        };
+        let now = now_unix_secs().max(0) as u64;
+        let day_start = now - now % 86_400;
+        lock(&self.shared.relay_stats).count_sent(now, day_start);
+        lock(&self.shared.hops).record(Hop {
+            message_id: public_id,
+            relay: r.callsign.clone(),
+            at_unix: now,
+            channel_khz: self.tuned_hz.map_or(0.0, |hz| hz as f32 / 1000.0),
+            heard_by_next: false,
+        });
+    }
+
     /// Stops any transmit in progress and drops queued bursts while a refusal holds.
     /// Logs the refusal once, not on every pass.
     fn hold_tx(&mut self, why: &'static str) {
@@ -1492,6 +1790,9 @@ impl Worker {
     /// so an item for another station at the front holds the rest until that station is called.
     fn next_due(&mut self) -> Option<(u64, Message, bool)> {
         if tx_refusal(&self.shared.flags).is_some() {
+            return None;
+        }
+        if !self.transmit_allowed() || !self.relay_slot_open() {
             return None;
         }
         if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
@@ -1525,11 +1826,50 @@ impl Worker {
     /// Carrier sense for one plan channel (plan 2.1). A channel outside the receive audio
     /// cannot be measured, so it is not called busy.
     fn channel_busy(&self, channel_hz: f32) -> bool {
-        match self.audible_offset_hz(channel_hz) {
-            Some(off) => self
-                .sense
-                .channel_busy(off / 1000.0, select::DEFAULT_SPACING_HZ / 1000.0),
-            None => false,
+        let Some(off) = self.audible_offset_hz(channel_hz) else {
+            return false;
+        };
+        let marker = self
+            .sense
+            .channel_busy(off / 1000.0, select::DEFAULT_SPACING_HZ / 1000.0);
+        match self.carrier.get(&carrier_key(channel_hz)) {
+            Some(cs) => cs.is_busy(marker),
+            None => marker,
+        }
+    }
+
+    /// Feeds one power frame per plan channel from the latest spectrum (plan 2.1). A frame
+    /// is taken at most once per FRAME_S. Power is summed over the channel width, so a
+    /// station anywhere in the channel raises the level.
+    fn feed_carrier(&mut self, bins_db: &[f32]) {
+        let now = Instant::now();
+        if self
+            .carrier_fed
+            .is_some_and(|t| now.duration_since(t).as_secs_f32() < access::FRAME_S)
+        {
+            return;
+        }
+        self.carrier_fed = Some(now);
+        let bin_hz = RATE as f32 / SPEC_FFT as f32;
+        let half_hz = select::DEFAULT_SPACING_HZ / 2.0;
+        let channels: Vec<f32> = self.plan.channels.iter().map(|(f, _)| *f).collect();
+        for ch in channels {
+            let Some(off) = self.audible_offset_hz(ch) else {
+                continue;
+            };
+            let lo = (((off - half_hz) / bin_hz).floor().max(0.0)) as usize;
+            let hi = (((off + half_hz) / bin_hz).ceil() as usize).min(bins_db.len().saturating_sub(1));
+            if lo > hi || bins_db.is_empty() {
+                continue;
+            }
+            let power: f32 = bins_db[lo..=hi]
+                .iter()
+                .map(|db| 10f32.powf(db / 10.0))
+                .sum();
+            self.carrier
+                .entry(carrier_key(ch))
+                .or_default()
+                .push(power);
         }
     }
 
@@ -1552,13 +1892,21 @@ impl Worker {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
             ^ id.unwrap_or(0);
+        let pool = if urgent {
+            select::Pool::Emergency
+        } else {
+            select::Pool::Open
+        };
         let pick = {
             let busy = |f: f32| self.channel_busy(f);
-            if urgent {
-                select::choose_urgent(&self.plan, &busy, seed, self.access_failures)
-            } else {
-                select::choose(&self.plan, select::Pool::Open, &busy, seed, self.access_failures)
-            }
+            select::choose_in_pool(
+                &self.plan,
+                pool,
+                None,
+                &busy,
+                &mut select::SplitMix(seed),
+                self.access_failures,
+            )
         };
         match pick {
             Ok(_) => {
@@ -1596,6 +1944,11 @@ impl Worker {
         }
         if tx_refusal(&self.shared.flags).is_some() {
             self.control.clear();
+            return;
+        }
+        // Link replies (ACK and the like) answer the other station's call, so they are not
+        // gated by transmit_allowed. Only the relay slot and Listen only apply to them.
+        if !self.relay_slot_open() {
             return;
         }
         if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
@@ -1645,6 +1998,7 @@ impl Worker {
             }
         }
         self.outbox.done(id);
+        self.record_forward(public);
         self.persist_outbox();
     }
 
@@ -1958,6 +2312,7 @@ impl Worker {
         if now >= self.spec_due {
             if let Some(bins) = self.spec.spectrum_db() {
                 debug_assert_eq!(bins.len(), SPEC_BINS);
+                self.feed_carrier(&bins);
                 // Latest frame only: if the GUI is slow, older frames are replaced, not queued.
                 lock(&self.shared.events).spectrum = Some(bins);
                 self.spec_due = (self.spec_due + SPEC_PERIOD).max(now);
@@ -2044,7 +2399,11 @@ impl Worker {
                 attachments,
             } => {
                 let id = self.next_id();
-                let mut text = format!("From: {from}\nTo: {to}\nSubject: {subject}\n\n{body}\n");
+                let (body, label) = split_signature(&body, &from);
+                self.log(format!("mail {id} from {from}: {label}"));
+                let mut text = format!(
+                    "From: {from}\nTo: {to}\nSubject: {subject}\nSignature: {label}\n\n{body}\n"
+                );
                 if !attachments.is_empty() {
                     text.push_str("\nAttachments:\n");
                     for a in &attachments {
@@ -2082,6 +2441,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kahf_core::relay::Direction;
     use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use std::time::Instant;
@@ -2274,7 +2634,7 @@ mod tests {
     #[test]
     fn rejects_bad_sdr_setting() {
         let mut c = config("T1AA", temp_dir("sdr"));
-        c.sdr = Some("rtlsdr".into());
+        c.sdr = Some("nosuchradio".into());
         assert!(Engine::new(c).is_err());
     }
 
@@ -2293,18 +2653,37 @@ mod tests {
     }
 
     #[test]
+    fn engine_starts_with_no_sdr_and_with_hackrf_listed() {
+        // Start-up never opens a radio: no SDR configured, or a HackRF named as the input.
+        let mut none = config("AA1AAA", temp_dir("start-no-sdr"));
+        none.sdr = None;
+        assert!(Engine::new(none).is_ok());
+
+        let mut listed = config("AA1AAA", temp_dir("start-hackrf"));
+        listed.sdr = Some("hackrf@145500000".into());
+        match Engine::new(listed) {
+            Ok(engine) => drop(engine),
+            Err(e) => panic!("HackRF listed should validate: {e}"),
+        }
+
+        let mut bad = config("AA1AAA", temp_dir("start-bad-sdr"));
+        bad.sdr = Some("nosuchradio@145500000".into());
+        assert!(Engine::new(bad).is_err(), "unknown radio should be refused");
+    }
+
+    #[test]
     fn parses_sdr_settings() {
         let s = parse_sdr("hackrf:0000abc@14074000").unwrap();
-        assert_eq!(
-            s,
-            SdrSpec {
-                serial: Some("0000abc".into()),
-                freq_hz: 14_074_000
-            }
-        );
+        assert_eq!(s.radio.driver, "hackrf");
+        assert_eq!(s.radio.id.as_deref(), Some("0000abc"));
+        assert_eq!(s.freq_hz, 14_074_000);
+        let r = parse_sdr("rtlsdr@145500000").unwrap();
+        assert_eq!(r.radio.driver, "rtlsdr");
+        assert_eq!(r.radio.id, None);
+        assert_eq!(r.freq_hz, 145_500_000);
         assert_eq!(parse_sdr("hackrf").unwrap().freq_hz, DEFAULT_SDR_FREQ_HZ);
         assert!(parse_sdr("hackrf@0").is_err());
-        assert!(parse_sdr("airspy").is_err());
+        assert!(parse_sdr("nosuchradio").is_err());
     }
 
     #[test]
@@ -2450,12 +2829,38 @@ mod tests {
 
     #[test]
     fn sdr_interpolation_keeps_dc() {
-        let x = vec![0.5f32; 64];
-        let iq = sdr_iq_range(&x, 0, 64);
-        assert_eq!(iq.len(), 64 * SDR_OVERSAMPLE);
-        for &(i, q) in &iq[SDR_OVERSAMPLE * 16..SDR_OVERSAMPLE * 48] {
-            assert!((i - 0.5).abs() < 1e-3 && q == 0.0);
+        // The Hilbert filter reaches SDR_HILBERT_HALF samples, so only the middle is checked.
+        let x = vec![0.5f32; 1024];
+        let iq = sdr_iq_range(&x, 0, 1024);
+        assert_eq!(iq.len(), 1024 * SDR_OVERSAMPLE);
+        for &(i, q) in &iq[SDR_OVERSAMPLE * 200..SDR_OVERSAMPLE * 824] {
+            assert!((i - 0.5).abs() < 1e-3 && q.abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn sdr_transmit_has_no_image() {
+        // 1 kHz tone at audio rate; the transmitted spectrum must sit only at +1 kHz.
+        let rate = RATE as f64;
+        let x: Vec<f32> = (0..RATE as usize * 2)
+            .map(|n| (2.0 * PI * 1000.0 * n as f64 / rate).cos() as f32)
+            .collect();
+        let iq = audio_to_iq(&x);
+        let fs = SDR_RATE_HZ as f64;
+        let (a, b) = (iq.len() / 4, iq.len() * 3 / 4);
+        let level = |f: f64| {
+            let (mut re, mut im) = (0f64, 0f64);
+            for (n, &(i, q)) in iq[a..b].iter().enumerate() {
+                let t = 2.0 * PI * f * (n + a) as f64 / fs;
+                re += i as f64 * t.cos() + q as f64 * t.sin();
+                im += q as f64 * t.cos() - i as f64 * t.sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        let wanted = level(1000.0);
+        let image = level(-1000.0);
+        assert!(wanted > 0.0);
+        assert!(image / wanted < 0.01, "image is {:.1} dB down", 20.0 * (image / wanted).log10());
     }
 
     #[test]
@@ -2653,6 +3058,50 @@ mod tests {
         assert!(wait_until(5, || !a_to_b.lock().unwrap().is_empty()));
     }
 
+    /// Radio that counts how often PTT would be keyed (tx_start calls).
+    struct PttCountingRadio {
+        keyed: Arc<AtomicU64>,
+    }
+
+    impl Backend for PttCountingRadio {
+        fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.keyed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn tx_write(&mut self, _samples: &[f32], _start: usize, _end: usize) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn listen_only_never_keys_ptt() {
+        let keyed = Arc::new(AtomicU64::new(0));
+        let k = keyed.clone();
+        let factory: Factory = Box::new(move || {
+            Ok(Box::new(PttCountingRadio { keyed: k.clone() }) as Box<dyn Backend>)
+        });
+        let mut a = Engine::spawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
+        a.listen().unwrap();
+        a.set_listen_only(true);
+        assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
+        a.test_burst(vec![0.5; 4000]).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(keyed.load(Ordering::SeqCst), 0, "PTT keyed while Listen only was on");
+        // Control: the same burst keys PTT once Listen only is off.
+        a.set_listen_only(false);
+        a.test_burst(vec![0.5; 4000]).unwrap();
+        assert!(wait_until(5, || keyed.load(Ordering::SeqCst) >= 1));
+    }
+
     #[test]
     fn required_update_lock_refuses_every_transmit_path() {
         let (mut a, a_to_b) = lone_station("update-lock");
@@ -2673,6 +3122,8 @@ mod tests {
     fn unreached_station_gets_plain_sentence_once_when_relay_is_off() {
         let (mut a, _) = lone_station("relay-off");
         a.set_relay_timeout_ms(200);
+        // Internet relay is on by default now, so this test turns it off to test the plain sentence.
+        a.set_internet_relay(false);
         a.send_message("CC1CCC", "hello?").unwrap();
         let want = "Could not reach CC1CCC on air. The station did not respond on any relay path. Try again later, or enable internet relay in Settings.";
         let got = wait_for(&mut a, |e| *e == Event::Log(want.to_string()), 10);
@@ -2685,6 +3136,33 @@ mod tests {
             .count();
         assert_eq!(again, 0, "the sentence repeated");
         assert_eq!(a.outbox_pending().len(), 1, "message must stay queued");
+    }
+
+    #[test]
+    fn internet_relay_and_third_party_settings_default_on() {
+        let dir = temp_dir("owner-defaults");
+        let e = Engine::new(config("AA1AAA", dir)).unwrap();
+        assert!(e.shared.flags.internet_relay.load(Ordering::SeqCst), "setting D should default on");
+        assert!(e.third_party_relay(), "setting B should default on");
+        e.set_third_party_relay(false);
+        assert!(!e.third_party_relay());
+        assert_eq!(Engine::THIRD_PARTY_RELAY_LABEL, "Relay other stations' messages");
+    }
+
+    #[test]
+    fn default_internet_relay_sends_nothing_while_gateway_is_a_stub() {
+        // Internet relay is on by default. The gateway stub refuses, so the message stays
+        // queued and nothing goes over the internet.
+        let (mut a, _) = lone_station("relay-default-on");
+        a.set_relay_timeout_ms(200);
+        a.send_message("CC1CCC", "hello?").unwrap();
+        let got = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Log(s) if s.contains("internet gateway is not available yet")),
+            10,
+        );
+        assert!(got.is_some(), "stub was not reached");
+        assert_eq!(a.outbox_pending().len(), 1, "stub failure must keep the message");
     }
 
     #[test]
@@ -2713,6 +3191,11 @@ mod tests {
             events: Mutex::new(EventQueue::default()),
             pending: Mutex::new(Vec::new()),
             flags: Flags::new(),
+            station_key: None,
+            key_error: Mutex::new(None),
+            relay: Mutex::new(None),
+            relay_stats: Mutex::new(Stats::default()),
+            hops: Mutex::new(HopLog::new()),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, temp_dir(tag));
@@ -2753,6 +3236,8 @@ mod tests {
     #[test]
     fn private_send_sets_the_session_bit_and_survives_the_outbox() {
         let mut w = bare_worker("private-send", "AA1AAA");
+        // The operator started this connection, so the outbox may send.
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
         w.enqueue(vec![chat("AA1AAA", "BB1BBB", "for you")], vec![7], true);
         w.link_state = LinkState::Connected {
             peer: "BB1BBB".into(),
@@ -2764,6 +3249,7 @@ mod tests {
 
         // The same path without the mark sends a plain message.
         let mut plain = bare_worker("plain-send", "AA1AAA");
+        plain.shared.flags.operator_link.store(true, Ordering::SeqCst);
         plain.enqueue(vec![chat("AA1AAA", "BB1BBB", "for all")], vec![8], false);
         plain.link_state = LinkState::Connected {
             peer: "BB1BBB".into(),
@@ -2896,5 +3382,260 @@ mod tests {
         w.flush_control();
         assert!(w.control.is_empty());
         assert!(w.bursts.is_empty(), "queued control burst survived the lock");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan plumbing: channel access (2.1 to 2.3), signing (4), relay (4)
+    // -----------------------------------------------------------------------
+
+    /// Feeds a channel with a quiet history and then a loud one, so it reads busy.
+    fn load_channel(w: &mut Worker, hz: u64) {
+        let cs = w.carrier.entry(hz).or_default();
+        for _ in 0..60 {
+            cs.push(1e-8);
+        }
+        for _ in 0..20 {
+            cs.push(1e-3);
+        }
+    }
+
+    #[test]
+    fn carrier_sense_marks_loud_channel_busy_and_quiet_one_free() {
+        let mut w = bare_worker("carrier-busy", "AA1AAA");
+        w.tuned_hz = Some(14_000_000);
+        load_channel(&mut w, 14_000_000);
+        assert!(w.channel_busy(14_000_000.0), "loud channel should read busy");
+        // A channel with no energy history is free unless the start marker is seen.
+        assert!(!w.channel_busy(14_000_000.0 + 2_700.0), "unmeasured channel read busy");
+    }
+
+    #[test]
+    fn carrier_sense_ignores_channels_outside_the_audio() {
+        let mut w = bare_worker("carrier-outside", "AA1AAA");
+        w.tuned_hz = Some(14_000_000);
+        // 1 MHz above the tuned frequency is not in the receive audio: never called busy.
+        load_channel(&mut w, 15_000_000);
+        assert!(!w.channel_busy(15_000_000.0));
+    }
+
+    #[test]
+    fn spectrum_feeds_one_carrier_frame_per_period() {
+        let mut w = bare_worker("carrier-feed", "AA1AAA");
+        let bins = vec![-60.0f32; SPEC_BINS];
+        // The plan comes from the band plan, so take a real channel inside the receive audio.
+        let ch = w.plan.channels[0].0;
+        w.tuned_hz = Some((ch - 1_000.0) as u64);
+        let key = carrier_key(ch);
+        w.feed_carrier(&bins);
+        assert!(w.carrier.contains_key(&key), "audible channel not fed");
+        // A channel 5 kHz up is outside the audio and is not fed.
+        assert!(!w.carrier.contains_key(&carrier_key(ch + 5_000.0)), "channel 5 kHz up is audible");
+        let before = w.carrier[&key].level();
+        // A second call inside the frame period adds nothing.
+        w.feed_carrier(&bins);
+        assert_eq!(w.carrier[&key].level(), before);
+    }
+
+    #[test]
+    fn sign_body_round_trips_and_detects_changes() {
+        let key = StationKey::generate();
+        let signed = sign_body(&key, "AA1AAA", "hello there");
+        let (text, label) = split_signature(&signed, "AA1AAA");
+        assert_eq!(text, "hello there");
+        assert!(label.starts_with("Signed by AA1AAA, key "), "label {label}");
+        // Claimed by someone else.
+        let (_, other) = split_signature(&signed, "BB1BBB");
+        assert!(other.contains("not the sender"), "label {other}");
+        // Changed text.
+        let (_, tampered) = split_signature(&signed.replace("hello", "hellO"), "AA1AAA");
+        assert!(tampered.starts_with("Signature not valid"), "label {tampered}");
+        // No signature at all, and a damaged one.
+        assert_eq!(split_signature("plain", "AA1AAA").1, "Not signed");
+        let broken = format!("hi{SIG_MARK}zz\n");
+        assert!(split_signature(&broken, "AA1AAA").1.contains("not hex"));
+    }
+
+    #[test]
+    fn engine_creates_station_key_at_start_up() {
+        let dir = temp_dir("key-start");
+        let engine = Engine::new(config("AA1AAA", dir.clone())).unwrap();
+        assert!(dir.join(auth::KEY_FILE).exists(), "station key not created");
+        assert!(engine.shared.station_key.is_some());
+        // Mail is signed by default and can be turned off.
+        assert!(engine.shared.flags.sign_mail.load(Ordering::SeqCst));
+        engine.set_mail_signing(false);
+        assert!(!engine.shared.flags.sign_mail.load(Ordering::SeqCst));
+        let _ = engine;
+    }
+
+    #[test]
+    fn relay_schedule_is_checked_and_held_outside_transmit_slots() {
+        let mut w = bare_worker("relay-gate", "AA1AAA");
+        let now = now_unix_secs() as u64;
+        let transmit = |start: u64| Slot {
+            channel_khz: 14_000.0,
+            start_unix: start,
+            duration_s: 600,
+            direction: Direction::Transmit,
+        };
+        let receive = Slot {
+            channel_khz: 14_000.0,
+            start_unix: now - 300,
+            duration_s: 600,
+            direction: Direction::Receive,
+        };
+        // No role: nothing is held.
+        assert!(w.relay_slot_open());
+        *lock(&w.shared.relay) =
+            Some(Relay::new("AA1AAA", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        // A role with no schedule is held: no slot, no send.
+        assert!(!w.relay_slot_open(), "relay with no schedule was allowed");
+        // Receive slot only: held.
+        lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![receive]).unwrap();
+        assert!(!w.relay_slot_open(), "relay sent in a receive slot");
+        // A transmit slot covering now: open, but only with relay mode running.
+        lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![transmit(now - 10)]).unwrap();
+        assert!(!w.relay_slot_open(), "slot open while relay mode is off");
+        w.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        assert!(w.relay_slot_open());
+        // Wrong channel is refused and the old schedule stays.
+        let bad = Slot { channel_khz: 7_000.0, ..transmit(now - 10) };
+        assert!(lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![bad]).is_err());
+        assert!(w.relay_slot_open());
+        w.record_forward(9);
+    }
+
+    #[test]
+    fn forwards_are_counted_and_recorded_by_relay_only() {
+        let mut w = bare_worker("relay-forward", "AA1AAA");
+        // A plain station records nothing.
+        w.record_forward(1);
+        assert_eq!(lock(&w.shared.relay_stats).sent_total, 0);
+        *lock(&w.shared.relay) =
+            Some(Relay::new("AA1AAA", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        w.tuned_hz = Some(14_000_000);
+        w.record_forward(42);
+        w.record_forward(42);
+        assert_eq!(lock(&w.shared.relay_stats).sent_total, 2);
+        let hops = lock(&w.shared.hops).chain_for(42);
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].relay, "AA1AAA");
+        assert_eq!(hops[0].channel_khz, 14_000.0);
+        assert!(lock(&w.shared.hops).chain_for(7).is_empty());
+    }
+
+    #[test]
+    fn relay_start_needs_both_acknowledgements() {
+        let dir = temp_dir("relay-ack");
+        let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
+        // No role yet: refused with a plain message.
+        let both = RelayAck { licence_held: true, terms_accepted: true };
+        assert!(e.start_relay(both).unwrap_err().contains("relay role"));
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        // Either flag missing: refused, and relay stays off.
+        let no_licence = RelayAck { licence_held: false, terms_accepted: true };
+        let no_terms = RelayAck { licence_held: true, terms_accepted: false };
+        let neither = RelayAck::default();
+        for ack in [no_licence, no_terms, neither] {
+            let err = e.start_relay(ack).unwrap_err();
+            assert!(err.starts_with("Relay mode did not start"), "got {err}");
+            assert!(!e.relay_running(), "relay started with {ack:?}");
+        }
+        // Both true: accepted.
+        e.start_relay(both).unwrap();
+        assert!(e.relay_running());
+        // Operator stops it: off again, and nothing was saved to start it next time.
+        e.stop_relay();
+        assert!(!e.relay_running());
+    }
+
+    #[test]
+    fn relay_start_is_per_run_and_not_saved() {
+        let dir = temp_dir("relay-per-run");
+        {
+            let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
+            e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+            e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+        }
+        // A new run starts with relay mode off, whatever the old run had.
+        let mut again = Engine::new(config("AA1AAA", dir)).unwrap();
+        assert!(!again.relay_running());
+        again.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        assert!(!again.relay_running());
+    }
+
+    #[test]
+    fn relay_with_no_schedule_is_held() {
+        let mut w = bare_worker("relay-no-schedule", "AA1AAA");
+        *lock(&w.shared.relay) =
+            Some(Relay::new("AA1AAA", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        w.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        assert!(!w.relay_slot_open(), "relay with no schedule was allowed");
+        // Queued items stay queued too.
+        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "held")], vec![3], false);
+        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        assert!(w.next_due().is_none(), "relay with no schedule sent an item");
+    }
+
+    #[test]
+    fn station_without_relay_role_is_not_held_by_slots() {
+        let w = bare_worker("station-no-role", "AA1AAA");
+        assert!(w.relay_slot_open());
+    }
+
+    #[test]
+    fn unattended_sends_need_relay_mode_or_an_operator_connection() {
+        let mut w = bare_worker("unattended", "AA1AAA");
+        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "queued")], vec![5], false);
+        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        // Neither relay mode nor an operator connection: no send, no retry.
+        assert!(!w.transmit_allowed());
+        assert!(w.next_due().is_none(), "outbox sent without an operator or relay");
+        // The operator starts a connection: the send may go.
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        assert!(w.transmit_allowed());
+        assert!(w.next_due().is_some());
+        // Disconnect clears the operator flag (the engine does this on disconnect).
+        w.shared.flags.operator_link.store(false, Ordering::SeqCst);
+        assert!(!w.transmit_allowed());
+    }
+
+    #[test]
+    fn listen_only_blocks_every_send_even_in_relay_mode() {
+        let mut w = bare_worker("listen-blocks", "AA1AAA");
+        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "blocked")], vec![9], false);
+        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        w.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        *lock(&w.shared.relay) =
+            Some(Relay::new("AA1AAA", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        let now = now_unix_secs() as u64;
+        lock(&w.shared.relay)
+            .as_mut()
+            .unwrap()
+            .accept_schedule(vec![Slot {
+                channel_khz: 14_000.0,
+                start_unix: now - 10,
+                duration_s: 600,
+                direction: Direction::Transmit,
+            }])
+            .unwrap();
+        assert!(w.next_due().is_some(), "setup: send should be allowed");
+        w.shared.flags.listen_only.store(true, Ordering::SeqCst);
+        assert!(w.next_due().is_none(), "Listen only let an outbox send out");
+        w.shared.flags.listen_only.store(false, Ordering::SeqCst);
+        assert!(w.next_due().is_some());
+    }
+
+    #[test]
+    fn listen_only_refuses_engine_send_in_relay_mode() {
+        let dir = temp_dir("listen-relay-engine");
+        let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+        e.set_listen_only(true);
+        assert_eq!(e.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
+        assert_eq!(e.connect("BB1BBB").unwrap_err(), LISTEN_ONLY_TEXT);
     }
 }

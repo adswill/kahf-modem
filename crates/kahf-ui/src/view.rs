@@ -8,7 +8,7 @@ use iced::widget::{
 use crate::icons::{self, Icon};
 use iced::{Color, Element, Fill, Font, Length};
 
-use crate::app::{App, Busy, Confirm, Message, Section, ToastKind, PALETTE_INPUT};
+use crate::app::{App, Busy, Confirm, Message, Section, Step, ToastKind, TxAction, PALETTE_INPUT};
 use crate::sample;
 use crate::spectrum;
 use crate::strings as s;
@@ -70,13 +70,13 @@ pub fn label_caps<'a>(content: &str) -> Text<'a> {
     text(content.to_uppercase()).size(10).color(theme::MUTED).font(theme::SEMIBOLD)
 }
 
-pub fn subheading<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
-    let fragment = content.into_fragment();
-    label_caps(fragment.as_ref())
-}
-
 pub fn hline<'a>() -> El<'a> {
     container(space()).width(Fill).height(1).style(theme::hairline).into()
+}
+
+/// A short vertical divider for use inside bars.
+pub fn vsep<'a>() -> El<'a> {
+    container(space()).width(1).height(18).style(theme::hairline).into()
 }
 
 pub fn vline<'a>() -> El<'a> {
@@ -86,10 +86,6 @@ pub fn vline<'a>() -> El<'a> {
 /// Raised surface: flat fill and a 1 px border, square.
 pub fn raised<'a>(content: impl Into<El<'a>>) -> container::Container<'a, Message> {
     container(content.into()).style(theme::raised)
-}
-
-pub fn panel_box<'a>(content: impl Into<El<'a>>) -> container::Container<'a, Message> {
-    container(content).padding(8).style(theme::panel)
 }
 
 /// A thin dark header strip with a short upper-case label and a 1 px border.
@@ -366,14 +362,6 @@ fn section_icon(sec: Section) -> Icon {
     }
 }
 
-fn status_item<'a>(label: &'static str, why: &'static str) -> El<'a> {
-    tip_at(
-        row![icons::dot(theme::FAINT, None), small(label)].spacing(0).align_y(iced::Center),
-        why,
-        tooltip::Position::Top,
-    )
-}
-
 // -------------------------------------------------------------------- view
 
 impl App {
@@ -412,7 +400,7 @@ impl App {
 
         if let Some(modal) = self.modal() {
             let scrim = mouse_area(container(space()).width(Fill).height(Fill).style(theme::scrim(self.modal_alpha)))
-                .on_press(Message::CancelConfirm);
+                .on_press(if self.setup_open && self.confirm.is_none() && self.palette.is_none() { Message::SetupClose } else { Message::CancelConfirm });
             stack![base, opaque(scrim), modal].into()
         } else {
             base.into()
@@ -463,7 +451,7 @@ impl App {
             s::TIP_SOURCE,
         );
         let centre = tip(
-            row![label_caps(s::CENTRE_LABEL), num(spectrum::khz_text(spectrum::CENTRE_HZ)).color(theme::TEXT)]
+            row![label_caps(s::CENTRE_LABEL), num(spectrum::khz_text(spectrum::centre_hz())).color(theme::TEXT)]
                 .spacing(6)
                 .align_y(iced::Center),
             s::TIP_CENTRE,
@@ -495,12 +483,12 @@ impl App {
         container(
             row![
                 text(s::APP_NAME).size(14).font(theme::SEMIBOLD),
-                vline(),
+                vsep(),
                 source,
                 centre,
                 row![rec, stop].spacing(2),
                 mode,
-                vline(),
+                vsep(),
                 call,
                 link,
                 tx,
@@ -515,7 +503,7 @@ impl App {
                         .on_toggle(Message::ToggleListen),
                     s::TIP_LISTEN,
                 ),
-                tip(row![muted(s::UTC), mono(utc_clock())].spacing(4).align_y(iced::Center), s::TIP_UTC),
+                tip(row![icons::icon(Icon::Clock, 12.0, theme::MUTED), muted(s::UTC), mono(utc_clock())].spacing(4).align_y(iced::Center), s::TIP_UTC),
                 commands,
                 tip(
                     btn(s::SECTION_SETTINGS, Kind::Secondary).on_press(Message::Go(Section::Settings)),
@@ -559,13 +547,14 @@ impl App {
         }
         let hz_now = self.tuned_hz();
         let mut chans = column![strip(s::CHANNELS_HEADING)];
-        for (hz, name) in spectrum::MARKS {
-            let frac = ((hz - (spectrum::CENTRE_HZ - spectrum::SPAN_HZ / 2.0)) / spectrum::SPAN_HZ) as f32;
+        for (hz, n) in spectrum::channels() {
+            let name = format!("Ch {n}");
+            let frac = ((hz - (spectrum::centre_hz() - spectrum::SPAN_HZ / 2.0)) / spectrum::SPAN_HZ) as f32;
             let at = ((frac * self.bins.len() as f32) as usize).min(self.bins.len().saturating_sub(1));
             let lo = at.saturating_sub(6);
             let db = self.bins[lo..(at + 7).min(self.bins.len())].iter().copied().fold(spectrum::DB_MIN, f32::max);
             let busy = db > spectrum::DB_MIN + 28.0;
-            let tuned = (hz_now - hz).abs() < spectrum::BANDWIDTH_HZ;
+            let tuned = spectrum::selected_channel(hz_now) == Some(n);
             let (state, color) = if tuned && busy {
                 (s::CH_RECEIVING, theme::ACCENT)
             } else if tuned {
@@ -579,7 +568,7 @@ impl App {
                 container(
                     row![
                         icons::dot(color, None),
-                        text(name).size(12).width(34),
+                        text(name).size(12).width(40),
                         num(spectrum::khz_text(hz)).size(12).width(Fill),
                         num(format!("{db:.0}")).size(12).color(color),
                     ]
@@ -592,7 +581,46 @@ impl App {
             chans = chans.push(container(small(state).size(10)).padding(iced::Padding { top: 0.0, right: 6.0, bottom: 3.0, left: 20.0 }));
             chans = chans.push(hline());
         }
-        container(column![nav, hline(), chans])
+        let mut keys = column![strip(s::KEYS_HEADING)];
+        for (k, what) in [
+            ("Ctrl+L", s::KEY_LISTEN),
+            ("Ctrl+Shift+C", s::KEY_CONNECT),
+            ("Ctrl+Enter", s::KEY_SEND),
+            ("Ctrl+K", s::KEY_COMMANDS),
+            ("Esc", s::KEY_CANCEL),
+        ] {
+            keys = keys.push(container(row![num(k).size(11).color(theme::AMBER).width(84), small(what).size(11)].spacing(4)).padding([2, 8]));
+        }
+        let next = if self.callsign.trim().is_empty() {
+            s::NOW_NEXT_CALL
+        } else if self.link.is_none() {
+            s::NOW_NEXT_TARGET
+        } else {
+            s::NOW_NEXT_SEND
+        };
+        let now = column![
+            strip(s::NOW_HEADING),
+            container(
+                column![
+                    small(if self.listen_only { s::NOW_LISTEN_ON } else { s::NOW_LISTEN_OFF })
+                        .color(if self.listen_only { theme::WARNING } else { theme::ACCENT }),
+                    iced::widget::canvas(icons::LevelBar { level: self.level_now, peak: self.level_peak })
+                        .width(Fill)
+                        .height(8),
+                    small(next).size(11),
+                ]
+                .spacing(4)
+            )
+            .padding([4, 8]),
+        ];
+        let mut ev = column![strip(s::EVENTS_HEADING)];
+        if self.events.is_empty() {
+            ev = ev.push(container(muted(s::NO_EVENTS).size(11)).padding([4, 8]));
+        }
+        for (at, what) in self.events.iter().rev().take(6) {
+            ev = ev.push(container(column![num(at.clone()).size(10).color(theme::FAINT), small(what.clone()).size(11)]).padding([2, 8]));
+        }
+        container(column![nav, hline(), chans, now, hline(), keys, hline(), ev])
             .width(200)
             .height(Fill)
             .style(theme::bar)
@@ -616,6 +644,11 @@ impl App {
         container(
             row![
                 row![icons::dot(color, None), text(state).size(11).font(Font::MONOSPACE).color(color)].align_y(iced::Center),
+                if let Some(w) = kahf_core::bandplan::tuning_warning(self.tuned_hz() as u64, kahf_core::bandplan::KAHF_CHANNEL_WIDTH_HZ) {
+                    text(w).size(11).color(theme::WARNING).into()
+                } else {
+                    El::from(space())
+                },
                 cell(s::STATUS_SOURCE, source),
                 cell(s::STATUS_RATE, s::CHANNEL_RATE.to_string()),
                 cell(s::STATUS_CPU, format!("{cpu} %")),
@@ -647,14 +680,29 @@ impl App {
         if let Some(p) = &self.palette {
             return Some(self.palette_modal(&p.query, p.selected));
         }
-        match self.confirm? {
+        let Some(confirm) = self.confirm else {
+            return self.setup_open.then(|| self.setup_modal());
+        };
+        match confirm {
             Confirm::Transmit(action) => {
-                let rows = column![
-                    key_value(s::CONFIRM_TX_ACTION, action.label()),
+                let connects = self.tx_plan(action).iter().any(|st| matches!(st, Step::Connect(_)));
+                let label = match (action, connects) {
+                    (TxAction::Send, true) => s::ACTION_CONNECT_SEND,
+                    (TxAction::SendFile, true) => s::ACTION_CONNECT_SEND_FILE,
+                    _ => action.label(),
+                };
+                let mut rows = column![
+                    key_value(s::CONFIRM_TX_ACTION, label),
                     key_value(s::CONFIRM_TX_FREQ, format!("{} kHz", spectrum::khz_text(self.tuned_hz()))),
                     key_value(s::CONFIRM_TX_CALL, self.my_call().to_string()),
                 ]
                 .spacing(6);
+                if matches!(action, TxAction::Connect | TxAction::Send | TxAction::SendFile) {
+                    rows = rows.push(key_value(s::CONFIRM_TX_TO, self.target.trim().to_uppercase()));
+                }
+                if action == TxAction::SendFile {
+                    rows = rows.push(key_value(s::CONFIRM_TX_FILE, self.attach_path.trim().to_string()));
+                }
                 Some(modal_box(
                     self.modal_alpha,
                     s::CONFIRM_TX_TITLE,
@@ -662,6 +710,30 @@ impl App {
                     Some(rows.into()),
                     btn(s::CONFIRM_CANCEL, Kind::Secondary).on_press(Message::CancelConfirm),
                     btn(s::CONFIRM_TX_BUTTON, Kind::Danger).on_press(Message::ConfirmTx),
+                ))
+            }
+            Confirm::Relay => {
+                let ticks = column![
+                    iced::widget::checkbox(self.relay_licence)
+                        .label(s::RELAY_TICK_LICENCE)
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(Message::RelayLicence),
+                    iced::widget::checkbox(self.relay_terms)
+                        .label(s::RELAY_TICK_TERMS)
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(Message::RelayTerms),
+                ]
+                .spacing(8);
+                Some(modal_box(
+                    self.modal_alpha,
+                    s::RELAY_MODAL_TITLE,
+                    s::RELAY_MODAL_BODY,
+                    Some(ticks.into()),
+                    btn(s::RELAY_CANCEL, Kind::Secondary).on_press(Message::CancelConfirm),
+                    btn(s::RELAY_START, Kind::Danger)
+                        .on_press_maybe((self.relay_licence && self.relay_terms).then_some(Message::RelayStart)),
                 ))
             }
             Confirm::Disconnect => Some(modal_box(
@@ -719,11 +791,11 @@ fn modal_box<'a>(
     secondary: Button<'a, Message>,
     primary: Button<'a, Message>,
 ) -> El<'a> {
-    let mut col = column![text(title).size(18).font(theme::SEMIBOLD), muted(body)].spacing(10);
+    let mut col = column![heading(title), muted(body)].spacing(8);
     if let Some(d) = details {
         col = col.push(d);
     }
     col = col.push(row![space().width(Fill), secondary, primary].spacing(8));
     col = col.push(small(s::CONFIRM_ESC_HINT));
-    center(opaque(container(col).width(440).padding(18).style(theme::modal(alpha)))).into()
+    center(opaque(container(col).width(440).padding(12).style(theme::modal(alpha)))).into()
 }

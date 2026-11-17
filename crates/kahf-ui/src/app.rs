@@ -10,7 +10,7 @@ use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{canvas, image, operation, text_editor};
 use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
-use kahf_daemon::{Config, Engine, Event as EngineEvent, TxState};
+use kahf_daemon::{Config, Engine, RelayAck, Event as EngineEvent, TxState};
 
 use crate::sample::{self, Kind};
 use crate::spectrum::{self, Sim, Waterfall};
@@ -195,12 +195,13 @@ pub struct ConnectTry {
 }
 
 pub const SDR_CHOICES: [&str; 3] = [s::SDR_NONE_CHOICE, s::SDR_HACKRF, s::SDR_RTL];
-pub const SETUP_STEPS: usize = 5;
+pub const SETUP_STEPS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
     Transmit(TxAction),
     Disconnect,
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +279,9 @@ pub enum Message {
     MailQueue,
     File(usize, FileCmd),
     RelayAccept,
+    RelayLicence(bool),
+    RelayTerms(bool),
+    RelayStart,
     RelayDecline,
     LogSearch(String),
     LogExport,
@@ -286,6 +290,9 @@ pub enum Message {
     RoleChosen(Role),
     AudioIn(String),
     AudioOut(String),
+    BandChosen(spectrum::Band),
+    VolIn(f32),
+    VolOut(f32),
     RigChosen(RigControl),
     SdrChosen(String),
     ToggleRecord,
@@ -348,6 +355,11 @@ pub struct App {
     pub connect_try: Option<ConnectTry>,
     pub no_reply: Option<(String, &'static str)>,
     pub engine_note: String,
+    pub events: Vec<(String, String)>,
+    /// Relay start panel: the role asked for and the two tick boxes. Never saved.
+    pub relay_role: Option<Role>,
+    pub relay_licence: bool,
+    pub relay_terms: bool,
     live_spectrum: Option<Instant>,
     pub setup_open: bool,
     pub setup_done: bool,
@@ -382,6 +394,9 @@ pub struct App {
     /// Empty means not chosen yet.
     pub audio_in: String,
     pub audio_out: String,
+    pub band: spectrum::Band,
+    pub vol_in: f32,
+    pub vol_out: f32,
     pub rig: RigControl,
     /// Empty means not chosen yet.
     pub sdr: String,
@@ -494,6 +509,10 @@ impl App {
             connect_try: None,
             no_reply: None,
             engine_note: String::new(),
+            events: Vec::new(),
+            relay_role: None,
+            relay_licence: false,
+            relay_terms: false,
             live_spectrum: None,
             setup_open: false,
             setup_done: false,
@@ -523,9 +542,12 @@ impl App {
             log_search: String::new(),
             audio_in: String::new(),
             audio_out: String::new(),
+            band: spectrum::Band::M40,
+            vol_in: 70.0,
+            vol_out: 70.0,
             rig: RigControl::None,
             sdr: String::new(),
-            location: Location::Off,
+            location: Location::Precise,
             radius_km: 25.0,
             internet_relay: false,
             profile: s::PROFILE_AUTO,
@@ -589,6 +611,7 @@ impl App {
             !(self.rig == RigControl::Cat && self.rig_addr.trim().is_empty()),
             !self.sdr.is_empty() || self.receiving_set(),
             (!self.audio_in.is_empty() && !self.audio_out.is_empty()) || self.sdr_in_use(),
+            true,
             true,
         ]
     }
@@ -752,9 +775,8 @@ impl App {
 
     /// Simulated signal to noise ratio in dB (peak over the noise floor).
     pub fn snr_now(&self) -> f32 {
-        let half = (spectrum::BANDWIDTH_HZ / spectrum::SPAN_HZ) as f32 / 2.0;
-        let lo = (((self.tune - half) * spectrum::BINS as f32).max(0.0)) as usize;
-        let hi = ((((self.tune + half) * spectrum::BINS as f32) as usize).min(self.bins.len())).max(lo + 1);
+        let lo = (((self.tune + (spectrum::PASS_LO_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32).max(0.0)) as usize;
+        let hi = ((((self.tune + (spectrum::PASS_HI_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32) as usize).min(self.bins.len())).max(lo + 1);
         let peak = self.bins[lo.min(self.bins.len() - 1)..hi].iter().copied().fold(f32::MIN, f32::max);
         (peak + 106.0).max(0.0)
     }
@@ -869,6 +891,9 @@ impl App {
             ("call", self.callsign.clone()),
             ("audio_in", self.audio_in.clone()),
             ("audio_out", self.audio_out.clone()),
+            ("location", match self.location { Location::Off => "off", Location::Precise => "precise", Location::Area => "area" }.into()),
+            ("vol_in", format!("{:.0}", self.vol_in)),
+            ("vol_out", format!("{:.0}", self.vol_out)),
             ("sdr", self.sdr.clone()),
             ("rig", match self.rig {
                 RigControl::None => "none",
@@ -888,6 +913,13 @@ impl App {
         self.callsign = get("call");
         self.audio_in = get("audio_in");
         self.audio_out = get("audio_out");
+        self.location = match get("location").as_str() {
+            "off" => Location::Off,
+            "area" => Location::Area,
+            _ => Location::Precise,
+        };
+        self.vol_in = get("vol_in").parse().unwrap_or(70.0);
+        self.vol_out = get("vol_out").parse().unwrap_or(70.0);
         self.sdr = get("sdr");
         self.rig = match get("rig").as_str() {
             "cat" => RigControl::Cat,
@@ -964,6 +996,10 @@ impl App {
     fn poll_engine(&mut self, now: Instant) {
         let Some(engine) = self.engine.as_mut() else { return };
         let events = engine.poll_events();
+        // The daemon decides whether relay mode runs; the role shown follows it.
+        if self.role.is_relay() && !engine.relay_running() {
+            self.role = Role::Station;
+        }
         self.outbox = engine.outbox_pending().len();
         for ev in events {
             self.on_engine_event(ev, now);
@@ -1065,7 +1101,51 @@ impl App {
         }
     }
 
+    fn relay_reset(&mut self) {
+        self.relay_role = None;
+        self.relay_licence = false;
+        self.relay_terms = false;
+    }
+
+    /// Sends the relay start request to the daemon, with the acknowledgement of both ticks.
+    /// The daemon's own relay start must also refuse without it; the panel is not the only gate.
+    fn start_relay(&mut self, role: Role) {
+        let channels: Vec<f32> = spectrum::channels().iter().map(|(hz, _)| (*hz / 1000.0) as f32).collect();
+        let acknowledged = self.relay_licence && self.relay_terms;
+        if !acknowledged {
+            return;
+        }
+        let core_role = if role == Role::Both { kahf_core::relay::Role::RelayAndStation } else { kahf_core::relay::Role::Relay };
+        let ack = RelayAck { licence_held: self.relay_licence, terms_accepted: self.relay_terms };
+        let result = match self.ensure_engine() {
+            Ok(e) => e
+                .configure_relay(core_role, kahf_core::relay::Radio::HalfDuplex, &channels)
+                .and_then(|()| e.start_relay(ack)),
+            Err(why) => Err(why),
+        };
+        match result {
+            Ok(()) => {
+                self.role = role;
+                self.toast(s::TOAST_RELAY_STARTED, ToastKind::Info);
+            }
+            Err(why) => {
+                // Relay stays off.
+                self.role = Role::Station;
+                self.toast(&why, ToastKind::Warning);
+            }
+        }
+    }
+
+    /// True while the daemon reports relay mode running.
+    pub fn relay_on(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| e.relay_running())
+    }
+
     fn toast(&mut self, text: &str, kind: ToastKind) {
+        self.events.push((crate::view::utc_clock(), text.to_string()));
+        if self.events.len() > 8 {
+            self.events.remove(0);
+        }
         self.toast = Some(Toast {
             text: text.to_string(),
             kind,
@@ -1359,6 +1439,9 @@ impl App {
                 }
             }
             Message::CancelConfirm => {
+                if self.confirm == Some(Confirm::Relay) {
+                    self.relay_reset();
+                }
                 self.confirm = None;
                 self.palette = None;
             }
@@ -1498,10 +1581,49 @@ impl App {
                 self.restart_engine();
                 self.save();
             }
-            Message::RoleChosen(r) => self.role = r,
+            Message::RoleChosen(r) => {
+                if r.is_relay() && !self.role.is_relay() {
+                    // Starting relay mode always asks, every time.
+                    self.relay_reset();
+                    self.relay_role = Some(r);
+                    self.confirm = Some(Confirm::Relay);
+                } else {
+                    if !r.is_relay() {
+                        if let Some(e) = self.engine.as_ref() {
+                            e.stop_relay();
+                        }
+                        self.relay_reset();
+                    }
+                    self.role = r;
+                }
+            }
+            Message::RelayLicence(v) => self.relay_licence = v,
+            Message::RelayTerms(v) => self.relay_terms = v,
+            Message::RelayStart => {
+                if self.confirm == Some(Confirm::Relay) && self.relay_licence && self.relay_terms {
+                    if let Some(r) = self.relay_role {
+                        self.start_relay(r);
+                    }
+                    self.confirm = None;
+                    self.relay_reset();
+                }
+            }
             Message::AudioIn(d) => {
                 self.audio_in = d;
                 self.restart_engine();
+                self.save();
+            }
+            Message::BandChosen(b) => {
+                self.band = b;
+                spectrum::set_centre_hz(b.centre_hz());
+                self.tune = 0.5;
+            }
+            Message::VolIn(v) => {
+                self.vol_in = v;
+                self.save();
+            }
+            Message::VolOut(v) => {
+                self.vol_out = v;
                 self.save();
             }
             Message::AudioOut(d) => {
@@ -1624,11 +1746,12 @@ mod tests {
     fn transmit_needs_confirmation() {
         let mut app = ready();
         app.listen_only = false;
+        app.dry_run = true;
         let _ = app.update(Message::RequestTx(TxAction::Connect));
         assert_eq!(app.confirm, Some(Confirm::Transmit(TxAction::Connect)));
-        assert!(app.link.is_none());
+        assert!(app.steps.is_empty(), "nothing runs before confirmation");
         let _ = app.update(Message::ConfirmTx);
-        assert_eq!(app.link.as_deref(), Some("XX1XX"));
+        assert_eq!(app.steps, vec![Step::Connect("XX1XX".into())]);
         assert!(app.confirm.is_none());
     }
 
@@ -1636,7 +1759,7 @@ mod tests {
     fn escape_cancels_confirmation_and_palette() {
         let mut app = ready();
         app.listen_only = false;
-        let _ = app.update(Message::RequestTx(TxAction::Beacon));
+        let _ = app.update(Message::RequestTx(TxAction::Connect));
         assert!(app.confirm.is_some());
         let _ = app.update(Message::Key(Key::Named(Named::Escape), Modifiers::default()));
         assert!(app.confirm.is_none());
@@ -1659,10 +1782,23 @@ mod tests {
     }
 
     #[test]
-    fn send_needs_a_link() {
+    fn send_connects_first_when_not_linked() {
         let mut app = ready();
         app.listen_only = false;
+        app.dry_run = true;
         let _ = app.update(Message::Composer(text_editor::Action::Edit(text_editor::Edit::Insert('a'))));
+        let _ = app.update(Message::RequestTx(TxAction::Send));
+        assert_eq!(app.confirm, Some(Confirm::Transmit(TxAction::Send)));
+        let _ = app.update(Message::ConfirmTx);
+        assert_eq!(app.steps.len(), 2);
+        assert_eq!(app.steps[0], Step::Connect("XX1XX".into()));
+        assert!(matches!(app.steps[1], Step::Message(..)));
+    }
+
+    #[test]
+    fn send_without_text_is_refused() {
+        let mut app = ready();
+        app.listen_only = false;
         let _ = app.update(Message::RequestTx(TxAction::Send));
         assert!(app.confirm.is_none());
     }
@@ -1720,6 +1856,37 @@ mod tests {
     }
 
     #[test]
+    fn relay_start_asks_every_time_and_needs_both_ticks() {
+        let mut app = App::init();
+        let _ = app.update(Message::RoleChosen(Role::Relay));
+        assert_eq!(app.confirm, Some(Confirm::Relay));
+        assert!(!app.role.is_relay());
+        // One tick is not enough.
+        let _ = app.update(Message::RelayLicence(true));
+        let _ = app.update(Message::RelayStart);
+        assert_eq!(app.confirm, Some(Confirm::Relay));
+        // Cancel leaves relay off and clears the ticks.
+        let _ = app.update(Message::CancelConfirm);
+        assert!(app.confirm.is_none() && !app.role.is_relay() && !app.relay_licence);
+        // Asked again, boxes empty.
+        let _ = app.update(Message::RoleChosen(Role::Relay));
+        assert_eq!(app.confirm, Some(Confirm::Relay));
+        assert!(!app.relay_licence && !app.relay_terms);
+    }
+
+    #[test]
+    fn segments_are_found_and_outside_is_reported() {
+        assert!(spectrum::segment_at(7_042_000.0).is_some());
+        let _ = App::init().update(Message::BandChosen(spectrum::Band::M20));
+        assert!(!spectrum::channels().is_empty());
+        let _ = App::init().update(Message::BandChosen(spectrum::Band::M40));
+        assert!(spectrum::segment_at(14_105_000.0).is_some());
+        assert!(spectrum::segment_at(7_050_000.0).is_none());
+        assert_eq!(spectrum::segment_text(7_050_000.0), "No segment");
+        assert!(spectrum::channels().iter().all(|(hz, _)| spectrum::segment_at(*hz).is_some()));
+    }
+
+    #[test]
     fn relay_section_exists_for_every_role() {
         assert_eq!(Section::ALL[5], Section::Relay);
         assert_eq!(Section::ALL.len(), 9);
@@ -1728,6 +1895,7 @@ mod tests {
     #[test]
     fn sample_switch_empties_and_fills() {
         let mut app = ready();
+        let _ = app.update(Message::ShowSample(true));
         assert!(!app.files.is_empty());
         let _ = app.update(Message::ShowSample(false));
         assert!(app.files.is_empty() && app.thread.is_empty());

@@ -4,7 +4,7 @@
 use iced::widget::{button, container, pick_list, progress_bar, text_editor, text_input, toggler};
 use iced::{Background, Border, Color, Font, Shadow, Theme, font, theme::Palette};
 
-pub const RADIUS: f32 = 2.0;
+pub const RADIUS: f32 = 0.0;
 pub const HAIRLINE_WIDTH: f32 = 1.0;
 
 const fn hex(v: u32) -> Color {
@@ -124,14 +124,6 @@ pub fn popover(_theme: &Theme) -> container::Style {
     container::Style {
         shadow: popover_shadow(0.6),
         ..raised(_theme)
-    }
-}
-
-/// Inner top highlight line of a raised surface.
-pub fn highlight(strength: f32) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: Some(Background::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 0.07 * strength })),
-        ..Default::default()
     }
 }
 

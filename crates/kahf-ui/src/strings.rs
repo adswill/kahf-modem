@@ -25,10 +25,6 @@ pub const SECTION_RELAY: &str = "Relay";
 pub const SECTION_LOGBOOK: &str = "Logbook";
 pub const SECTION_MAP: &str = "Map";
 pub const SECTION_SETTINGS: &str = "Settings";
-pub const RAIL_COLLAPSE: &str = "Collapse";
-pub const RAIL_EXPAND: &str = "Expand";
-pub const RAIL_COLLAPSE_HINT: &str = "Collapse the section list";
-pub const RAIL_EXPAND_HINT: &str = "Expand the section list";
 
 // Simulated data
 pub const SIMULATED_INPUT: &str = "Simulated input";
@@ -46,7 +42,6 @@ pub const WIDTH_LABEL: &str = "Width";
 pub const OFFSET_LABEL: &str = "Offset";
 pub const PANEL_HIDE: &str = "Hide panel";
 pub const PANEL_SHOW: &str = "Show panel";
-pub const THREAD_TITLE: &str = "Conversation";
 pub const THREAD_EMPTY_TITLE: &str = "No messages yet";
 pub const THREAD_EMPTY_HINT: &str =
     "Type a callsign in To, write a message below and press Send. The app connects for you.";
@@ -78,24 +73,15 @@ pub const NO_MESSAGES_SENT: &str = "No message sent in this session.";
 pub const LISTEN_ONLY_WHY: &str =
     "Transmit is off because Listen only is on. Nothing leaves this computer.";
 pub const LISTEN_ONLY_TURN_OFF: &str = "Turn off Listen only";
-pub const NEEDS_CALLSIGN: &str = "Enter a callsign first.";
-pub const NEEDS_FILE: &str = "Type the path of the file to send.";
-pub const FILE_MISSING: &str = "That file cannot be found. Check the path.";
-pub const NEEDS_TEXT: &str = "Write a message first.";
-pub const TO_LABEL: &str = "To";
-pub const TO_PLACEHOLDER: &str = "Callsign, for example XX1XX";
 pub const ATTACH: &str = "Attach file";
 pub const ATTACH_PATH_LABEL: &str = "File to send";
 pub const ATTACH_PATH_PLACEHOLDER: &str = "Path of the file, for example /Users/me/photo.jpg";
 pub const ATTACH_SEND: &str = "Send file";
 pub const ATTACH_CANCEL: &str = "Cancel";
 pub const TIP_ATTACH: &str = "Send a file to the station in To. You confirm first.";
-pub const TIP_TO: &str = "The callsign of the station to send to. If you are not linked yet, the app connects first.";
 pub const FILES_SEND_BUTTON: &str = "Send a file";
 pub const COL_RETRIES: &str = "Retries";
-pub const ENGINE_LABEL: &str = "Engine";
 pub const ENGINE_LAST: &str = "Last engine message";
-pub const OUTBOX_LABEL: &str = "In outbox";
 pub const PROFILE_AUTO: &str = "Automatic";
 pub const PROFILE_ROBUST: &str = "Robust";
 pub const PROFILE_FAST: &str = "Fast";
@@ -251,9 +237,42 @@ pub const ROLE_RELAY: &str = "Relay";
 pub const ROLE_BOTH: &str = "Station and relay";
 pub const SET_AUDIO: &str = "Audio";
 pub const SET_AUDIO_DESC: &str = "Sound card connected to your radio.";
+pub const EVENTS_HEADING: &str = "Last events";
+pub const NO_EVENTS: &str = "Nothing yet. Events such as links and sends are listed here.";
+pub const KEYS_HEADING: &str = "Keys";
+pub const NOW_HEADING: &str = "Now";
+pub const KEY_LISTEN: &str = "Listen only on or off";
+pub const KEY_CONNECT: &str = "Connect to station";
+pub const KEY_SEND: &str = "Send message";
+pub const KEY_COMMANDS: &str = "All commands";
+pub const KEY_CANCEL: &str = "Cancel or close";
+pub const NOW_LISTEN_ON: &str = "Listen only, nothing is sent";
+pub const NOW_LISTEN_OFF: &str = "Transmit allowed, each send asks first";
+pub const NOW_NEXT_CALL: &str = "Next step: set your callsign in Settings.";
+pub const NOW_NEXT_TARGET: &str = "Next step: type a station callsign, then Connect.";
+pub const NOW_NEXT_SEND: &str = "Next step: write a message and press Ctrl+Enter.";
+pub const MAP_LOC_LABEL: &str = "Location sharing";
+pub const MAP_HEARD_LABEL: &str = "Stations heard";
+pub const MAP_LINK_LABEL: &str = "Linked to";
+pub const MAP_SUMMARY: &str = "This session";
+// Draft for owner legal review: the relay terms text below must be checked by a lawyer before release.
+pub const RELAY_MODAL_TITLE: &str = "Relay mode";
+pub const RELAY_MODAL_BODY: &str = "In some countries the law prohibits automatic stations unless the operator holds a licence for them. In Finland, an automatic station needs a licence or permit from Traficom. Relay mode forwards messages while the operator may not be at the station.";
+pub const RELAY_TICK_LICENCE: &str = "I hold the licence or permit my country requires for an automatic station.";
+pub const RELAY_TICK_TERMS: &str = "I accept the terms of use. KAHF is not responsible for what I do with it.";
+pub const RELAY_CANCEL: &str = "Cancel";
+pub const RELAY_START: &str = "Start relay";
+pub const TOAST_RELAY_STARTED: &str = "Relay mode started.";
+pub const SEGMENT_LABEL: &str = "Segment";
+pub const AUDIO_HEADING: &str = "Audio";
+pub const RIG_HEADING: &str = "Rig";
+pub const HOPS_HEADING: &str = "Hops";
+pub const VOL_IN_LABEL: &str = "Input volume";
+pub const VOL_OUT_LABEL: &str = "Output volume";
+pub const INPUT_LEVEL_LABEL: &str = "Input level";
+pub const NO_HOPS: &str = "No hops yet. Send a message to see its path.";
 pub const SET_AUDIO_IN: &str = "Input device";
 pub const SET_AUDIO_OUT: &str = "Output device";
-pub const DEVICE_NONE: &str = "None selected";
 pub const DEVICE_SYSTEM: &str = "System default";
 pub const SET_RIG: &str = "Rig";
 pub const SET_RIG_DESC: &str = "How KAHF changes frequency and keys your radio.";
@@ -264,12 +283,11 @@ pub const RIG_VOX: &str = "VOX";
 pub const SET_SDR: &str = "SDR";
 pub const SET_SDR_DESC: &str = "Use a software defined radio instead of a sound card.";
 pub const SET_SDR_DEVICE: &str = "SDR device";
-pub const SDR_NONE: &str = "None";
 pub const SET_DATA: &str = "Data folder";
 pub const SET_DATA_DESC: &str = "Where messages, mail, files and the logbook are stored.";
 pub const SET_DATA_PATH: &str = "Folder";
 pub const SET_LOCATION: &str = "Location sharing";
-pub const SET_LOCATION_DESC: &str = "What other stations and the map can learn about where you are.";
+pub const SET_LOCATION_DESC: &str = "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
 pub const LOC_OFF: &str = "Off";
 pub const LOC_OFF_DESC: &str = "Nobody sees your location.";
 pub const LOC_PRECISE: &str = "Precise";
@@ -316,9 +334,6 @@ pub fn connecting(peer: &str, attempt: u32, of: u32) -> String {
 }
 pub fn no_reply(peer: &str, what: &str) -> String {
     format!("No reply from {peer}. Your {what} is kept in the outbox and goes out when the station answers.")
-}
-pub fn queued_for(what: &str, peer: &str) -> String {
-    format!("Your {what} to {peer} is queued.")
 }
 pub fn size_text(bytes: u64) -> String {
     if bytes < 1024 {
@@ -432,7 +447,7 @@ pub const TIP_RAIL_SETTINGS: &str = "Callsign, audio, radio and privacy choices.
 
 // ---- Setup, blocked actions and plain-word explanations
 pub const SETUP_TITLE: &str = "Set up KAHF";
-pub const SETUP_INTRO: &str = "Five short steps. You can change any of them later in Settings.";
+pub const SETUP_INTRO: &str = "Six short steps. You can change any of them later in Settings.";
 pub const SETUP_START: &str = "Start";
 pub const SETUP_NEEDS_CALL: &str = "Enter your callsign in step 1 to start.";
 pub const SETUP_DONE_CHIP: &str = "Done";
@@ -446,15 +461,14 @@ pub const STEP_CALL: &str = "Your callsign";
 pub const STEP_RADIO: &str = "Choose your radio";
 pub const STEP_SDR: &str = "Choose your SDR";
 pub const STEP_AUDIO: &str = "Choose audio input and output";
+pub const STEP_LOCATION: &str = "Location sharing";
+pub const STEP_LOCATION_HINT: &str = "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
 pub const STEP_LISTEN: &str = "Listen only";
 pub const STEP_CALL_HINT: &str = "Sent with every transmission. Letters and digits only.";
 pub const STEP_RADIO_HINT: &str = "KAHF talks to a radio through rigctld. Pick no rig if you tune by hand.";
 pub const STEP_SDR_HINT: &str = "Use a software defined radio instead of a sound card, or none.";
 pub const STEP_AUDIO_HINT: &str = "The sound card connected to your radio. Watch the meter while a signal plays.";
 pub const STEP_LISTEN_HINT: &str = "The app receives but never transmits until you turn this off.";
-pub const RIG_NO_RIG: &str = "No rig, I will tune by hand";
-pub const RIG_LOCAL: &str = "rigctld on this computer (127.0.0.1:4532)";
-pub const RIG_OTHER: &str = "rigctld at another address";
 pub const RIG_ADDR_LABEL: &str = "rigctld address";
 pub const RIG_ADDR_PLACEHOLDER: &str = "host:port, for example 192.168.1.20:4532";
 pub const SDR_NONE_CHOICE: &str = "None, use the sound card";
@@ -464,20 +478,6 @@ pub const SDR_RTL_NOTE: &str = "RTL-SDR can only receive. Choose a sound card or
 pub const DETECTED: &str = "Detected";
 pub const NOTHING_DETECTED: &str = "No devices found. Plug one in and press Rescan.";
 pub const RESCAN: &str = "Rescan";
-pub const AUDIO_NOT_CHOSEN: &str = "Not chosen";
-pub const VOLUME_LABEL: &str = "Volume";
-pub const INPUT_LEVEL_LABEL: &str = "Input level";
-pub const HOME_DEVICES_HEADING: &str = "Radio and audio";
-pub const HOME_RADIO: &str = "Radio";
-pub const HOME_SDR: &str = "SDR";
-pub const HOME_AUDIO_IN: &str = "Audio in";
-pub const HOME_AUDIO_OUT: &str = "Audio out";
-pub const LISTEN_LINE_ON: &str = "The app is listening only. Turn this off to be able to transmit.";
-pub const LISTEN_LINE_OFF: &str = "Transmit is on. Every send asks you first.";
-pub const FIRST_TX_NOTE: &str =
-    "First time: sending makes your radio transmit on air. You are asked every time, and Listen only stops it all.";
-pub const FIRST_TX_BLOCKED: &str =
-    "Listen only is on, so nothing was sent. Turn Listen only off in the top bar, then press Send again.";
 pub const BLOCK_LISTEN: &str = "Sending is off because Listen only is on. Turn it off in the top bar, then try again.";
 pub const BLOCK_NO_TO: &str = "Type the station's callsign in To, then press Send.";
 pub const BLOCK_NO_TEXT: &str = "Write a message first, then press Send.";
@@ -516,9 +516,10 @@ pub const TIP_CENTRE: &str = "The centre frequency of the capture. The tuned cha
 pub const TIP_RECORD: &str = "Start recording the received signal. Nothing is written while the input is simulated.";
 pub const TIP_STOP: &str = "Stop the recording.";
 pub const TIP_MODE: &str = "How the signal is decoded. Data is the only mode so far.";
-pub const SPECTRUM_HEADING: &str = "Spectrum and waterfall";
-pub const LINK_READOUT_HEADING: &str = "Link";
 pub const STATIONS_HEARD_HEADING: &str = "Stations heard";
 pub const SNR_LABEL: &str = "SNR";
 pub const CONVERSATION_HEADING: &str = "Conversation";
 pub const LINK_CONNECTING: &str = "Connecting";
+pub const INPUT_LEVEL_SHORT: &str = "Level";
+pub const MONITOR_HEADING: &str = "Receive and transmit";
+pub const SNR_HISTORY_HEADING: &str = "SNR, last 60 s";

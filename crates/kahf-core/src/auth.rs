@@ -17,11 +17,18 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
 
 const PUBLIC_LEN: usize = 32;
 const SIG_LEN: usize = 64;
 const MAX_CALLSIGN: usize = 255;
+const SECRET_LEN: usize = 32;
 const DOMAIN: &[u8] = b"kahf-auth-v1";
+
+/// File name of the station key inside the data folder.
+pub const KEY_FILE: &str = "station.key";
 
 /// Ed25519 signing key for a station. Signing only; never used to encrypt.
 pub struct StationKey {
@@ -51,6 +58,59 @@ impl StationKey {
     /// Sign a message (domain-separated, over callsign and body) and return the 64-byte signature.
     pub fn sign(&self, callsign: &str, body: &[u8]) -> [u8; 64] {
         self.key.sign(&signed_data(callsign, body)).to_bytes()
+    }
+
+    /// Fingerprint of this station's public key, for comparison in Settings.
+    pub fn fingerprint(&self) -> String {
+        fingerprint(&self.to_public())
+    }
+
+    fn secret(&self) -> [u8; SECRET_LEN] {
+        self.key.to_bytes()
+    }
+}
+
+/// Load the station key from the data folder `dir`. On first run (no key file
+/// yet) a new key is generated and saved there. The file holds the raw 32-byte
+/// secret and is created readable only by the owner on Unix.
+pub fn load_or_create(dir: &Path) -> io::Result<StationKey> {
+    let path = dir.join(KEY_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => key_from_file_bytes(&bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => create_key_file(dir, &path),
+        Err(e) => Err(e),
+    }
+}
+
+fn key_from_file_bytes(bytes: &[u8]) -> io::Result<StationKey> {
+    let secret: [u8; SECRET_LEN] = bytes.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("station key file must be {SECRET_LEN} bytes, found {}", bytes.len()),
+        )
+    })?;
+    Ok(StationKey::from_bytes(&secret))
+}
+
+fn create_key_file(dir: &Path, path: &Path) -> io::Result<StationKey> {
+    fs::create_dir_all(dir)?;
+    let key = StationKey::generate();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(&key.secret())?;
+            file.sync_all()?;
+            Ok(key)
+        }
+        // Another process created the file first: use its key.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => key_from_file_bytes(&fs::read(path)?),
+        Err(e) => Err(e),
     }
 }
 
@@ -162,5 +222,44 @@ mod tests {
         let fp = fingerprint(&key().to_public());
         assert_eq!(fp.len(), 19); // 16 hex digits + 3 dashes
         assert_eq!(fp.split('-').count(), 4);
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kahf-auth-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn key_is_created_once_and_reloaded() {
+        let dir = scratch_dir("reload");
+        let first = load_or_create(&dir).unwrap();
+        let bytes = fs::read(dir.join(KEY_FILE)).unwrap();
+        assert_eq!(bytes.len(), SECRET_LEN);
+        let second = load_or_create(&dir).unwrap();
+        assert_eq!(first.to_public(), second.to_public());
+        assert_eq!(first.fingerprint(), fingerprint(&first.to_public()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_key_file_is_an_error() {
+        let dir = scratch_dir("corrupt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(KEY_FILE), b"short").unwrap();
+        let err = load_or_create(&dir).err().expect("short key file must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn different_folders_get_different_keys() {
+        let a = scratch_dir("ka");
+        let b = scratch_dir("kb");
+        let ka = load_or_create(&a).unwrap();
+        let kb = load_or_create(&b).unwrap();
+        assert_ne!(ka.to_public(), kb.to_public());
+        let _ = fs::remove_dir_all(&a);
+        let _ = fs::remove_dir_all(&b);
     }
 }

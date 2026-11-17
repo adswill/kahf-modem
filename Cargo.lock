@@ -2768,6 +2768,7 @@ dependencies = [
  "kahf-audio",
  "kahf-core",
  "kahf-log",
+ "kahf-radio",
  "kahf-sdr",
 ]
 
@@ -2788,6 +2789,13 @@ version = "0.0.1"
 [[package]]
 name = "kahf-prop"
 version = "0.0.1"
+
+[[package]]
+name = "kahf-radio"
+version = "0.0.1"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "kahf-sdr"

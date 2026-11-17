@@ -321,4 +321,89 @@ mod tests {
         drop(client);
         server.join().unwrap();
     }
+
+    /// Fake rigctld that answers each command with the given reply, in order, and records the commands.
+    fn scripted_rigctld(replies: Vec<&'static str>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut seen = Vec::new();
+            for reply in replies {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                seen.push(line);
+                writer.write_all(reply.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn rigctld_set_ptt_error_reply_is_reported_not_ignored() {
+        // A rig that refuses PTT must make set_ptt fail, so the daemon can stop the burst.
+        let (addr, server) = scripted_rigctld(vec!["RPRT -6\n"]);
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        let err = client.set_ptt(true).unwrap_err();
+        assert!(err.contains("RPRT -6"), "got {err}");
+        drop(client);
+        assert_eq!(server.join().unwrap(), vec!["T 1\n"]);
+    }
+
+    #[test]
+    fn rigctld_get_ptt_reads_both_states() {
+        let (addr, server) = scripted_rigctld(vec!["0\n", "1\n"]);
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        assert!(!client.get_ptt().unwrap());
+        assert!(client.get_ptt().unwrap());
+        drop(client);
+        assert_eq!(server.join().unwrap(), vec!["t\n", "t\n"]);
+    }
+
+    #[test]
+    fn rigctld_get_ptt_rejects_garbage_reply() {
+        let (addr, server) = scripted_rigctld(vec!["maybe\n"]);
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        assert!(client.get_ptt().unwrap_err().contains("bad PTT reply"));
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rigctld_set_freq_error_reply_is_reported() {
+        let (addr, server) = scripted_rigctld(vec!["RPRT -8\n"]);
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        assert!(client.set_freq_hz(145_500_000).is_err());
+        drop(client);
+        assert_eq!(server.join().unwrap(), vec!["F 145500000\n"]);
+    }
+
+    #[test]
+    fn rigctld_silent_rig_times_out_with_plain_message() {
+        // Accepts the connection and never answers. The read timeout is 2 s.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        let err = client.get_ptt().unwrap_err();
+        assert_eq!(err, "rig did not answer");
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rigctld_connect_refused_names_the_address() {
+        // Port 1 on loopback is closed; the connect must fail with the address in the message.
+        let err = RigctldClient::connect("127.0.0.1:1").err().expect("connect should fail");
+        assert!(err.contains("127.0.0.1:1"), "got {err}");
+    }
 }

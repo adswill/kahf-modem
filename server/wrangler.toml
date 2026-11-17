@@ -1,0 +1,29 @@
+name = "kahf-station-map"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Public address: kahf.dev, served by this Worker.
+routes = [{ pattern = "kahf.dev", custom_domain = true }]
+
+# Workers KV namespace that holds the station records.
+# Create it once with: npx wrangler kv namespace create STATIONS
+# then replace the placeholder id below with the id it prints.
+[[kv_namespaces]]
+binding = "STATIONS"
+id = "20b6e0f8b9374446883b0e47c37a0b69"
+
+# Durable Objects for the claims that must not race.
+#   CALLSIGNS: one per callsign (reporter owner and relay registration).
+#   AREAS: one per one-degree area (live relays and slot bookings).
+[[durable_objects.bindings]]
+name = "CALLSIGNS"
+class_name = "CallsignObject"
+
+[[durable_objects.bindings]]
+name = "AREAS"
+class_name = "AreaObject"
+
+# SQLite-backed storage for both classes (Workers Paid plan).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CallsignObject", "AreaObject"]
