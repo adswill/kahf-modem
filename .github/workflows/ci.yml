@@ -45,7 +45,7 @@ jobs:
         run: cargo test --workspace --exclude kahf-sdr
 
   full:
-    name: ${{ matrix.name }}
+    name: Full platform build
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_matrix }}
     runs-on: ${{ matrix.runner }}
     strategy:
