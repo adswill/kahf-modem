@@ -71,8 +71,8 @@ export function homeBody() {
 <p>A station that hears two others can pass messages between them, so a message can reach a station that is out of direct range.</p>
 </div>
 <div>
-<p>Working today in software tests: the modem over audio, messages, mail and file transfer, a contact log with ADIF export, and the station server behind the map.</p>
-<p>Still being built: sound-card and SDR adapters, and map reporting from the app. Until that ships, the map can be empty.</p>
+<p>Version 1.0 includes the modem, messages, mail and file transfer, a contact log with ADIF export, receive from HackRF, RTL-SDR and other radios, transmit through HackRF or a rig, and the live map.</p>
+<p>Not in 1.0 yet: reporting your station to the map from the app. Until that ships, the map shows only what has been reported to it.</p>
 </div>
 </div>
 <figure class="shot">

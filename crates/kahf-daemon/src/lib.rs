@@ -984,35 +984,61 @@ fn sdr_iq_range(x: &[f32], m0: usize, m1: usize) -> Vec<(f32, f32)> {
 // Frame layer helpers (PHY + LDPC + frame), shared by TX and RX
 // ---------------------------------------------------------------------------
 
-/// Samples of one zero-payload frame. Every frame has this length.
+/// The modulations a frame can use, in the order the receiver tries them.
+/// The id in the frame (0, 1, 2) is the index in this list.
+const MODULATIONS: [Modulation; 3] = [Modulation::Qpsk, Modulation::Qam16, Modulation::Qam64];
+
+fn mod_id(m: Modulation) -> u8 {
+    MODULATIONS.iter().position(|&x| x == m).unwrap_or(0) as u8
+}
+
+/// Samples of one zero-payload frame at the transmit modulation. Used to find the preamble.
 fn frame_template() -> &'static [f32] {
     static FRAME: OnceLock<Vec<f32>> = OnceLock::new();
     FRAME.get_or_init(|| phy::modulate_frame(&vec![0u8; ldpc::N], MODULATION))
 }
 
+/// Samples of one zero-payload frame in the given modulation.
+fn frame_len_for(m: Modulation) -> usize {
+    static LENS: OnceLock<Vec<usize>> = OnceLock::new();
+    let lens = LENS.get_or_init(|| {
+        MODULATIONS
+            .iter()
+            .map(|&x| phy::modulate_frame(&vec![0u8; ldpc::N], x).len())
+            .collect()
+    });
+    lens[mod_id(m) as usize]
+}
+
+/// Samples of one frame at the transmit modulation.
 fn frame_len() -> usize {
-    frame_template().len()
+    frame_len_for(MODULATION)
 }
 
 fn frame_samples(payload: &[u8]) -> Result<Vec<f32>, String> {
+    frame_samples_as(payload, MODULATION)
+}
+
+/// One frame, sent with the given modulation. The frame carries the modulation id.
+fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     if payload.len() > MAX_CHUNK {
         return Err(format!(
             "frame payload of {} bytes is over {MAX_CHUNK}",
             payload.len()
         ));
     }
-    let coded = ldpc::encode(&frame::build_payload(payload));
-    Ok(phy::modulate_frame(&coded, MODULATION))
+    let coded = ldpc::encode(&frame::build_payload_as(payload, mod_id(m)));
+    Ok(phy::modulate_frame(&coded, m))
 }
 
 /// One transmit burst: lead-in silence, the frames with gaps, tail silence.
-fn burst(frames: &[Vec<u8>]) -> Result<Vec<f32>, String> {
+fn burst(frames: &[Vec<u8>], m: Modulation) -> Result<Vec<f32>, String> {
     let mut out = vec![0f32; LEAD_SILENCE];
     for (i, payload) in frames.iter().enumerate() {
         if i > 0 {
             out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
         }
-        out.extend(frame_samples(payload)?);
+        out.extend(frame_samples_as(payload, m)?);
     }
     out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
     Ok(out)
@@ -1049,11 +1075,13 @@ fn find_preamble(x: &[f32]) -> Option<usize> {
     Some(best.0)
 }
 
-/// Decode exactly one frame that starts at the preamble. None on a CRC or LDPC failure.
-fn decode_at(samples: &[f32]) -> Option<Vec<u8>> {
-    let llr = phy::demodulate_frame(samples, MODULATION, ldpc::N)?;
+/// Decode exactly one frame that starts at the preamble, sent with modulation `m`.
+/// None on a CRC or LDPC failure, or when the frame says it was sent another way.
+fn decode_at(samples: &[f32], m: Modulation) -> Option<Vec<u8>> {
+    let llr = phy::demodulate_frame(samples, m, ldpc::N)?;
     let info = ldpc::decode(&llr, LDPC_ITER)?;
-    frame::parse_payload(&info)
+    let (data, id) = frame::parse_payload_id(&info)?;
+    (id == mod_id(m)).then_some(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,6 +1440,8 @@ struct Worker {
     callsign: String,
     backend: Option<Box<dyn Backend>>,
     link: Link,
+    /// Index into MODULATIONS for the next transmission. Moves one step at a time with the peer's reports.
+    tx_level: u8,
     link_state: LinkState,
     qso: Option<OpenQso>,
     outbox: Outbox,
@@ -1538,6 +1568,7 @@ impl Worker {
             callsign: config.callsign.clone(),
             backend: None,
             link: Link::new(&config.callsign),
+            tx_level: 0,
             link_state: LinkState::Idle,
             qso: None,
             outbox,
@@ -2191,7 +2222,14 @@ impl Worker {
 
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
-        match burst(frames) {
+        // Step the modulation one level at a time: up after a clean report, down after a poor one.
+        match self.link.peer_frame_error_pct() {
+            Some(f) if f < 2 && (self.tx_level as usize) + 1 < MODULATIONS.len() => self.tx_level += 1,
+            Some(f) if f >= 8 && self.tx_level > 0 => self.tx_level -= 1,
+            _ => {}
+        }
+        let m = MODULATIONS[self.tx_level as usize];
+        match burst(frames, m) {
             Ok(samples) => self.bursts.push_back(samples),
             Err(e) => self.log(format!("cannot build transmission: {e}")),
         }
@@ -2344,19 +2382,31 @@ impl Worker {
     /// Finds frames in the RX buffer. Consumed frames leave the buffer. An
     /// incomplete frame stays until more audio arrives.
     fn decode_frames(&mut self) {
-        let flen = frame_len();
+        let longest = MODULATIONS.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
         loop {
             let Some(start) = find_preamble(&self.rx_buf) else {
                 let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
                 self.rx_buf.drain(..keep);
                 return;
             };
-            if start + flen > self.rx_buf.len() {
+            // Wait until the longest possible frame is in the buffer: the modulation is not known yet.
+            if start + longest > self.rx_buf.len() {
                 self.rx_buf.drain(..start);
                 return;
             }
-            let decoded = decode_at(&self.rx_buf[start..start + flen]);
-            self.rx_buf.drain(..start + flen);
+            let mut found = None;
+            for &m in &MODULATIONS {
+                let len = frame_len_for(m);
+                if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
+                    found = Some((payload, len));
+                    break;
+                }
+            }
+            let (decoded, used) = match found {
+                Some((payload, len)) => (Some(payload), len),
+                None => (None, frame_len()),
+            };
+            self.rx_buf.drain(..start + used);
             if let Some(payload) = decoded {
                 self.on_frame(payload);
             }
@@ -2802,7 +2852,7 @@ mod tests {
         assert_eq!(frame_template()[..PREAMBLE_LEN].len(), PREAMBLE_LEN);
         let payload = b"hello kahf".to_vec();
         let mut air = vec![0f32; 1234];
-        air.extend(burst(&[payload.clone()]).unwrap());
+        air.extend(burst(&[payload.clone()], MODULATION).unwrap());
         air.extend(vec![0f32; 500]);
         let start = find_preamble(&air).expect("preamble found");
         let expected = 1234 + LEAD_SILENCE;
@@ -2810,14 +2860,14 @@ mod tests {
             start.abs_diff(expected) <= 1,
             "start {start}, expected {expected}"
         );
-        let got = decode_at(&air[start..start + frame_len()]).expect("frame decodes");
+        let got = decode_at(&air[start..start + frame_len()], MODULATION).expect("frame decodes");
         assert_eq!(got, payload);
     }
 
     #[test]
     fn back_to_back_frames_decode_in_order() {
         let payloads: Vec<Vec<u8>> = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
-        let air = burst(&payloads).unwrap();
+        let air = burst(&payloads, MODULATION).unwrap();
         let flen = frame_len();
         let mut pos = 0;
         let mut got = Vec::new();
@@ -2826,10 +2876,24 @@ mod tests {
             if start + flen > air.len() {
                 break;
             }
-            got.push(decode_at(&air[start..start + flen]).expect("frame decodes"));
+            got.push(decode_at(&air[start..start + flen], MODULATION).expect("frame decodes"));
             pos = start + flen;
         }
         assert_eq!(got, payloads);
+    }
+
+    #[test]
+    fn each_modulation_decodes_only_as_itself() {
+        let payload = b"KAHF modulation test".to_vec();
+        for &m in &MODULATIONS {
+            let air = frame_samples_as(&payload, m).expect("frame builds");
+            assert_eq!(decode_at(&air, m).as_deref(), Some(payload.as_slice()));
+            for &other in &MODULATIONS {
+                if other != m {
+                    assert_eq!(decode_at(&air, other), None, "{m:?} frame read as {other:?}");
+                }
+            }
+        }
     }
 
     #[test]

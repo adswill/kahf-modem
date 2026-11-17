@@ -3,8 +3,9 @@
 //! Frame layout (MSB first, always `K` bits, before scrambling):
 //!   [0..8)     length in bytes (0..=36)
 //!   [8..296)   data bytes, zero-padded to the 36-byte maximum
-//!   [296..312) CRC-16/CCITT over the length byte and the data bytes
-//!   [312..324) zero padding up to K
+//!   [296..304) modulation id: 0 QPSK, 1 16QAM, 2 64QAM (the receiver tries each)
+//!   [304..320) CRC-16/CCITT over the length byte, the data bytes and the id
+//!   [320..324) zero padding up to K
 //! The whole vector is then XOR-scrambled with a 15-bit LFSR.
 
 use crate::ldpc::K;
@@ -13,8 +14,12 @@ use crate::ldpc::K;
 const MAX_DATA: usize = 36;
 /// Width of the length field in bits.
 const LEN_BITS: usize = 8;
-/// Bit offset of the CRC field, after the fixed-size zero-padded data field.
-const CRC_POS: usize = LEN_BITS + MAX_DATA * 8;
+/// Bit offset of the modulation id, after the fixed-size zero-padded data field.
+const ID_POS: usize = LEN_BITS + MAX_DATA * 8;
+/// Width of the modulation id in bits.
+const ID_BITS: usize = 8;
+/// Bit offset of the CRC field.
+const CRC_POS: usize = ID_POS + ID_BITS;
 /// Width of the CRC field in bits.
 const CRC_BITS: usize = 16;
 
@@ -61,6 +66,13 @@ fn get_bits(bits: &[u8], pos: usize, n: usize) -> u32 {
 ///
 /// Panics if `data` is longer than 36 bytes.
 pub fn build_payload(data: &[u8]) -> Vec<u8> {
+    build_payload_as(data, 0)
+}
+
+/// As build_payload, with the modulation id the frame is sent with (0 QPSK, 1 16QAM, 2 64QAM).
+///
+/// Panics if `data` is longer than 36 bytes.
+pub fn build_payload_as(data: &[u8], id: u8) -> Vec<u8> {
     assert!(
         data.len() <= MAX_DATA,
         "frame payload too large: {} bytes (max {} per frame)",
@@ -68,9 +80,10 @@ pub fn build_payload(data: &[u8]) -> Vec<u8> {
         MAX_DATA
     );
 
-    let mut covered = Vec::with_capacity(1 + data.len());
+    let mut covered = Vec::with_capacity(2 + data.len());
     covered.push(data.len() as u8);
     covered.extend_from_slice(data);
+    covered.push(id);
     let crc = crc16(&covered);
 
     let mut bits = vec![0u8; K];
@@ -78,6 +91,7 @@ pub fn build_payload(data: &[u8]) -> Vec<u8> {
     for (i, &b) in data.iter().enumerate() {
         put_bits(&mut bits, LEN_BITS + 8 * i, b as u32, 8);
     }
+    put_bits(&mut bits, ID_POS, id as u32, ID_BITS);
     put_bits(&mut bits, CRC_POS, crc as u32, CRC_BITS);
     scramble(&mut bits);
     bits
@@ -86,6 +100,12 @@ pub fn build_payload(data: &[u8]) -> Vec<u8> {
 /// Reverse of build_payload. None if the length is out of range, the CRC fails,
 /// or the input is not exactly `K` bits.
 pub fn parse_payload(bits: &[u8]) -> Option<Vec<u8>> {
+    parse_payload_id(bits).map(|(data, _)| data)
+}
+
+/// Reverse of build_payload_as: the data and the modulation id. None under the
+/// same conditions as parse_payload.
+pub fn parse_payload_id(bits: &[u8]) -> Option<(Vec<u8>, u8)> {
     if bits.len() != K {
         return None;
     }
@@ -97,17 +117,19 @@ pub fn parse_payload(bits: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut covered = Vec::with_capacity(1 + len);
+    let id = get_bits(&clear, ID_POS, ID_BITS) as u8;
+    let mut covered = Vec::with_capacity(2 + len);
     covered.push(len as u8);
     for i in 0..len {
         covered.push(get_bits(&clear, LEN_BITS + 8 * i, 8) as u8);
     }
+    covered.push(id);
 
     let rx_crc = get_bits(&clear, CRC_POS, CRC_BITS) as u16;
     if crc16(&covered) != rx_crc {
         return None;
     }
-    Some(covered[1..].to_vec())
+    Some((covered[1..covered.len() - 1].to_vec(), id))
 }
 
 #[cfg(test)]
