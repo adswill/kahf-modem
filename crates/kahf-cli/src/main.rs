@@ -309,10 +309,10 @@ fn cmd_doctor() {
     print_section("Audio devices (input or output)", &kahf_audio::list_devices());
     print_section("HackRF devices", &kahf_sdr::hackrf::list_devices());
     print_section("RTL-SDR devices", &kahf_sdr::rtlsdr::list_devices());
-    // The SDR libraries are linked dynamically, so this binary only starts if they load.
+    let (hackrf, rtlsdr) = kahf_sdr::libraries_present();
     println!("SDR libraries");
-    println!("  libhackrf: linked (binary loaded)");
-    println!("  librtlsdr: linked (binary loaded)");
+    println!("  libhackrf: {}", if hackrf { "found" } else { "not installed" });
+    println!("  librtlsdr: {}", if rtlsdr { "found" } else { "not installed" });
 }
 
 /// `kahf audio-test [--device NAME]`: read the input for 3 s, print its level once a second.

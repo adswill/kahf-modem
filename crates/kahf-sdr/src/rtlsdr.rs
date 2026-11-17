@@ -21,7 +21,8 @@ pub struct RtlDev {
     _private: [u8; 0],
 }
 
-unsafe extern "C" {
+crate::dl::foreign_fns! {
+    rtlsdr;
     fn rtlsdr_get_device_count() -> u32;
     fn rtlsdr_get_device_name(index: u32) -> *const c_char;
     fn rtlsdr_open(dev: *mut *mut RtlDev, index: u32) -> c_int;
@@ -35,8 +36,7 @@ unsafe extern "C" {
     fn rtlsdr_get_sample_rate(dev: *mut RtlDev) -> u32;
     fn rtlsdr_set_freq_correction(dev: *mut RtlDev, ppm: c_int) -> c_int;
     fn rtlsdr_reset_buffer(dev: *mut RtlDev) -> c_int;
-    fn rtlsdr_read_sync(dev: *mut RtlDev, buf: *mut c_void, len: c_int, n_read: *mut c_int) -> c_int;
-}
+    fn rtlsdr_read_sync(dev: *mut RtlDev, buf: *mut c_void, len: c_int, n_read: *mut c_int) -> c_int;}
 
 /// librtlsdr returns -2 from set_freq_correction when the value is already set.
 const ALREADY_SET: c_int = -2;
@@ -101,7 +101,13 @@ pub fn convert_iq(bytes: &[u8]) -> Vec<(f32, f32)> {
 }
 
 /// Names of the RTL-SDR devices found on the USB bus, in index order.
+/// What to tell the operator when the RTL-SDR library cannot be found.
+pub(crate) const RTLSDR_MISSING: &str = "The RTL-SDR library is not installed. Install librtlsdr: Homebrew \"brew install librtlsdr\" on macOS, the librtlsdr package on Linux, or the RTL-SDR driver package on Windows.";
+
 pub fn list_devices() -> Vec<String> {
+    if crate::dl::rtlsdr().is_none() {
+        return Vec::new();
+    }
     let n = unsafe { rtlsdr_get_device_count() };
     (0..n)
         .map(|i| {
@@ -145,6 +151,9 @@ impl RtlsdrRx {
         gain_tenths_db: Option<i32>,
         ppm: i32,
     ) -> Result<Self, String> {
+        if crate::dl::rtlsdr().is_none() {
+            return Err(RTLSDR_MISSING.to_string());
+        }
         let mut dev: *mut RtlDev = std::ptr::null_mut();
         if unsafe { rtlsdr_open(&mut dev, index) } != 0 || dev.is_null() {
             return Err(format!("RTL-SDR: cannot open device {index}"));

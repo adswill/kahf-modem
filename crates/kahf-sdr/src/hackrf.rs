@@ -44,7 +44,8 @@ pub struct HackrfDeviceList {
 /// `int (*)(hackrf_transfer*)`: return 0 to keep streaming, non-zero to stop.
 pub type SampleBlockCb = unsafe extern "C" fn(*mut HackrfTransfer) -> c_int;
 
-unsafe extern "C" {
+crate::dl::foreign_fns! {
+    hackrf;
     fn hackrf_init() -> c_int;
     fn hackrf_exit() -> c_int;
     fn hackrf_open(device: *mut *mut c_void) -> c_int;
@@ -65,8 +66,7 @@ unsafe extern "C" {
     fn hackrf_is_streaming(device: *mut c_void) -> c_int;
     fn hackrf_device_list() -> *mut HackrfDeviceList;
     fn hackrf_device_list_free(list: *mut HackrfDeviceList);
-    fn hackrf_error_name(errcode: c_int) -> *const c_char;
-}
+    fn hackrf_error_name(errcode: c_int) -> *const c_char;}
 
 /// Baseband filter widths of the MAX2837 (OnAir hackrf_usb.cpp, kFilterHz).
 const FILTER_HZ: [u32; 16] = [
@@ -131,7 +131,13 @@ fn check(what: &str, code: c_int) -> Result<(), String> {
 /// Reference count for hackrf_init/hackrf_exit, so several devices can share the library.
 static INIT_COUNT: Mutex<usize> = Mutex::new(0);
 
+/// What to tell the operator when the HackRF library cannot be found.
+pub(crate) const HACKRF_MISSING: &str = "The HackRF library is not installed. Install libhackrf: Homebrew \"brew install hackrf\" on macOS, the libhackrf package on Linux, or the HackRF driver package on Windows.";
+
 fn acquire() -> Result<(), String> {
+    if crate::dl::hackrf().is_none() {
+        return Err(HACKRF_MISSING.to_string());
+    }
     let mut n = INIT_COUNT.lock().unwrap_or_else(|e| e.into_inner());
     if *n == 0 {
         check("hackrf_init", unsafe { hackrf_init() })?;

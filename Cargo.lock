@@ -2802,6 +2802,7 @@ name = "kahf-sdr"
 version = "0.0.1"
 dependencies = [
  "kahf-core",
+ "libloading",
 ]
 
 [[package]]
