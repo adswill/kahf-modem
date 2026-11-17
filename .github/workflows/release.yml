@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - name: macOS arm64
-            runner: macos-14
+            runner: macos-latest
             archive: KAHF-${{ inputs.version }}-macos-arm64.zip
             os: macos
           - name: Linux x64
