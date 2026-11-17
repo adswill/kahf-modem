@@ -1,7 +1,31 @@
 //! Channel simulator + BLER harness.
+//!
+//! Named channel profiles (plan section 1.3) are applied with [`apply`]:
+//!
+//! ```ignore
+//! use kahf_sim::{apply, Profile};
+//! // tx: modulated frame at 8000 Hz; snr_db is measured against the impaired signal.
+//! let rx = apply(&tx, Profile::TwoPath, 10.0, seed);
+//! ```
+//!
+//! Profiles (all at the PHY sample rate of 8000 Hz, see [`SAMPLE_RATE_HZ`]):
+//! - `Awgn`: white noise only; identical to [`awgn`].
+//! - `TwoPath`: a copy 2 ms later (16 samples) at -6 dB, added to the signal.
+//! - `FreqOffset`: a shift of up to +-5 Hz (seed-derived, uniform). Exact: the
+//!   FFT-based analytic signal is multiplied by `exp(i 2 pi shift t)`, real part kept.
+//! - `ClockOffset`: 20 ppm sample clock error, read at `n * (1 + 20e-6)` with a
+//!   16-tap Blackman-windowed sinc interpolator.
+//! - `Fade`: slow amplitude fade at 0.5 Hz, 6 dB peak-to-trough depth (raised cosine).
+//!
+//! The impairment is applied first, then AWGN at `snr_db` is added, so every
+//! profile takes the same SNR argument.
+//!
+//! The BLER harness (`run_point`) still uses plain AWGN. To sweep a profile in the
+//! CLI, call `apply(&tx, profile, snr_db, seed)` in place of `awgn(&tx, snr_db, seed)`.
 
 use kahf_core::phy;
 use rayon::prelude::*;
+use std::f64::consts::PI;
 
 /// Small xorshift64* generator, seeded through splitmix64 so nearby seeds diverge.
 struct Rng(u64);
@@ -54,6 +78,185 @@ pub fn awgn(samples: &[f32], snr_db: f32, seed: u64) -> Vec<f32> {
         .collect()
 }
 
+/// PHY audio sample rate (Hz). Matches `phy.rs` FS.
+pub const SAMPLE_RATE_HZ: f64 = 8000.0;
+
+const TWO_PATH_DELAY_S: f64 = 0.002;
+const TWO_PATH_ECHO_DB: f64 = -6.0;
+const FREQ_OFFSET_MAX_HZ: f64 = 5.0;
+const CLOCK_PPM: f64 = 20.0;
+const FADE_HZ: f64 = 0.5;
+const FADE_DEPTH_DB: f64 = 6.0;
+
+/// Named channel profiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    Awgn,
+    TwoPath,
+    FreqOffset,
+    ClockOffset,
+    Fade,
+}
+
+/// Apply a named channel profile, then AWGN at `snr_db` (measured against the
+/// impaired signal). `Profile::Awgn` returns exactly `awgn(samples, snr_db, seed)`.
+/// Deterministic for a given seed. Output length equals input length.
+pub fn apply(samples: &[f32], profile: Profile, snr_db: f32, seed: u64) -> Vec<f32> {
+    let impaired = match profile {
+        Profile::Awgn => return awgn(samples, snr_db, seed),
+        Profile::TwoPath => two_path(samples),
+        Profile::FreqOffset => {
+            // Offset in [-5, 5] Hz, derived from the seed on its own stream.
+            let u = Rng::new(seed ^ 0xF0E1_D2C3_B4A5_9687).uniform_open();
+            let shift = (2.0 * u - 1.0) * FREQ_OFFSET_MAX_HZ;
+            freq_shift(samples, shift)
+        }
+        Profile::ClockOffset => clock_offset(samples),
+        Profile::Fade => fade(samples),
+    };
+    awgn(&impaired, snr_db, seed)
+}
+
+/// Direct path plus a copy 2 ms later at -6 dB.
+fn two_path(x: &[f32]) -> Vec<f32> {
+    let d = (TWO_PATH_DELAY_S * SAMPLE_RATE_HZ).round() as usize;
+    let g = 10f64.powf(TWO_PATH_ECHO_DB / 20.0) as f32;
+    (0..x.len())
+        .map(|n| if n >= d { x[n] + g * x[n - d] } else { x[n] })
+        .collect()
+}
+
+/// In-place iterative radix-2 FFT. `buf.len()` must be a power of two. The
+/// forward transform uses exp(-i...), the inverse exp(+i...); neither is scaled.
+fn fft(buf: &mut [(f64, f64)], inverse: bool) {
+    let n = buf.len();
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            buf.swap(i, j);
+        }
+    }
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let mut len = 2;
+    while len <= n {
+        let half = len / 2;
+        let step = sign * 2.0 * PI / len as f64;
+        let twiddle: Vec<(f64, f64)> = (0..half)
+            .map(|k| ((step * k as f64).cos(), (step * k as f64).sin()))
+            .collect();
+        for start in (0..n).step_by(len) {
+            for k in 0..half {
+                let (wr, wi) = twiddle[k];
+                let (br, bi) = buf[start + k + half];
+                let (tr, ti) = (br * wr - bi * wi, br * wi + bi * wr);
+                let (ar, ai) = buf[start + k];
+                buf[start + k] = (ar + tr, ai + ti);
+                buf[start + k + half] = (ar - tr, ai - ti);
+            }
+        }
+        len <<= 1;
+    }
+}
+
+/// Real-signal frequency shift by `shift_hz`, exact at every frequency: the
+/// FFT-based analytic signal z = x + i*H{x} is multiplied by exp(i*2*pi*shift*t),
+/// and the real part is returned, so the output is `Re(z * e^{i w t})`.
+///
+/// The input is zero-padded to at least twice its length so the circular
+/// Hilbert transform does not wrap around the buffer.
+fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let big = (2 * n).next_power_of_two();
+    let mut spec = vec![(0.0f64, 0.0f64); big];
+    for (s, &v) in spec.iter_mut().zip(x) {
+        *s = (v as f64, 0.0);
+    }
+    fft(&mut spec, false);
+    // Analytic signal: keep DC and Nyquist, double positive frequencies, drop negative.
+    let half = big / 2;
+    for s in spec.iter_mut().take(half).skip(1) {
+        *s = (s.0 * 2.0, s.1 * 2.0);
+    }
+    for s in spec.iter_mut().skip(half + 1) {
+        *s = (0.0, 0.0);
+    }
+    fft(&mut spec, true);
+    let scale = 1.0 / big as f64;
+    (0..n)
+        .map(|i| {
+            let (zr, zi) = (spec[i].0 * scale, spec[i].1 * scale);
+            let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
+            (zr * theta.cos() - zi * theta.sin()) as f32
+        })
+        .collect()
+}
+
+/// Half-length of the windowed-sinc interpolator in input samples (16 taps).
+const SINC_HALF: isize = 8;
+
+/// Blackman-windowed sinc at offset `d` (input samples), zero outside +-SINC_HALF.
+fn windowed_sinc(d: f64) -> f64 {
+    let h = SINC_HALF as f64;
+    if d.abs() >= h {
+        return 0.0;
+    }
+    let sinc = if d == 0.0 { 1.0 } else { (PI * d).sin() / (PI * d) };
+    let w = 0.42 + 0.5 * (PI * d / h).cos() + 0.08 * (2.0 * PI * d / h).cos();
+    sinc * w
+}
+
+/// Sample clock error of `CLOCK_PPM`: output n reads the input at position
+/// n * (1 + ppm*1e-6), interpolated with a 16-tap Blackman-windowed sinc. Taps
+/// that fall outside the buffer are dropped and the rest renormalised, so
+/// constant signals stay constant. Past the end of the input the output is zero.
+fn clock_offset(x: &[f32]) -> Vec<f32> {
+    let n = x.len();
+    let ratio = 1.0 + CLOCK_PPM * 1e-6;
+    (0..n)
+        .map(|i| {
+            let pos = i as f64 * ratio;
+            if pos >= n as f64 {
+                return 0.0;
+            }
+            let i0 = pos.floor() as isize;
+            let (mut acc, mut wsum) = (0.0f64, 0.0f64);
+            for k in (-SINC_HALF + 1)..=SINC_HALF {
+                let j = i0 + k;
+                if j < 0 || j as usize >= n {
+                    continue;
+                }
+                let w = windowed_sinc(pos - j as f64);
+                acc += w * x[j as usize] as f64;
+                wsum += w;
+            }
+            (if wsum != 0.0 { acc / wsum } else { 0.0 }) as f32
+        })
+        .collect()
+}
+
+/// Slow fade at `FADE_HZ`: gain goes from 1 down to 10^(-depth/20) and back,
+/// starting at full gain at sample 0.
+fn fade(x: &[f32]) -> Vec<f32> {
+    let floor = 10f64.powf(-FADE_DEPTH_DB / 20.0);
+    x.iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let t = i as f64 / SAMPLE_RATE_HZ;
+            let g = floor + (1.0 - floor) * 0.5 * (1.0 + (2.0 * PI * FADE_HZ * t).cos());
+            (s as f64 * g) as f32
+        })
+        .collect()
+}
+
 /// Modulation used by the BLER harness (same as the CLI).
 const BLER_MOD: phy::Modulation = phy::Modulation::Qpsk;
 /// LDPC decoder iteration cap (same as the CLI).
@@ -88,9 +291,7 @@ pub fn run_point(snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
         .filter(|&i| {
             let trial_seed = seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
             let mut rng = Rng::new(trial_seed);
-            let payload: Vec<u8> = (0..PAYLOAD_BYTES)
-                .map(|_| (rng.next_u64() >> 56) as u8)
-                .collect();
+            let payload: Vec<u8> = (0..PAYLOAD_BYTES).map(|_| (rng.next_u64() >> 56) as u8).collect();
             let info = kahf_core::frame::build_payload(&payload);
             let coded = kahf_core::ldpc::encode(&info);
             let tx = kahf_core::phy::modulate_frame(&coded, BLER_MOD);
@@ -133,6 +334,130 @@ mod tests {
                 "snr {snr} dB: measured noise off by {err_db:.3} dB"
             );
         }
+    }
+
+    fn tone(n: usize, hz: f64) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * PI * hz * i as f64 / SAMPLE_RATE_HZ).sin() as f32)
+            .collect()
+    }
+
+    const ALL: [Profile; 5] = [
+        Profile::Awgn,
+        Profile::TwoPath,
+        Profile::FreqOffset,
+        Profile::ClockOffset,
+        Profile::Fade,
+    ];
+
+    #[test]
+    fn awgn_profile_matches_awgn() {
+        let sig = tone(4000, 1000.0);
+        assert_eq!(apply(&sig, Profile::Awgn, 10.0, 5), awgn(&sig, 10.0, 5));
+    }
+
+    #[test]
+    fn every_profile_keeps_power_finite() {
+        let sig = tone(16_000, 1000.0);
+        for p in ALL {
+            let out = apply(&sig, p, 12.0, 9);
+            assert_eq!(out.len(), sig.len(), "{p:?} length");
+            let power: f64 = out.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / out.len() as f64;
+            assert!(power.is_finite() && power > 0.0, "{p:?} power {power}");
+        }
+    }
+
+    #[test]
+    fn empty_input_gives_empty_output() {
+        for p in ALL {
+            assert!(apply(&[], p, 10.0, 1).is_empty(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn two_path_echo_is_16_samples_at_minus_6_db() {
+        // Impulse at 0; SNR 200 dB makes the added noise negligible.
+        let mut sig = vec![0.0f32; 64];
+        sig[0] = 1.0;
+        let out = apply(&sig, Profile::TwoPath, 200.0, 3);
+        assert!((out[0] - 1.0).abs() < 1e-4, "direct {}", out[0]);
+        assert!((out[16] - 0.501).abs() < 1e-3, "echo {}", out[16]);
+        assert!(out[15].abs() < 1e-4 && out[17].abs() < 1e-4);
+    }
+
+    #[test]
+    fn fade_depth_is_6_db_over_one_period() {
+        // 0.5 Hz period = 16000 samples at 8 kHz.
+        let sig = vec![1.0f32; 16_001];
+        let out = apply(&sig, Profile::Fade, 200.0, 3);
+        let max = out.iter().cloned().fold(f32::MIN, f32::max);
+        let min = out.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((max - 1.0).abs() < 1e-3, "max {max}");
+        assert!((min - 0.501).abs() < 1e-2, "min {min}");
+    }
+
+    #[test]
+    fn freq_shift_preserves_tone_amplitude() {
+        // 2 kHz tone (a quarter of the sample rate) sits well inside the Hilbert band.
+        let sig = tone(8000, 2000.0);
+        let out = freq_shift(&sig, 5.0);
+        let rms = |v: &[f32]| (v.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        let inner = 100..7900;
+        let r_in = rms(&sig[inner.clone()]);
+        let r_out = rms(&out[inner]);
+        assert!((r_out / r_in - 1.0).abs() < 0.05, "ratio {}", r_out / r_in);
+    }
+
+    #[test]
+    fn clock_offset_keeps_constant_signal() {
+        let sig = vec![0.25f32; 1000];
+        let out = clock_offset(&sig);
+        for &v in &out[..999] {
+            assert!((v - 0.25).abs() < 1e-6);
+        }
+    }
+
+    /// Mean power of `v` over `range`.
+    fn power(v: &[f32], range: std::ops::Range<usize>) -> f64 {
+        let s = &v[range];
+        s.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>() / s.len() as f64
+    }
+
+    /// Amplitude of a `hz` tone in `v` over `range`, by projection onto sin and cos.
+    fn amplitude_at(v: &[f32], hz: f64, range: std::ops::Range<usize>) -> f64 {
+        let len = range.len() as f64;
+        let (mut a, mut b) = (0.0f64, 0.0f64);
+        for i in range {
+            let ph = 2.0 * PI * hz * i as f64 / SAMPLE_RATE_HZ;
+            a += v[i] as f64 * ph.sin();
+            b += v[i] as f64 * ph.cos();
+        }
+        2.0 * (a * a + b * b).sqrt() / len
+    }
+
+    #[test]
+    fn freq_shift_1khz_tone_by_5hz_within_half_percent_power() {
+        // A 1 kHz tone shifted by +5 Hz must be a 1005 Hz tone. The residual
+        // (output minus expected, phase included) must be under 0.5 % of the
+        // expected tone's power. A plain power comparison cannot see phase error.
+        let sig = tone(8000, 1000.0);
+        let out = freq_shift(&sig, 5.0);
+        let expected = tone(8000, 1005.0);
+        let inner = 100..7900;
+        let resid: Vec<f32> = out.iter().zip(&expected).map(|(&o, &e)| o - e).collect();
+        let err = power(&resid, inner.clone()) / power(&expected, inner.clone());
+        assert!(err < 0.005, "residual power {:.4} % of tone (limit 0.5 %)", err * 100.0);
+    }
+
+    #[test]
+    fn clock_offset_2khz_tone_amplitude_within_half_percent() {
+        // 20 ppm clock error turns a 2 kHz tone into 2 kHz * (1 + 20e-6) at amplitude 1.
+        let sig = tone(8000, 2000.0);
+        let out = clock_offset(&sig);
+        let expected_hz = 2000.0 * (1.0 + CLOCK_PPM * 1e-6);
+        let amp = amplitude_at(&out, expected_hz, 100..7900);
+        let err = (amp - 1.0).abs();
+        assert!(err < 0.005, "amplitude residual {:.4} % (limit 0.5 %)", err * 100.0);
     }
 
     #[test]

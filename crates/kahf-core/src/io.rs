@@ -1,6 +1,6 @@
 //! Hardware-facing traits. Implementations: rigctld TCP (Hamlib), audio via cpal,
 //! SDR IQ via OnAir driver layer (later). Keep these as traits only here.
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -17,12 +17,29 @@ pub trait RigControl {
 /// Receive-side IQ source. The SDR implementations (HackRF, RTL-SDR, Airspy and
 /// others, TX and RX) come from OnAir's driver layer through kahf-ffi later.
 /// They are not written here.
-pub trait IqSource { fn read_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize, String>; fn sample_rate(&self) -> f64; }
+pub trait IqSource {
+    fn read_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize, String>;
+    fn sample_rate(&self) -> f64;
+}
 
 /// Transmit-side IQ sink. The SDR implementations (HackRF, RTL-SDR, Airspy and
 /// others, TX and RX) come from OnAir's driver layer through kahf-ffi later.
 /// They are not written here.
-pub trait IqSink { fn write_iq(&mut self, iq: &[(f32, f32)]) -> Result<(), String>; fn sample_rate(&self) -> f64; }
+pub trait IqSink {
+    fn write_iq(&mut self, iq: &[(f32, f32)]) -> Result<(), String>;
+    fn sample_rate(&self) -> f64;
+}
+
+/// Rig state as shown to the operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RigStatus {
+    pub freq_hz: u64,
+    pub mode: String,
+    pub passband_hz: u32,
+    /// Signal strength in dB relative to S9, or None when the rig does not report it.
+    pub strength_db: Option<i32>,
+    pub ptt: bool,
+}
 
 /// RigControl over a TCP connection to Hamlib rigctld (line-based protocol).
 pub struct RigctldClient {
@@ -38,7 +55,9 @@ impl RigctldClient {
         stream
             .set_write_timeout(Some(RIGCTLD_TIMEOUT))
             .map_err(|e| format!("rigctld set write timeout: {e}"))?;
-        Ok(Self { reader: BufReader::new(stream) })
+        Ok(Self {
+            reader: BufReader::new(stream),
+        })
     }
 
     /// Sends one command line (including the trailing newline) and returns the reply line.
@@ -76,6 +95,86 @@ impl RigctldClient {
         reply
             .parse::<u64>()
             .map_err(|e| format!("rigctld bad frequency reply {reply:?}: {e}"))
+    }
+
+    fn send_line(&mut self, cmd: &str) -> Result<(), String> {
+        self.reader
+            .get_mut()
+            .write_all(cmd.as_bytes())
+            .map_err(|e| format!("rigctld write: {e}"))
+    }
+
+    /// Reads one reply line; a read timeout becomes "rig did not answer".
+    fn read_reply_line(&mut self) -> Result<String, String> {
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line).map_err(|e| match e.kind() {
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => "rig did not answer".to_string(),
+            _ => format!("rigctld read: {e}"),
+        })?;
+        if n == 0 {
+            return Err("rigctld closed the connection".to_string());
+        }
+        Ok(line.trim_end().to_string())
+    }
+
+    /// Reads the mode name and passband width in Hz (rigctld command `m`).
+    pub fn get_mode(&mut self) -> Result<(String, u32), String> {
+        self.send_line("m\n")?;
+        let mode = self.read_reply_line()?;
+        if mode.starts_with("RPRT") {
+            return Err(format!("rigctld error for \"m\": {mode}"));
+        }
+        let passband = self.read_reply_line()?;
+        let width = passband
+            .parse::<u32>()
+            .map_err(|e| format!("rigctld bad passband reply {passband:?}: {e}"))?;
+        Ok((mode, width))
+    }
+
+    /// Reads signal strength in dB relative to S9 (rigctld `l STRENGTH`).
+    pub fn get_strength_db(&mut self) -> Result<i32, String> {
+        self.send_line("l STRENGTH\n")?;
+        let reply = self.read_reply_line()?;
+        if reply.starts_with("RPRT") {
+            return Err(format!("rigctld error for \"l STRENGTH\": {reply}"));
+        }
+        reply
+            .parse::<i32>()
+            .map_err(|e| format!("rigctld bad strength reply {reply:?}: {e}"))
+    }
+
+    /// Reads the PTT state (rigctld command `t`).
+    pub fn get_ptt(&mut self) -> Result<bool, String> {
+        self.send_line("t\n")?;
+        let reply = self.read_reply_line()?;
+        if reply.starts_with("RPRT") {
+            return Err(format!("rigctld error for \"t\": {reply}"));
+        }
+        match reply.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            other => Err(format!("rigctld bad PTT reply {other:?}")),
+        }
+    }
+
+    /// Reads frequency, mode, passband, strength and PTT. A rig that does not
+    /// support the strength level gives `strength_db: None` instead of an error.
+    pub fn status(&mut self) -> Result<RigStatus, String> {
+        let freq_hz = self.get_freq_hz()?;
+        let (mode, passband_hz) = self.get_mode()?;
+        let strength_db = match self.get_strength_db() {
+            Ok(v) => Some(v),
+            Err(e) if e.starts_with("rigctld error") => None,
+            Err(e) => return Err(e),
+        };
+        let ptt = self.get_ptt()?;
+        Ok(RigStatus {
+            freq_hz,
+            mode,
+            passband_hz,
+            strength_db,
+            ptt,
+        })
     }
 }
 
@@ -142,7 +241,11 @@ mod tests {
                 if reader.read_line(&mut line).unwrap() == 0 {
                     break;
                 }
-                let reply = if line.trim_end() == "f" { "14074000\n" } else { "RPRT 0\n" };
+                let reply = if line.trim_end() == "f" {
+                    "14074000\n"
+                } else {
+                    "RPRT 0\n"
+                };
                 seen.push(line);
                 writer.write_all(reply.as_bytes()).unwrap();
             }
@@ -158,5 +261,64 @@ mod tests {
 
         let seen = server.join().unwrap();
         assert_eq!(seen, vec!["T 1\n", "T 0\n", "F 14074000\n", "f\n"]);
+    }
+
+    /// Fake rigctld on 127.0.0.1 port 0 that answers f, m, l STRENGTH and t.
+    fn fake_rigctld(strength_reply: &'static str) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut seen: Vec<String> = Vec::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let reply = match line.trim_end() {
+                    "f" => "14074000\n",
+                    "m" => "USB\n2400\n",
+                    "l STRENGTH" => strength_reply,
+                    "t" => "1\n",
+                    other => panic!("unexpected rigctld command {other:?}"),
+                };
+                seen.push(line);
+                writer.write_all(reply.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn rig_status_reads_all_fields_from_fake_server() {
+        let (addr, server) = fake_rigctld("-12\n");
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        let status = client.status().unwrap();
+        assert_eq!(
+            status,
+            RigStatus {
+                freq_hz: 14_074_000,
+                mode: "USB".to_string(),
+                passband_hz: 2400,
+                strength_db: Some(-12),
+                ptt: true,
+            }
+        );
+        drop(client);
+        assert_eq!(server.join().unwrap(), vec!["f\n", "m\n", "l STRENGTH\n", "t\n"]);
+    }
+
+    #[test]
+    fn rig_status_strength_is_none_when_unsupported() {
+        let (addr, server) = fake_rigctld("RPRT -11\n");
+        let mut client = RigctldClient::connect(&addr).unwrap();
+        let status = client.status().unwrap();
+        assert_eq!(status.strength_db, None);
+        assert_eq!(status.mode, "USB");
+        drop(client);
+        server.join().unwrap();
     }
 }

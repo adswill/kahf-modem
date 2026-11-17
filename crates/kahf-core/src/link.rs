@@ -39,18 +39,49 @@ pub const MAX_DATA_RETRIES: u32 = 8;
 pub const MAX_MOD_LEVEL: u8 = 3;
 /// Suggested level before the peer has reported any frame error rate.
 pub const DEFAULT_MOD_LEVEL: u8 = 1;
+/// Interval of `Action::Metrics` while connected, in link time.
+pub const METRICS_INTERVAL_MS: u64 = 5_000;
+/// Number of most recent received frames the frame error rate is measured over.
+pub const FER_WINDOW_FRAMES: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LinkState { Idle, Connecting { peer: String }, Connected { peer: String }, Disconnecting }
+pub enum LinkState {
+    Idle,
+    Connecting { peer: String },
+    Connected { peer: String },
+    Disconnecting,
+}
 
 /// What the link layer asks the caller to do after an input.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Send this payload (one frame's worth of bytes, <= 36) on air.
     Transmit(Vec<u8>),
     /// Deliver this payload to the session layer.
     Deliver(Vec<u8>),
     StateChanged(LinkState),
+    /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
+    Metrics(LinkMetrics),
+}
+
+/// Snapshot of link quality for a user interface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkMetrics {
+    pub state: LinkState,
+    /// Peer callsign while connecting or connected.
+    pub peer: Option<String>,
+    /// DATA frames sent for the first time in the current session.
+    pub frames_sent: u64,
+    /// New DATA frames received (duplicates not counted) in the current session.
+    pub frames_received: u64,
+    /// DATA frames retransmitted in the current session (handshake retries not counted).
+    pub retransmits: u64,
+    /// Share of the last `FER_WINDOW_FRAMES` received frames that were lost, in percent.
+    pub frame_error_pct: f32,
+    /// Suggested modulation level: 0 = robust, 1 = normal, 2 = fast.
+    pub suggested_modulation: u8,
+    /// Text name of `suggested_modulation`: "robust", "normal" or "fast".
+    pub suggested_modulation_name: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +112,14 @@ pub struct Link {
     hi_seen: u8,
     rx_new: u32,
     rx_missing: u32,
+    // Metrics. Counters restart with each session (see `begin_session`).
+    frames_sent: u64,
+    retransmits: u64,
+    frames_received: u64,
+    /// Outcomes of the last `FER_WINDOW_FRAMES` received frames (true = lost).
+    fer_window: VecDeque<bool>,
+    /// Link time at which the next `Action::Metrics` is due.
+    metrics_due: u64,
 }
 
 impl Link {
@@ -101,6 +140,11 @@ impl Link {
             hi_seen: 0,
             rx_new: 0,
             rx_missing: 0,
+            frames_sent: 0,
+            retransmits: 0,
+            frames_received: 0,
+            fer_window: VecDeque::new(),
+            metrics_due: 0,
         };
         l.reset_arq();
         l
@@ -112,11 +156,16 @@ impl Link {
         if self.state != LinkState::Idle || !valid_callsign(peer) || !valid_callsign(&self.callsign) {
             return Vec::new();
         }
-        self.reset_arq();
+        self.begin_session();
         self.hs_retries = 0;
         self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS;
         let mut out = vec![Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer))];
-        self.set_state(LinkState::Connecting { peer: peer.to_string() }, &mut out);
+        self.set_state(
+            LinkState::Connecting {
+                peer: peer.to_string(),
+            },
+            &mut out,
+        );
         out
     }
 
@@ -179,6 +228,10 @@ impl Link {
                 }
             }
             LinkState::Connected { .. } => {
+                if now_ms >= self.metrics_due {
+                    self.metrics_due = now_ms + METRICS_INTERVAL_MS;
+                    out.push(Action::Metrics(self.metrics()));
+                }
                 let mut dead = false;
                 for slot in self.slots.iter_mut() {
                     if let Some(f) = slot.as_mut() {
@@ -189,6 +242,7 @@ impl Link {
                             }
                             f.retries += 1;
                             f.deadline = now_ms + DATA_TIMEOUT_MS;
+                            self.retransmits += 1;
                             out.push(Action::Transmit(encode_data(f.seq, &f.payload)));
                         }
                     }
@@ -221,10 +275,59 @@ impl Link {
         self.peer_fer
     }
 
+    /// Snapshot of the link's quality counters and suggested modulation.
+    pub fn metrics(&self) -> LinkMetrics {
+        let peer = match &self.state {
+            LinkState::Connecting { peer } | LinkState::Connected { peer } => Some(peer.clone()),
+            _ => None,
+        };
+        let lost = self.fer_window.iter().filter(|&&l| l).count();
+        let frame_error_pct = if self.fer_window.is_empty() {
+            0.0
+        } else {
+            lost as f32 * 100.0 / self.fer_window.len() as f32
+        };
+        let (level, name) = metric_modulation(self.suggested_modulation());
+        LinkMetrics {
+            state: self.state.clone(),
+            peer,
+            frames_sent: self.frames_sent,
+            frames_received: self.frames_received,
+            retransmits: self.retransmits,
+            frame_error_pct,
+            suggested_modulation: level,
+            suggested_modulation_name: name,
+        }
+    }
+
+    /// Short user-facing description of the current state, e.g. "Connecting to BB1BBB,
+    /// attempt 2 of 6" or "Connected to BB1BBB, resending data (retry 3 of 8)".
+    pub fn describe(&self) -> String {
+        match &self.state {
+            LinkState::Idle => "Idle".to_string(),
+            LinkState::Connecting { peer } => format!(
+                "Connecting to {peer}, attempt {} of {}",
+                self.hs_retries + 1,
+                MAX_CONNECT_RETRIES + 1
+            ),
+            LinkState::Connected { peer } => {
+                let worst = self.slots.iter().flatten().map(|f| f.retries).max().unwrap_or(0);
+                if worst > 0 {
+                    format!("Connected to {peer}, resending data (retry {worst} of {MAX_DATA_RETRIES})")
+                } else {
+                    format!("Connected to {peer}")
+                }
+            }
+            LinkState::Disconnecting => "Disconnecting".to_string(),
+        }
+    }
+
     // ---- handshake -------------------------------------------------------
 
     fn on_connect(&mut self, p: &[u8]) -> Vec<Action> {
-        let Some((from, to)) = decode_hs(p) else { return Vec::new() };
+        let Some((from, to)) = decode_hs(p) else {
+            return Vec::new();
+        };
         if to != self.callsign {
             return Vec::new();
         }
@@ -235,7 +338,11 @@ impl Link {
             LinkState::Connecting { peer } if peer == from => self.accept(&from, &mut out),
             // Our CONNECT_ACK was lost and the peer retried: acknowledge again.
             LinkState::Connected { peer } if peer == from => {
-                out.push(Action::Transmit(encode_hs(TAG_CONNECT_ACK, &self.callsign, &from)));
+                out.push(Action::Transmit(encode_hs(
+                    TAG_CONNECT_ACK,
+                    &self.callsign,
+                    &from,
+                )));
             }
             _ => {}
         }
@@ -243,13 +350,20 @@ impl Link {
     }
 
     fn accept(&mut self, from: &str, out: &mut Vec<Action>) {
-        self.reset_arq();
-        self.set_state(LinkState::Connected { peer: from.to_string() }, out);
+        self.begin_session();
+        self.set_state(
+            LinkState::Connected {
+                peer: from.to_string(),
+            },
+            out,
+        );
         out.push(Action::Transmit(encode_hs(TAG_CONNECT_ACK, &self.callsign, from)));
     }
 
     fn on_connect_ack(&mut self, p: &[u8]) -> Vec<Action> {
-        let Some((from, to)) = decode_hs(p) else { return Vec::new() };
+        let Some((from, to)) = decode_hs(p) else {
+            return Vec::new();
+        };
         if to != self.callsign {
             return Vec::new();
         }
@@ -264,7 +378,9 @@ impl Link {
     }
 
     fn on_disconnect(&mut self, p: &[u8]) -> Vec<Action> {
-        let Some((from, to)) = decode_hs(p) else { return Vec::new() };
+        let Some((from, to)) = decode_hs(p) else {
+            return Vec::new();
+        };
         if to != self.callsign {
             return Vec::new();
         }
@@ -294,9 +410,14 @@ impl Link {
             let ahead = seq.wrapping_sub(self.hi_seen) as usize;
             if (1..=WINDOW).contains(&ahead) {
                 self.rx_missing += (ahead - 1) as u32;
+                for _ in 1..ahead {
+                    self.push_fer_sample(true);
+                }
+                self.push_fer_sample(false);
                 self.hi_seen = seq;
             }
             self.rx_new += 1;
+            self.frames_received += 1;
             self.rx_buf[off] = Some(body.to_vec());
         }
         // Deliver the in-order prefix to the session layer.
@@ -312,7 +433,12 @@ impl Link {
                 bitmap |= 1u8 << i;
             }
         }
-        out.push(Action::Transmit(vec![TAG_ACK, self.rcv_base, bitmap, self.measured_fer_pct()]));
+        out.push(Action::Transmit(vec![
+            TAG_ACK,
+            self.rcv_base,
+            bitmap,
+            self.measured_fer_pct(),
+        ]));
         out
     }
 
@@ -350,7 +476,9 @@ impl Link {
     /// Move queued chunks into the window and transmit them.
     fn pump(&mut self, out: &mut Vec<Action>) {
         while (self.next_seq.wrapping_sub(self.send_base) as usize) < WINDOW {
-            let Some(chunk) = self.tx_queue.pop_front() else { break };
+            let Some(chunk) = self.tx_queue.pop_front() else {
+                break;
+            };
             let seq = self.next_seq;
             self.slots[seq as usize % WINDOW] = Some(InFlight {
                 seq,
@@ -359,8 +487,25 @@ impl Link {
                 retries: 0,
             });
             out.push(Action::Transmit(encode_data(seq, &chunk)));
+            self.frames_sent += 1;
             self.next_seq = seq.wrapping_add(1);
         }
+    }
+
+    fn push_fer_sample(&mut self, lost: bool) {
+        self.fer_window.push_back(lost);
+        if self.fer_window.len() > FER_WINDOW_FRAMES {
+            self.fer_window.pop_front();
+        }
+    }
+
+    /// Start a new connection: ARQ state and session counters all restart.
+    fn begin_session(&mut self) {
+        self.reset_arq();
+        self.frames_sent = 0;
+        self.retransmits = 0;
+        self.frames_received = 0;
+        self.fer_window.clear();
     }
 
     /// Gap-based estimate of first-attempt frame loss: skipped sequence numbers over all
@@ -391,8 +536,20 @@ impl Link {
         if self.state == s {
             return;
         }
+        if let LinkState::Connected { .. } = s {
+            self.metrics_due = self.clock + METRICS_INTERVAL_MS;
+        }
         self.state = s.clone();
         out.push(Action::StateChanged(s));
+    }
+}
+
+/// Map the internal four-step level (0..=MAX_MOD_LEVEL) onto the reported three-step scale.
+fn metric_modulation(raw: u8) -> (u8, &'static str) {
+    match raw {
+        0 => (0, "robust"),
+        1 | 2 => (1, "normal"),
+        _ => (2, "fast"),
     }
 }
 
@@ -470,16 +627,24 @@ mod tests {
                         self.wire.push_back((from_a, p));
                     }
                     Action::Deliver(p) => {
-                        if from_a { self.a_rx.push(p) } else { self.b_rx.push(p) }
+                        if from_a {
+                            self.a_rx.push(p)
+                        } else {
+                            self.b_rx.push(p)
+                        }
                     }
-                    Action::StateChanged(_) => {}
+                    Action::StateChanged(_) | Action::Metrics(_) => {}
                 }
             }
         }
 
         fn run(&mut self) {
             while let Some((from_a, p)) = self.wire.pop_front() {
-                let acts = if from_a { self.b.on_receive(&p) } else { self.a.on_receive(&p) };
+                let acts = if from_a {
+                    self.b.on_receive(&p)
+                } else {
+                    self.a.on_receive(&p)
+                };
                 self.apply(!from_a, acts);
             }
         }
@@ -521,6 +686,22 @@ mod tests {
         let n = connected_pair();
         assert_eq!(n.a.state, LinkState::Connected { peer: "BBB2".into() });
         assert_eq!(n.b.state, LinkState::Connected { peer: "AAA1".into() });
+    }
+
+    /// The 18-byte text from the offline case, through session encode, the link, then decode.
+    #[test]
+    fn session_18_byte_text_round_trips_through_link() {
+        use crate::session::{self, Message};
+        let msg = Message::Chat {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            text: "sent while offline".into(),
+        };
+        let mut n = connected_pair();
+        for chunk in session::encode(&msg) {
+            n.send_a(&chunk);
+        }
+        assert_eq!(session::decode(&n.b_rx), Some(msg));
     }
 
     #[test]
@@ -647,5 +828,109 @@ mod tests {
             l.peer_fer = Some(fer);
             assert_eq!(l.suggested_modulation(), level, "fer {fer}");
         }
+    }
+
+    #[test]
+    fn metrics_count_after_loopback_exchange() {
+        let mut n = connected_pair();
+        let idle = n.a.metrics();
+        assert_eq!(idle.state, LinkState::Connected { peer: "BBB2".into() });
+        assert_eq!(idle.peer.as_deref(), Some("BBB2"));
+        assert_eq!(
+            (idle.frames_sent, idle.frames_received, idle.retransmits),
+            (0, 0, 0)
+        );
+        assert_eq!(idle.frame_error_pct, 0.0);
+        assert_eq!(idle.suggested_modulation, 1);
+        assert_eq!(idle.suggested_modulation_name, "normal");
+
+        n.send_a(b"hello");
+        n.send_a(b"world");
+        let a = n.a.metrics();
+        let b = n.b.metrics();
+        assert_eq!(a.frames_sent, 2);
+        assert_eq!(a.frames_received, 0);
+        assert_eq!(a.retransmits, 0);
+        assert_eq!(b.frames_sent, 0);
+        assert_eq!(b.frames_received, 2);
+        assert_eq!(b.peer.as_deref(), Some("AAA1"));
+        assert_eq!(b.frame_error_pct, 0.0);
+    }
+
+    #[test]
+    fn metrics_count_retransmits_and_loss_window() {
+        let mut n = connected_pair();
+        let mut dropped = false;
+        n.drop_a = Box::new(move |p: &[u8]| {
+            if !dropped && p[0] == TAG_DATA {
+                dropped = true;
+                true
+            } else {
+                false
+            }
+        });
+        n.send_a(b"lost?");
+        n.tick(DATA_TIMEOUT_MS);
+        let a = n.a.metrics();
+        assert_eq!((a.frames_sent, a.retransmits), (1, 1));
+        assert_eq!(n.b.metrics().frames_received, 1);
+
+        // b sees seq 0 then seq 3: two of four frames lost, so 50%.
+        let mut l = connected_pair();
+        l.b.on_receive(&encode_data(0, b"a"));
+        l.b.on_receive(&encode_data(3, b"d"));
+        assert_eq!(l.b.metrics().frame_error_pct, 50.0);
+    }
+
+    #[test]
+    fn metrics_emitted_every_five_seconds_while_connected() {
+        let mut n = connected_pair();
+        let emitted = |acts: &[Action]| acts.iter().any(|a| matches!(a, Action::Metrics(_)));
+        assert!(!emitted(&n.a.tick(METRICS_INTERVAL_MS - 1)));
+        assert!(emitted(&n.a.tick(METRICS_INTERVAL_MS)));
+        assert!(!emitted(&n.a.tick(METRICS_INTERVAL_MS + 1)));
+        assert!(emitted(&n.a.tick(2 * METRICS_INTERVAL_MS)));
+
+        let mut idle = Link::new("AAA1");
+        assert!(!emitted(&idle.tick(10 * METRICS_INTERVAL_MS)));
+    }
+
+    #[test]
+    fn describe_idle_connecting_and_connected() {
+        let mut a = Link::new("AAA1");
+        assert_eq!(a.describe(), "Idle");
+
+        a.connect("BBB2");
+        assert_eq!(a.describe(), "Connecting to BBB2, attempt 1 of 6");
+        a.tick(CONNECT_TIMEOUT_MS);
+        assert_eq!(a.describe(), "Connecting to BBB2, attempt 2 of 6");
+
+        let n = connected_pair();
+        assert_eq!(n.a.describe(), "Connected to BBB2");
+    }
+
+    #[test]
+    fn describe_reports_data_retries_and_disconnecting() {
+        let mut n = connected_pair();
+        let mut dropped = false;
+        n.drop_a = Box::new(move |p: &[u8]| {
+            if !dropped && p[0] == TAG_DATA {
+                dropped = true;
+                true
+            } else {
+                false
+            }
+        });
+        n.send_a(b"x");
+        // Check while the frame is still unacknowledged, before the retransmit is delivered.
+        let acts = n.a.tick(DATA_TIMEOUT_MS);
+        assert_eq!(n.a.describe(), "Connected to BBB2, resending data (retry 1 of 8)");
+        n.apply(true, acts);
+        n.run();
+        assert_eq!(n.b_rx, vec![b"x".to_vec()]);
+        assert_eq!(n.a.describe(), "Connected to BBB2");
+
+        n.a.state = LinkState::Disconnecting;
+        assert_eq!(n.a.describe(), "Disconnecting");
     }
 }
