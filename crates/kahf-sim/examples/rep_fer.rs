@@ -6,7 +6,10 @@ use kahf_core::ldpc;
 use kahf_core::phy::{self, Modulation};
 
 fn main() {
-    let frames: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(100);
+    let frames: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
     println!("snr_db\trep1\trep2\trep4\trep8");
     for snr10 in (-120..=20).step_by(20) {
         let snr = snr10 as f32 / 10.0;

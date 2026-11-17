@@ -184,6 +184,8 @@ struct Flags {
     /// sends go out without relay mode.
     operator_link: AtomicBool,
     listen_only: AtomicBool,
+    /// Weak mode: every frame is sent WEAK_COPIES times for stations that cannot reply.
+    weak_mode: AtomicBool,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; no effect yet.
@@ -198,6 +200,7 @@ impl Flags {
             relay_running: AtomicBool::new(false),
             operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
+            weak_mode: AtomicBool::new(false),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -295,6 +298,12 @@ impl Engine {
     /// Listen only (plan 0): while on, no transmit path runs. Receive keeps working.
     pub fn set_listen_only(&self, on: bool) {
         self.shared.flags.listen_only.store(on, Ordering::SeqCst);
+    }
+
+    /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
+    /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
+    pub fn set_weak_mode(&self, on: bool) {
+        self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
     }
 
     /// Set while a required update is pending (plan 0 and 8.5). While set, no transmit path runs.
@@ -1029,6 +1038,44 @@ fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     }
     let coded = ldpc::encode(&frame::build_payload_as(payload, mod_id(m)));
     Ok(phy::modulate_frame(&coded, m))
+}
+
+/// Copies of each frame in weak mode. Eight copies, soft-combined, decode at about -4 dB.
+const WEAK_COPIES: usize = 8;
+
+/// A weak-mode burst: every frame sent WEAK_COPIES times in QPSK, with gaps. No acknowledgements.
+fn weak_burst(frames: &[Vec<u8>]) -> Result<Vec<f32>, String> {
+    let mut out = vec![0f32; LEAD_SILENCE];
+    let mut first = true;
+    for payload in frames {
+        for _ in 0..WEAK_COPIES {
+            if !first {
+                out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
+            }
+            first = false;
+            out.extend(frame_samples_as(payload, Modulation::Qpsk)?);
+        }
+    }
+    out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
+    Ok(out)
+}
+
+/// Adds the log-likelihoods of the weak-mode copies that start at `samples[0]` and then every stride.
+/// None unless the sum decodes to a valid QPSK frame.
+fn decode_combined(samples: &[f32]) -> Option<Vec<u8>> {
+    let flen = frame_len_for(Modulation::Qpsk);
+    let stride = flen + GAP_SILENCE;
+    let mut sum = vec![0f32; ldpc::N];
+    for i in 0..WEAK_COPIES {
+        let seg = samples.get(i * stride..i * stride + flen)?;
+        let llr = phy::demodulate_frame(seg, Modulation::Qpsk, ldpc::N)?;
+        for (s, l) in sum.iter_mut().zip(llr.iter()) {
+            *s += l;
+        }
+    }
+    let info = ldpc::decode(&sum, LDPC_ITER)?;
+    let (data, id) = frame::parse_payload_id(&info)?;
+    (id == mod_id(Modulation::Qpsk)).then_some(data)
 }
 
 /// One transmit burst: lead-in silence, the frames with gaps, tail silence.
@@ -2229,7 +2276,12 @@ impl Worker {
             _ => {}
         }
         let m = MODULATIONS[self.tx_level as usize];
-        match burst(frames, m) {
+        let built = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
+            weak_burst(frames)
+        } else {
+            burst(frames, m)
+        };
+        match built {
             Ok(samples) => self.bursts.push_back(samples),
             Err(e) => self.log(format!("cannot build transmission: {e}")),
         }
@@ -2400,6 +2452,20 @@ impl Worker {
                 if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
                     found = Some((payload, len));
                     break;
+                }
+            }
+            if found.is_none() {
+                // Weak mode: the copies may still be arriving. Wait for all of them, then combine.
+                let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
+                let span = (WEAK_COPIES - 1) * stride + frame_len_for(Modulation::Qpsk);
+                if start + span > self.rx_buf.len() {
+                    self.rx_buf.drain(..start);
+                    return;
+                }
+                if let Some(payload) = decode_combined(&self.rx_buf[start..start + span]) {
+                    self.rx_buf.drain(..start + span);
+                    self.on_frame(payload);
+                    continue;
                 }
             }
             let (decoded, used) = match found {
@@ -2880,6 +2946,24 @@ mod tests {
             pos = start + flen;
         }
         assert_eq!(got, payloads);
+    }
+
+    #[test]
+    fn weak_mode_decodes_where_one_copy_does_not() {
+        let payload = b"weak mode".to_vec();
+        let clean = weak_burst(&[payload.clone()]).expect("weak burst builds");
+        // The first copy starts after the lead-in silence.
+        let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
+        let copy_at = |i: usize| LEAD_SILENCE + i * stride;
+        let noisy = kahf_sim::awgn(&clean, -4.0, 4242);
+        let one = &noisy[copy_at(0)..copy_at(0) + frame_len_for(Modulation::Qpsk)];
+        assert_eq!(
+            decode_at(one, Modulation::Qpsk),
+            None,
+            "a single copy should fail at -4 dB"
+        );
+        let combined = decode_combined(&noisy[copy_at(0)..]);
+        assert_eq!(combined.as_deref(), Some(payload.as_slice()));
     }
 
     #[test]

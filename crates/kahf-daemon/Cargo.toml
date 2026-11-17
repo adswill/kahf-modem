@@ -9,3 +9,6 @@ kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
 kahf-radio = { path = "../kahf-radio" }
 kahf-log = { path = "../kahf-log" }
+
+[dev-dependencies]
+kahf-sim = { path = "../kahf-sim" }

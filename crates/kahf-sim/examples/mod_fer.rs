@@ -5,8 +5,15 @@ use kahf_core::ldpc;
 use kahf_core::phy::{self, Modulation};
 
 fn main() {
-    let frames: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(200);
-    let mods = [("QPSK", Modulation::Qpsk), ("16QAM", Modulation::Qam16), ("64QAM", Modulation::Qam64)];
+    let frames: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let mods = [
+        ("QPSK", Modulation::Qpsk),
+        ("16QAM", Modulation::Qam16),
+        ("64QAM", Modulation::Qam64),
+    ];
     print!("snr_db");
     for (name, _) in mods {
         print!("\t{name}");

@@ -2770,6 +2770,7 @@ dependencies = [
  "kahf-log",
  "kahf-radio",
  "kahf-sdr",
+ "kahf-sim",
 ]
 
 [[package]]
