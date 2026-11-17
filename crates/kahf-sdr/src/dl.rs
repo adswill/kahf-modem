@@ -4,8 +4,22 @@
 use libloading::Library;
 use std::sync::OnceLock;
 
-const HACKRF_NAMES: &[&str] = &["libhackrf.dylib", "/opt/homebrew/lib/libhackrf.dylib", "/usr/local/lib/libhackrf.dylib", "libhackrf.so.0", "libhackrf.so", "hackrf.dll"];
-const RTLSDR_NAMES: &[&str] = &["librtlsdr.dylib", "/opt/homebrew/lib/librtlsdr.dylib", "/usr/local/lib/librtlsdr.dylib", "librtlsdr.so.2", "librtlsdr.so", "rtlsdr.dll"];
+const HACKRF_NAMES: &[&str] = &[
+    "libhackrf.dylib",
+    "/opt/homebrew/lib/libhackrf.dylib",
+    "/usr/local/lib/libhackrf.dylib",
+    "libhackrf.so.0",
+    "libhackrf.so",
+    "hackrf.dll",
+];
+const RTLSDR_NAMES: &[&str] = &[
+    "librtlsdr.dylib",
+    "/opt/homebrew/lib/librtlsdr.dylib",
+    "/usr/local/lib/librtlsdr.dylib",
+    "librtlsdr.so.2",
+    "librtlsdr.so",
+    "rtlsdr.dll",
+];
 
 fn load(names: &[&str]) -> Option<Library> {
     for name in names {

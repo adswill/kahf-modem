@@ -2,7 +2,7 @@
 //!
 //! Hand-written FFI: only the calls this module uses are declared. The radio sends and takes
 //! signed 8-bit I/Q pairs. They map to f32 in -1..1 by dividing by 128 (and back on transmit).
-//! Call order follows OnAir's HackRF driver (core/src/source/hackrf_usb.cpp, source.cpp).
+//! Call order follows the usual HackRF library sequence.
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -45,37 +45,37 @@ pub struct HackrfDeviceList {
 pub type SampleBlockCb = unsafe extern "C" fn(*mut HackrfTransfer) -> c_int;
 
 crate::dl::foreign_fns! {
-    hackrf;
-    fn hackrf_init() -> c_int;
-    fn hackrf_exit() -> c_int;
-    fn hackrf_open(device: *mut *mut c_void) -> c_int;
-    fn hackrf_open_by_serial(serial: *const c_char, device: *mut *mut c_void) -> c_int;
-    fn hackrf_close(device: *mut c_void) -> c_int;
-    fn hackrf_set_freq(device: *mut c_void, freq_hz: u64) -> c_int;
-    fn hackrf_set_sample_rate(device: *mut c_void, freq_hz: f64) -> c_int;
-    fn hackrf_set_baseband_filter_bandwidth(device: *mut c_void, bandwidth_hz: u32) -> c_int;
-    fn hackrf_board_id_read(device: *mut c_void, value: *mut u8) -> c_int;
-    fn hackrf_set_lna_gain(device: *mut c_void, value: u32) -> c_int;
-    fn hackrf_set_vga_gain(device: *mut c_void, value: u32) -> c_int;
-    fn hackrf_set_txvga_gain(device: *mut c_void, value: u32) -> c_int;
-    fn hackrf_set_amp_enable(device: *mut c_void, value: u8) -> c_int;
-    fn hackrf_start_rx(device: *mut c_void, cb: SampleBlockCb, rx_ctx: *mut c_void) -> c_int;
-    fn hackrf_start_tx(device: *mut c_void, cb: SampleBlockCb, tx_ctx: *mut c_void) -> c_int;
-    fn hackrf_stop_rx(device: *mut c_void) -> c_int;
-    fn hackrf_stop_tx(device: *mut c_void) -> c_int;
-    fn hackrf_is_streaming(device: *mut c_void) -> c_int;
-    fn hackrf_device_list() -> *mut HackrfDeviceList;
-    fn hackrf_device_list_free(list: *mut HackrfDeviceList);
-    fn hackrf_error_name(errcode: c_int) -> *const c_char;}
+hackrf;
+fn hackrf_init() -> c_int;
+fn hackrf_exit() -> c_int;
+fn hackrf_open(device: *mut *mut c_void) -> c_int;
+fn hackrf_open_by_serial(serial: *const c_char, device: *mut *mut c_void) -> c_int;
+fn hackrf_close(device: *mut c_void) -> c_int;
+fn hackrf_set_freq(device: *mut c_void, freq_hz: u64) -> c_int;
+fn hackrf_set_sample_rate(device: *mut c_void, freq_hz: f64) -> c_int;
+fn hackrf_set_baseband_filter_bandwidth(device: *mut c_void, bandwidth_hz: u32) -> c_int;
+fn hackrf_board_id_read(device: *mut c_void, value: *mut u8) -> c_int;
+fn hackrf_set_lna_gain(device: *mut c_void, value: u32) -> c_int;
+fn hackrf_set_vga_gain(device: *mut c_void, value: u32) -> c_int;
+fn hackrf_set_txvga_gain(device: *mut c_void, value: u32) -> c_int;
+fn hackrf_set_amp_enable(device: *mut c_void, value: u8) -> c_int;
+fn hackrf_start_rx(device: *mut c_void, cb: SampleBlockCb, rx_ctx: *mut c_void) -> c_int;
+fn hackrf_start_tx(device: *mut c_void, cb: SampleBlockCb, tx_ctx: *mut c_void) -> c_int;
+fn hackrf_stop_rx(device: *mut c_void) -> c_int;
+fn hackrf_stop_tx(device: *mut c_void) -> c_int;
+fn hackrf_is_streaming(device: *mut c_void) -> c_int;
+fn hackrf_device_list() -> *mut HackrfDeviceList;
+fn hackrf_device_list_free(list: *mut HackrfDeviceList);
+fn hackrf_error_name(errcode: c_int) -> *const c_char;}
 
-/// Baseband filter widths of the MAX2837 (OnAir hackrf_usb.cpp, kFilterHz).
+/// Baseband filter widths of the MAX2837 (the hackrf_usb.cpp, kFilterHz).
 const FILTER_HZ: [u32; 16] = [
     1_750_000, 2_500_000, 3_500_000, 5_000_000, 5_500_000, 6_000_000, 7_000_000, 8_000_000, 9_000_000,
     10_000_000, 12_000_000, 14_000_000, 15_000_000, 20_000_000, 24_000_000, 28_000_000,
 ];
 
-/// Largest filter width at or below the wish (OnAir filterBelow, not the strict "below" variant).
-/// At 10 Msps the wish is 5 MHz and that is the width kept, as OnAir does.
+/// Largest filter width at or below the wish (the filterBelow, not the strict "below" variant).
+/// At 10 Msps the wish is 5 MHz and that is the width kept, as the does.
 fn filter_below(wish_hz: u32) -> u32 {
     let mut i = 0;
     while i < FILTER_HZ.len() && FILTER_HZ[i] < wish_hz {
@@ -87,7 +87,7 @@ fn filter_below(wish_hz: u32) -> u32 {
     FILTER_HZ[i]
 }
 
-/// Tuning range per board id (OnAir hackrfBoardRange). None when the board is not known.
+/// Tuning range per board id (the hackrfBoardRange). None when the board is not known.
 fn board_range_hz(id: u8) -> Option<(f64, f64)> {
     match id {
         1 => Some((10e6, 6e9)),    // Jawbreaker
@@ -98,12 +98,12 @@ fn board_range_hz(id: u8) -> Option<(f64, f64)> {
     }
 }
 
-/// int8 I/Q sample to f32 in -1..1. Receive scale: divide by 128 (OnAir hackrf_usb.cpp, onTransfer).
+/// int8 I/Q sample to f32 in -1..1. Receive scale: divide by 128 (the hackrf_usb.cpp, onTransfer).
 pub fn i8_to_f32(v: i8) -> f32 {
     f32::from(v) / 128.0
 }
 
-/// f32 in -1..1 to int8 for transmit. OnAir hackrfTxPack: scale by 127, round half to even, clamp to -127..127,
+/// f32 in -1..1 to int8 for transmit. the hackrfTxPack: scale by 127, round half to even, clamp to -127..127,
 /// so full scale is +127 and -127 (never -128). NaN becomes 0.
 pub fn f32_to_i8(v: f32) -> i8 {
     if v.is_nan() {
@@ -193,12 +193,12 @@ impl Session {
         }
     }
 
-    /// Order as OnAir's driver: sample rate, then baseband filter, then centre frequency.
+    /// Order as the driver: sample rate, then baseband filter, then centre frequency.
     fn tune(&self, freq_hz: u64, rate_hz: f64) -> Result<(), String> {
         if !(rate_hz.is_finite() && rate_hz > 0.0) {
             return Err(format!("invalid HackRF sample rate {rate_hz}"));
         }
-        // OnAir's advertised HackRF sample-rate range (2 to 20 Msps).
+        // the advertised HackRF sample-rate range (2 to 20 Msps).
         if !(2e6..=20e6).contains(&rate_hz) {
             return Err(format!(
                 "HackRF sample rate {} Msps is outside 2 to 20 Msps",
@@ -222,7 +222,7 @@ impl Session {
         check("hackrf_set_sample_rate", unsafe {
             hackrf_set_sample_rate(self.dev, rate_hz)
         })?;
-        // libhackrf's own sample-rate call picks a wider filter (about 0.75 of the rate). OnAir sets the filter
+        // libhackrf's own sample-rate call picks a wider filter (about 0.75 of the rate). the sets the filter
         // explicitly: the largest width at or below half the sample rate (5 MHz at 10 Msps).
         let filter = filter_below((rate_hz * 0.5) as u32);
         check("hackrf_set_baseband_filter_bandwidth", unsafe {
@@ -449,7 +449,7 @@ impl HackrfTx {
         })?;
         let q = Arc::new(Queue::new());
         let ctx = Arc::as_ptr(&q) as *mut c_void;
-        // OnAir's shut() turns the amplifier back off when transmit does not start; do the same here.
+        // the shut() turns the amplifier back off when transmit does not start; do the same here.
         if let Err(e) = check("hackrf_start_tx", unsafe {
             hackrf_start_tx(session.dev, tx_callback, ctx)
         }) {
@@ -476,7 +476,7 @@ impl Drop for HackrfTx {
         self.q.close();
         unsafe {
             hackrf_stop_tx(self.session.dev);
-            // OnAir's shut(): the amplifier goes back off when transmit stops (hackrf_stop_tx does not do it).
+            // the shut(): the amplifier goes back off when transmit stops (hackrf_stop_tx does not do it).
             hackrf_set_amp_enable(self.session.dev, 0);
         }
     }
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn hackrf_f32_to_i8_rounds_and_clamps() {
-        // OnAir hackrfTxPack: scale 127, symmetric clamp at -127..127
+        // the hackrfTxPack: scale 127, symmetric clamp at -127..127
         assert_eq!(f32_to_i8(0.0), 0);
         assert_eq!(f32_to_i8(0.5), 64); // 63.5 rounds to even 64
         assert_eq!(f32_to_i8(-0.5), -64);
@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn hackrf_filter_below_matches_onair() {
+    fn hackrf_filter_below_rule() {
         // 10 Msps: half the rate is exactly 5 MHz, kept as 5 MHz (not stepped down to 3.5)
         assert_eq!(filter_below(5_000_000), 5_000_000);
         assert_eq!(filter_below(4_000_000), 3_500_000);
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn hackrf_board_ranges_match_onair() {
+    fn hackrf_board_ranges_table() {
         assert_eq!(board_range_hz(2), Some((1e6, 6e9)));
         assert_eq!(board_range_hz(5), Some((0.1e6, 6e9)));
         assert_eq!(board_range_hz(0), None);

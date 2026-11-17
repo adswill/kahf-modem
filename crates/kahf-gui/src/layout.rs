@@ -1,7 +1,7 @@
 //! The outer shell. Top bar: callsign and link chip, the frequency in large monospace, band and mode,
 //! RX/TX state, Listen only and the UTC clock. Left: the collapsible sidebar (Connect, Stations, Relay,
 //! Settings). Centre: spectrum and waterfall on one shared width, with messages below. Right: the link,
-//! transmit and rig column. Bottom: the status bar. Dark, flat and dense, taken from the OnAir reference.
+//! transmit and rig column. Bottom: the status bar. Dark, flat and dense, taken from the the reference.
 use eframe::egui::{self, vec2, FontId, RichText};
 use std::time::{SystemTime, UNIX_EPOCH};
 

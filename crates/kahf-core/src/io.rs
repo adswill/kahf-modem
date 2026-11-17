@@ -1,5 +1,5 @@
 //! Hardware-facing traits. Implementations: rigctld TCP (Hamlib), audio via cpal,
-//! SDR IQ via OnAir driver layer (later). Keep these as traits only here.
+//! SDR IQ via the driver layer (later). Keep these as traits only here.
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -15,7 +15,7 @@ pub trait RigControl {
 }
 
 /// Receive-side IQ source. The SDR implementations (HackRF, RTL-SDR, Airspy and
-/// others, TX and RX) come from OnAir's driver layer through kahf-ffi later.
+/// others, TX and RX) come from the driver layer through kahf-ffi later.
 /// They are not written here.
 pub trait IqSource {
     fn read_iq(&mut self, out: &mut [(f32, f32)]) -> Result<usize, String>;
@@ -23,7 +23,7 @@ pub trait IqSource {
 }
 
 /// Transmit-side IQ sink. The SDR implementations (HackRF, RTL-SDR, Airspy and
-/// others, TX and RX) come from OnAir's driver layer through kahf-ffi later.
+/// others, TX and RX) come from the driver layer through kahf-ffi later.
 /// They are not written here.
 pub trait IqSink {
     fn write_iq(&mut self, iq: &[(f32, f32)]) -> Result<(), String>;

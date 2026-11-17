@@ -1,4 +1,4 @@
-//! SDR adapters (IqSource / IqSink from kahf-core::io). Reference: OnAir's
+//! SDR adapters (IqSource / IqSink from kahf-core::io).
 //! core/src/source/hackrf_usb.cpp and source_rtlsdr.cpp.
 pub(crate) mod dl;
 pub mod hackrf; // HackRF receive and transmit
