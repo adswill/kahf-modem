@@ -1,36 +1,55 @@
 # KAHF Modem
 
-KAHF is an HF data modem written in Rust. It runs on macOS, Linux and Windows and is built for amateur radio data links: station connections, messages, mail, and file transfer.
+KAHF (pronounced "kaf", rhymes with "calf") is an HF data modem written in Rust. It runs on macOS, Linux and Windows and is built for amateur radio data links: station connections, messages, mail and file transfer.
 
 ## Status
 
-Early development. The coding, modulation, framing, link and session layers are implemented and tested. The sound-card, SDR and rig interfaces and the desktop interface are in progress. The modem is not yet ready for on-air use.
+Early development. KAHF is not yet on air. The modem, frame, link and session layers, the logbook and the stress tests are implemented and tested. The sound-card and SDR adapters and the desktop interface are in progress. Measured numbers are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
-## Crates
+## What works now
 
-| Crate | Purpose |
-|---|---|
-| `kahf-core` | LDPC code, OFDM modem, frame, link and session layers, hardware traits |
-| `kahf-sim` | Channel simulator and error-rate measurement |
-| `kahf-cli` | Command-line tool: `tx`, `rx`, `sim-tx`, `bler` |
-| `kahf-audio` | Sound-card input and output |
-| `kahf-sdr` | SDR adapters (HackRF, RTL-SDR) |
-| `kahf-daemon` | Engine that connects the modem to audio, SDR and rig |
-| `kahf-gui` | Desktop interface |
+- The modem over audio: encode a message to a WAV file and decode it back, including through the channel simulator.
+- Messages, mail and file transfer over the link and session layers.
+- A contact logbook with CSV storage and ADIF 3 export.
+- Server stress tests for the station server.
 
-## Build
+## Build and test
+
+Requires a recent stable Rust toolchain.
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 ```
 
-The `kahf-sdr` crate links the system libraries for HackRF and RTL-SDR. On macOS, install them with Homebrew:
+The `kahf-sdr` crate links the HackRF and RTL-SDR libraries. On macOS, install them with Homebrew:
 
 ```bash
 brew install hackrf librtlsdr
 ```
 
+Example: encode a file to audio and decode it again with the command-line tool.
+
+```bash
+cargo run -p kahf-cli -- tx message.bin -o message.wav
+cargo run -p kahf-cli -- rx message.wav -o decoded.bin
+```
+
+## Crates
+
+| Crate | Purpose |
+|---|---|
+| `kahf-core` | LDPC code, OFDM-style modem, frame, link and session layers, I/O traits |
+| `kahf-sim` | Channel simulator and error-rate measurement |
+| `kahf-log` | Contact logbook: CSV storage and ADIF export |
+| `kahf-prop` | First-pass HF propagation estimator (estimate only) |
+| `kahf-audio` | Sound-card input and output |
+| `kahf-sdr` | SDR adapters (HackRF, RTL-SDR) |
+| `kahf-daemon` | Engine that connects the modem to audio, SDR and rig; the API used by the interfaces |
+| `kahf-cli` | Command-line tool: `tx`, `rx`, `sim-tx`, `bler`, `e2e` |
+| `kahf-gui` | Desktop interface |
+| `kahf-ui` | Alternative desktop interface |
+
 ## Licence
 
-See [LICENSE](LICENSE).
+Copyright (c) 2026 adswill. All rights reserved. This software is source-available. Licence terms will be published with the first release. See [LICENSE](LICENSE).
