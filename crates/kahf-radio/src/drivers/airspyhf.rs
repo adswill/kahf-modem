@@ -215,7 +215,9 @@ impl RxRadio for AirspyHf {
 
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         if !(MIN_FREQ_HZ..=MAX_FREQ_HZ).contains(&hz) {
-            return Err(format!("{hz} Hz is outside the Airspy HF+ range of 9 kHz to 260 MHz"));
+            return Err(format!(
+                "{hz} Hz is outside the Airspy HF+ range of 9 kHz to 260 MHz"
+            ));
         }
         // SAFETY: the device is open. The range check keeps the value within 32 bits.
         let code = unsafe { (self.api.set_freq)(self.dev, hz as u32) };
@@ -287,7 +289,9 @@ impl RxRadio for AirspyHf {
                     }
                 }
             }
-            other => Err(format!("the Airspy HF+ has no gain stage named {other:?}; stages: gain, preamp")),
+            other => Err(format!(
+                "the Airspy HF+ has no gain stage named {other:?}; stages: gain, preamp"
+            )),
         }
     }
 
@@ -305,7 +309,9 @@ impl RxRadio for AirspyHf {
         let code = unsafe { (self.api.start)(self.dev, on_samples, ctx) };
         if code != 0 {
             self.shared.running.store(false, Ordering::Release);
-            return Err(format!("Airspy HF+: starting the stream failed (library code {code})"));
+            return Err(format!(
+                "Airspy HF+: starting the stream failed (library code {code})"
+            ));
         }
         self.streaming = true;
         Ok(())
@@ -369,7 +375,9 @@ pub fn parse_serial(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
     u64::from_str_radix(hex, 16).map_err(|_| {
-        format!("{text:?} is not an Airspy HF+ serial number; give the hexadecimal serial from the device list")
+        format!(
+            "{text:?} is not an Airspy HF+ serial number; give the hexadecimal serial from the device list"
+        )
     })
 }
 
@@ -429,12 +437,18 @@ fn read_rates(api: &Api, dev: Device) -> Result<Vec<u32>, String> {
     // A zero-length call first, which returns how many rates there are.
     let mut count: u32 = 0;
     // SAFETY: the device is open. A zero length means the count is written and nothing else.
-    check(unsafe { (api.get_rates)(dev, &mut count, 0) }, "reading the sample rates")?;
+    check(
+        unsafe { (api.get_rates)(dev, &mut count, 0) },
+        "reading the sample rates",
+    )?;
     let len = (count as usize).min(MAX_RATES);
     let mut rates = vec![0u32; len];
     if len > 0 {
         // SAFETY: the buffer holds `len` entries.
-        check(unsafe { (api.get_rates)(dev, rates.as_mut_ptr(), len as u32) }, "reading the sample rates")?;
+        check(
+            unsafe { (api.get_rates)(dev, rates.as_mut_ptr(), len as u32) },
+            "reading the sample rates",
+        )?;
     }
     rates.retain(|&r| r > 0);
     rates.sort_unstable();

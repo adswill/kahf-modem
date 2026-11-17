@@ -62,7 +62,9 @@ fn main() -> ExitCode {
     radio.stop();
 
     if count == 0 {
-        eprintln!("no samples arrived in 3 seconds. Check the antenna and that no other program holds the radio.");
+        eprintln!(
+            "no samples arrived in 3 seconds. Check the antenna and that no other program holds the radio."
+        );
         return ExitCode::FAILURE;
     }
     let mean_db = 10.0 * (power_sum / count as f64).max(1e-12).log10();

@@ -9,7 +9,7 @@ mod tech;
 mod theme;
 mod view;
 
-use iced::{Size, window};
+use iced::{window, Size};
 
 fn main() -> iced::Result {
     iced::application(app::App::new, app::App::update, app::App::view)

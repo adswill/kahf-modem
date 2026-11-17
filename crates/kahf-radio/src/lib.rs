@@ -82,9 +82,15 @@ pub fn parse_spec(text: &str) -> Result<RadioSpec, String> {
         None => (text, None),
     };
     if !drivers::NAMES.contains(&driver) {
-        return Err(format!("unknown radio {driver:?}; known: {}", drivers::NAMES.join(", ")));
+        return Err(format!(
+            "unknown radio {driver:?}; known: {}",
+            drivers::NAMES.join(", ")
+        ));
     }
-    Ok(RadioSpec { driver: driver.to_string(), id })
+    Ok(RadioSpec {
+        driver: driver.to_string(),
+        id,
+    })
 }
 
 /// Finds the radios this computer can use. Each driver's probe must return quickly.
@@ -103,10 +109,19 @@ mod tests {
 
     #[test]
     fn parses_driver_and_id() {
-        assert_eq!(parse_spec("rtlsdr").unwrap(), RadioSpec { driver: "rtlsdr".into(), id: None });
+        assert_eq!(
+            parse_spec("rtlsdr").unwrap(),
+            RadioSpec {
+                driver: "rtlsdr".into(),
+                id: None
+            }
+        );
         assert_eq!(
             parse_spec("rtltcp:192.168.1.5:1234").unwrap(),
-            RadioSpec { driver: "rtltcp".into(), id: Some("192.168.1.5:1234".into()) }
+            RadioSpec {
+                driver: "rtltcp".into(),
+                id: Some("192.168.1.5:1234".into())
+            }
         );
         assert!(parse_spec("").is_err());
         assert!(parse_spec("nosuchradio").is_err());

@@ -33,8 +33,8 @@ const DEFAULT_LNA_DB: u32 = 16;
 const DEFAULT_VGA_DB: u32 = 20;
 /// Baseband filter widths of the MAX2837 chip, ascending.
 const FILTERS_HZ: [u32; 16] = [
-    1_750_000, 2_500_000, 3_500_000, 5_000_000, 5_500_000, 6_000_000, 7_000_000, 8_000_000,
-    9_000_000, 10_000_000, 12_000_000, 14_000_000, 15_000_000, 20_000_000, 24_000_000, 28_000_000,
+    1_750_000, 2_500_000, 3_500_000, 5_000_000, 5_500_000, 6_000_000, 7_000_000, 8_000_000, 9_000_000,
+    10_000_000, 12_000_000, 14_000_000, 15_000_000, 20_000_000, 24_000_000, 28_000_000,
 ];
 /// Board id for "not known" as libhackrf reports it.
 const BOARD_UNKNOWN: u8 = 0xff;
@@ -271,19 +271,19 @@ unsafe extern "C" fn receive_block(transfer: *mut Transfer) -> c_int {
     // SAFETY: the context was set by `start` to a live queue, and it is not freed while streaming.
     let queue = unsafe { &*(transfer.rx_context as *const Queue) };
     // SAFETY: the buffer holds `valid_length` bytes for this call.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(transfer.buffer as *const i8, transfer.valid_length as usize)
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(transfer.buffer as *const i8, transfer.valid_length as usize) };
     let mut st = queue.lock();
     if st.closed {
         return -1;
     }
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         if st.items.len() >= BACKLOG_LIMIT {
             st.items.pop_front();
             st.dropped += 1;
         }
-        st.items.push_back((sample_to_f32(pair[0]), sample_to_f32(pair[1])));
+        st.items
+            .push_back((sample_to_f32(pair[0]), sample_to_f32(pair[1])));
     }
     drop(st);
     queue.ready.notify_all();
@@ -326,15 +326,21 @@ impl HackRf {
     }
 
     fn send_freq(&self, freq_hz: u64) -> Result<(), String> {
-        check(self.api, "set frequency", unsafe { (self.api.set_freq)(self.dev, freq_hz) })
+        check(self.api, "set frequency", unsafe {
+            (self.api.set_freq)(self.dev, freq_hz)
+        })
     }
 
     fn send_lna(&self, db: u32) -> Result<(), String> {
-        check(self.api, "set LNA gain", unsafe { (self.api.set_lna_gain)(self.dev, db) })
+        check(self.api, "set LNA gain", unsafe {
+            (self.api.set_lna_gain)(self.dev, db)
+        })
     }
 
     fn send_vga(&self, db: u32) -> Result<(), String> {
-        check(self.api, "set VGA gain", unsafe { (self.api.set_vga_gain)(self.dev, db) })
+        check(self.api, "set VGA gain", unsafe {
+            (self.api.set_vga_gain)(self.dev, db)
+        })
     }
 
     fn send_amp(&self, on: bool) -> Result<(), String> {

@@ -100,7 +100,12 @@ pub struct Sim {
 
 impl Sim {
     pub fn new() -> Self {
-        Self { rng: 0x9E37_79B9_7F4A_7C15, t: 0.0, peak_bin: 0, peak_db: DB_MIN }
+        Self {
+            rng: 0x9E37_79B9_7F4A_7C15,
+            t: 0.0,
+            peak_bin: 0,
+            peak_db: DB_MIN,
+        }
     }
 
     fn noise(&mut self) -> f32 {
@@ -166,14 +171,22 @@ impl Waterfall {
         let lut = (0..256)
             .map(|i| {
                 let v = i as f32 / 255.0;
-                let k = STOPS.iter().rposition(|s| s.0 <= v).unwrap_or(0).min(STOPS.len() - 2);
+                let k = STOPS
+                    .iter()
+                    .rposition(|s| s.0 <= v)
+                    .unwrap_or(0)
+                    .min(STOPS.len() - 2);
                 let (a, b) = (STOPS[k], STOPS[k + 1]);
                 let f = (v - a.0) / (b.0 - a.0);
                 let c = |j: usize| (a.1[j] + (b.1[j] - a.1[j]) * f) as u8;
                 [c(0), c(1), c(2), 255]
             })
             .collect();
-        let mut wf = Self { px: vec![0; WF_ROWS * WF_COLS * 4], head: 0, lut };
+        let mut wf = Self {
+            px: vec![0; WF_ROWS * WF_COLS * 4],
+            head: 0,
+            lut,
+        };
         for p in wf.px.as_chunks_mut::<4>().0 {
             *p = [7, 10, 36, 255];
         }
@@ -246,7 +259,10 @@ pub fn channel_label(hz: f64, n: usize) -> String {
 /// Number of the channel nearest the tuned frequency (within half a spacing).
 pub fn selected_channel(tuned_hz: f64) -> Option<usize> {
     let half = f64::from(kahf_core::select::DEFAULT_SPACING_HZ) / 2.0;
-    channels().into_iter().find(|(hz, _)| (hz - tuned_hz).abs() <= half).map(|(_, n)| n)
+    channels()
+        .into_iter()
+        .find(|(hz, _)| (hz - tuned_hz).abs() <= half)
+        .map(|(_, n)| n)
 }
 
 fn band_markers(frame: &mut canvas::Frame, size: Size, labels: bool, tune: f32) {
@@ -254,14 +270,31 @@ fn band_markers(frame: &mut canvas::Frame, size: Size, labels: bool, tune: f32) 
     for (hz, n) in channels() {
         let x = ((hz - (centre_hz() - SPAN_HZ / 2.0)) / SPAN_HZ) as f32 * size.width;
         let on = sel == Some(n);
-        let color = if on { theme::AMBER } else { theme::with_alpha(theme::MUTED, 0.45) };
-        let dash = canvas::LineDash { segments: &[3.0, 4.0], offset: 0 };
+        let color = if on {
+            theme::AMBER
+        } else {
+            theme::with_alpha(theme::MUTED, 0.45)
+        };
+        let dash = canvas::LineDash {
+            segments: &[3.0, 4.0],
+            offset: 0,
+        };
         frame.stroke(
             &Path::line(Point::new(x, 0.0), Point::new(x, size.height)),
-            Stroke { line_dash: dash, ..Stroke::default().with_color(color).with_width(if on { 1.5 } else { 1.0 }) },
+            Stroke {
+                line_dash: dash,
+                ..Stroke::default()
+                    .with_color(color)
+                    .with_width(if on { 1.5 } else { 1.0 })
+            },
         );
         if labels {
-            let mut t = text(channel_label(hz, n), Point::new(x + 4.0, size.height - 14.0), 10.0, color);
+            let mut t = text(
+                channel_label(hz, n),
+                Point::new(x + 4.0, size.height - 14.0),
+                10.0,
+                color,
+            );
             t.align_x = iced::alignment::Horizontal::Left.into();
             frame.fill_text(t);
         }
@@ -274,10 +307,22 @@ fn time_scale(frame: &mut canvas::Frame, size: Size) {
     let mut s = 0.0f32;
     while s <= total + 0.01 {
         let y = (s / total * size.height).min(size.height - 1.0);
-        frame.fill_rectangle(Point::new(0.0, y), Size::new(6.0, 1.0), theme::with_alpha(theme::TEXT, 0.6));
-        let label = if s == 0.0 { "now".to_string() } else { format!("-{s:.0}s") };
+        frame.fill_rectangle(
+            Point::new(0.0, y),
+            Size::new(6.0, 1.0),
+            theme::with_alpha(theme::TEXT, 0.6),
+        );
+        let label = if s == 0.0 {
+            "now".to_string()
+        } else {
+            format!("-{s:.0}s")
+        };
         let ty = y + 3.0;
-        frame.fill_rectangle(Point::new(0.0, ty - 1.0), Size::new(34.0, 13.0), theme::with_alpha(theme::BACKGROUND, 0.6));
+        frame.fill_rectangle(
+            Point::new(0.0, ty - 1.0),
+            Size::new(34.0, 13.0),
+            theme::with_alpha(theme::BACKGROUND, 0.6),
+        );
         frame.fill_text(text(label, Point::new(8.0, ty), 10.0, theme::TEXT));
         s += 2.0;
     }
@@ -302,12 +347,23 @@ fn cursor_line(frame: &mut canvas::Frame, size: Size, cursor: mouse::Cursor, bou
     if let Some(p) = cursor.position_in(bounds) {
         frame.stroke(
             &Path::line(Point::new(p.x, 0.0), Point::new(p.x, size.height)),
-            Stroke::default().with_color(theme::with_alpha(theme::TEXT, 0.35)).with_width(1.0),
+            Stroke::default()
+                .with_color(theme::with_alpha(theme::TEXT, 0.35))
+                .with_width(1.0),
         );
         if label {
             let hz = hz_at(p.x / size.width);
-            let x = if p.x > size.width - 110.0 { p.x - 106.0 } else { p.x + 6.0 };
-            frame.fill_text(text(format!("{} kHz", khz_text(hz)), Point::new(x, 20.0), 11.0, theme::TEXT));
+            let x = if p.x > size.width - 110.0 {
+                p.x - 106.0
+            } else {
+                p.x + 6.0
+            };
+            frame.fill_text(text(
+                format!("{} kHz", khz_text(hz)),
+                Point::new(x, 20.0),
+                11.0,
+                theme::TEXT,
+            ));
         }
     }
 }
@@ -323,15 +379,32 @@ pub struct SpectrumPlot<'a> {
 impl canvas::Program<Message> for SpectrumPlot<'_> {
     type State = ();
 
-    fn update(&self, _: &mut (), event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
+    fn update(
+        &self,
+        _: &mut (),
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<Message>> {
         click_to_tune(event, bounds, cursor)
     }
 
     fn mouse_interaction(&self, _: &(), bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        if cursor.is_over(bounds) { mouse::Interaction::Crosshair } else { mouse::Interaction::default() }
+        if cursor.is_over(bounds) {
+            mouse::Interaction::Crosshair
+        } else {
+            mouse::Interaction::default()
+        }
     }
 
-    fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
         let size = bounds.size();
         let (w, h) = (size.width, size.height);
         let plot_h = h - 16.0; // bottom strip holds the frequency labels
@@ -339,15 +412,25 @@ impl canvas::Program<Message> for SpectrumPlot<'_> {
 
         let grid = self.grid.draw(renderer, size, |frame| {
             frame.fill_rectangle(Point::ORIGIN, size, theme::PANEL);
-            let minor = Stroke::default().with_color(theme::with_alpha(theme::HAIRLINE, 0.55)).with_width(1.0);
+            let minor = Stroke::default()
+                .with_color(theme::with_alpha(theme::HAIRLINE, 0.55))
+                .with_width(1.0);
             let major = Stroke::default().with_color(theme::HAIRLINE).with_width(1.0);
             let mut db = DB_MIN + 5.0;
             while db < DB_MAX {
                 let y = y_of(db);
                 let ten = ((db - DB_MIN) as i32) % 10 == 0;
-                frame.stroke(&Path::line(Point::new(0.0, y), Point::new(w, y)), if ten { major } else { minor });
+                frame.stroke(
+                    &Path::line(Point::new(0.0, y), Point::new(w, y)),
+                    if ten { major } else { minor },
+                );
                 if ((db - DB_MIN) as i32) % 20 == 0 {
-                    frame.fill_text(text(format!("{db:.0}"), Point::new(4.0, y - 12.0), 10.0, theme::MUTED));
+                    frame.fill_text(text(
+                        format!("{db:.0}"),
+                        Point::new(4.0, y - 12.0),
+                        10.0,
+                        theme::MUTED,
+                    ));
                 }
                 db += 5.0;
             }
@@ -364,7 +447,12 @@ impl canvas::Program<Message> for SpectrumPlot<'_> {
                 } else {
                     (x, iced::alignment::Horizontal::Center.into())
                 };
-                let mut t = text(format!("{khz:.0}"), Point::new(px, plot_h + 3.0), 10.0, theme::MUTED);
+                let mut t = text(
+                    format!("{khz:.0}"),
+                    Point::new(px, plot_h + 3.0),
+                    10.0,
+                    theme::MUTED,
+                );
                 t.align_x = align;
                 frame.fill_text(t);
             }
@@ -381,8 +469,16 @@ impl canvas::Program<Message> for SpectrumPlot<'_> {
             let label = khz_text(hz_at(self.tune));
             let tx = self.tune * w;
             let tag_w = 70.0;
-            let x0 = if tx + tag_w + 6.0 > w { tx - tag_w - 4.0 } else { tx + 4.0 };
-            frame.fill_rectangle(Point::new(x0, 3.0), Size::new(tag_w, 15.0), theme::with_alpha(theme::RAISED, 0.92));
+            let x0 = if tx + tag_w + 6.0 > w {
+                tx - tag_w - 4.0
+            } else {
+                tx + 4.0
+            };
+            frame.fill_rectangle(
+                Point::new(x0, 3.0),
+                Size::new(tag_w, 15.0),
+                theme::with_alpha(theme::RAISED, 0.92),
+            );
             frame.fill_text(text(label, Point::new(x0 + 5.0, 5.0), 11.0, theme::TEXT));
         }
 
@@ -400,7 +496,10 @@ impl canvas::Program<Message> for SpectrumPlot<'_> {
             b.close();
         });
         frame.fill(&trace, theme::with_alpha(theme::ACCENT, 0.15));
-        frame.stroke(&trace, Stroke::default().with_color(theme::ACCENT).with_width(1.0));
+        frame.stroke(
+            &trace,
+            Stroke::default().with_color(theme::ACCENT).with_width(1.0),
+        );
 
         // Peak marker: small triangle above the highest bin.
         let px = (self.peak_bin as f32 + 0.5) / BINS as f32 * w;
@@ -427,15 +526,32 @@ pub struct WaterfallMarker {
 impl canvas::Program<Message> for WaterfallMarker {
     type State = ();
 
-    fn update(&self, _: &mut (), event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
+    fn update(
+        &self,
+        _: &mut (),
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<Message>> {
         click_to_tune(event, bounds, cursor)
     }
 
     fn mouse_interaction(&self, _: &(), bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        if cursor.is_over(bounds) { mouse::Interaction::Crosshair } else { mouse::Interaction::default() }
+        if cursor.is_over(bounds) {
+            mouse::Interaction::Crosshair
+        } else {
+            mouse::Interaction::default()
+        }
     }
 
-    fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
         let size = bounds.size();
         let mut frame = canvas::Frame::new(renderer, size);
         band_markers(&mut frame, size, false, self.tune);

@@ -33,8 +33,7 @@ const LNA_TABLE: [(f32, u32); 3] = [(0.0, 0), (16.0, 2), (33.0, 3)];
 const SCALE: f32 = 4.0;
 /// Rates used when the radio cannot be asked.
 const DEFAULT_RATES: [u32; 9] = [
-    8_000_000, 10_000_000, 12_500_000, 16_000_000, 20_000_000, 25_000_000, 32_000_000, 40_000_000,
-    50_000_000,
+    8_000_000, 10_000_000, 12_500_000, 16_000_000, 20_000_000, 25_000_000, 32_000_000, 40_000_000, 50_000_000,
 ];
 /// Buffers the library keeps in flight, and samples per buffer.
 const BUF_COUNT: u32 = 16;
@@ -88,7 +87,9 @@ fn symbol<T: Copy>(lib: &Library, name: &str) -> Result<T, String> {
     bytes.push(0);
     // SAFETY: the caller names each function with its signature from the library's interface.
     let sym: Symbol<T> = unsafe { lib.get(&bytes) }.map_err(|_| {
-        format!("Fobos SDR: the library has no function {name}; it may be too old or not the Fobos SDR library")
+        format!(
+            "Fobos SDR: the library has no function {name}; it may be too old or not the Fobos SDR library"
+        )
     })?;
     Ok(*sym)
 }
@@ -167,10 +168,9 @@ fn pick_index(serials: &[String], id: Option<&str>) -> Result<usize, String> {
             if serials.is_empty() {
                 return Err("Fobos SDR: no radio found. Check the USB cable and that the radio has the agile firmware".into());
             }
-            serials
-                .iter()
-                .position(|s| s.as_str() != IN_USE)
-                .ok_or_else(|| "Fobos SDR: every radio found is in use by another program or has no USB access".to_string())
+            serials.iter().position(|s| s.as_str() != IN_USE).ok_or_else(|| {
+                "Fobos SDR: every radio found is in use by another program or has no USB access".to_string()
+            })
         }
         Some(want) => match serials.iter().position(|s| s.as_str() == want) {
             Some(i) if serials[i] == IN_USE => Err(format!(
@@ -178,8 +178,16 @@ fn pick_index(serials: &[String], id: Option<&str>) -> Result<usize, String> {
             )),
             Some(i) => Ok(i),
             None => {
-                let found: Vec<&str> = serials.iter().map(|s| s.as_str()).filter(|s| *s != IN_USE).collect();
-                let list = if found.is_empty() { "none".to_string() } else { found.join(", ") };
+                let found: Vec<&str> = serials
+                    .iter()
+                    .map(|s| s.as_str())
+                    .filter(|s| *s != IN_USE)
+                    .collect();
+                let list = if found.is_empty() {
+                    "none".to_string()
+                } else {
+                    found.join(", ")
+                };
                 Err(format!("Fobos SDR: no radio with serial {want}; found: {list}"))
             }
         },
@@ -337,7 +345,10 @@ impl FobosRadio {
         if rc == 0 {
             Ok(())
         } else {
-            Err(format!("Fobos SDR: {what} was refused ({})", describe(&self.api, rc)))
+            Err(format!(
+                "Fobos SDR: {what} was refused ({})",
+                describe(&self.api, rc)
+            ))
         }
     }
 }
@@ -349,7 +360,11 @@ pub fn probe() -> Vec<DeviceInfo> {
     list_serials(&api)
         .into_iter()
         .filter(|s| !s.is_empty() && s != IN_USE)
-        .map(|serial| DeviceInfo { driver: DRIVER, label: label_for(&serial), id: serial })
+        .map(|serial| DeviceInfo {
+            driver: DRIVER,
+            label: label_for(&serial),
+            id: serial,
+        })
         .collect()
 }
 
@@ -422,7 +437,9 @@ impl RxRadio for FobosRadio {
 
     fn set_sample_rate(&mut self, hz: u32) -> Result<u32, String> {
         if self.stream.is_some() {
-            return Err("Fobos SDR: the sample rate can only change while the radio is stopped; stop it first".into());
+            return Err(
+                "Fobos SDR: the sample rate can only change while the radio is stopped; stop it first".into(),
+            );
         }
         let rate = nearest_rate(&self.rates, hz)
             .ok_or_else(|| "Fobos SDR: the radio offers no sample rates".to_string())?;
@@ -434,15 +451,29 @@ impl RxRadio for FobosRadio {
 
     fn gain_stages(&self) -> Vec<GainStage> {
         vec![
-            GainStage { name: "LNA".into(), min_db: 0.0, max_db: LNA_MAX_DB, step_db: 0.0, auto: false },
-            GainStage { name: "VGA".into(), min_db: 0.0, max_db: VGA_MAX_DB, step_db: VGA_STEP_DB, auto: false },
+            GainStage {
+                name: "LNA".into(),
+                min_db: 0.0,
+                max_db: LNA_MAX_DB,
+                step_db: 0.0,
+                auto: false,
+            },
+            GainStage {
+                name: "VGA".into(),
+                min_db: 0.0,
+                max_db: VGA_MAX_DB,
+                step_db: VGA_STEP_DB,
+                auto: false,
+            },
         ]
     }
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         let db = match setting {
             GainSetting::Auto => {
-                return Err(format!("Fobos SDR: the {stage} stage has no automatic mode; give a fixed value in dB"))
+                return Err(format!(
+                    "Fobos SDR: the {stage} stage has no automatic mode; give a fixed value in dB"
+                ))
             }
             GainSetting::Manual(v) if !v.is_finite() => {
                 return Err(format!("Fobos SDR: the {stage} gain must be a number of dB"))
@@ -470,7 +501,9 @@ impl RxRadio for FobosRadio {
                 }
                 Ok(())
             }
-            other => Err(format!("Fobos SDR: no gain stage named {other:?}; the stages are LNA and VGA")),
+            other => Err(format!(
+                "Fobos SDR: no gain stage named {other:?}; the stages are LNA and VGA"
+            )),
         }
     }
 
@@ -498,7 +531,13 @@ impl RxRadio for FobosRadio {
                 // SAFETY: the handle is open until the driver closes it after this thread is joined.
                 // The context lives until read_async returns.
                 let rc = unsafe {
-                    (api.read_async)(handle as *mut c_void, on_samples, ctx_ptr as *mut c_void, BUF_COUNT, BUF_LEN)
+                    (api.read_async)(
+                        handle as *mut c_void,
+                        on_samples,
+                        ctx_ptr as *mut c_void,
+                        BUF_COUNT,
+                        BUF_LEN,
+                    )
                 };
                 // SAFETY: read_async has returned, so the library makes no more callbacks.
                 drop(unsafe { Box::from_raw(ctx_ptr) });
@@ -510,7 +549,13 @@ impl RxRadio for FobosRadio {
                 fin.store(true, Ordering::SeqCst);
             })
             .map_err(|e| format!("Fobos SDR: cannot start the stream thread: {e}"))?;
-        self.stream = Some(Stream { thread, rx, running, finished, end_code });
+        self.stream = Some(Stream {
+            thread,
+            rx,
+            running,
+            finished,
+            end_code,
+        });
         Ok(())
     }
 
@@ -534,7 +579,10 @@ impl RxRadio for FobosRadio {
             Err(RecvTimeoutError::Disconnected) => {
                 let code = stream.end_code.lock().ok().and_then(|g| *g);
                 match code {
-                    Some(c) => Err(format!("Fobos SDR: the stream ended ({})", describe(&self.api, c))),
+                    Some(c) => Err(format!(
+                        "Fobos SDR: the stream ended ({})",
+                        describe(&self.api, c)
+                    )),
                     None => Err("Fobos SDR: the stream ended".into()),
                 }
             }
@@ -588,7 +636,10 @@ mod tests {
 
     #[test]
     fn rate_list_is_cleaned() {
-        assert_eq!(clean_rates(&[50e6, 8e6, 8e6, -1.0, f64::NAN, 0.0]), vec![8_000_000, 50_000_000]);
+        assert_eq!(
+            clean_rates(&[50e6, 8e6, 8e6, -1.0, f64::NAN, 0.0]),
+            vec![8_000_000, 50_000_000]
+        );
         assert_eq!(clean_rates(&[64e6]), vec![64_000_000]);
     }
 
@@ -618,9 +669,15 @@ mod tests {
 
     #[test]
     fn serial_list_keeps_its_places() {
-        assert_eq!(parse_serials("ABC DEF ", 2), vec!["ABC".to_string(), "DEF".to_string()]);
+        assert_eq!(
+            parse_serials("ABC DEF ", 2),
+            vec!["ABC".to_string(), "DEF".to_string()]
+        );
         assert_eq!(parse_serials("ABC DEF ", 1), vec!["ABC".to_string()]);
-        assert_eq!(parse_serials("ABC  DEF ", 3), vec!["ABC".to_string(), String::new(), "DEF".to_string()]);
+        assert_eq!(
+            parse_serials("ABC  DEF ", 3),
+            vec!["ABC".to_string(), String::new(), "DEF".to_string()]
+        );
         assert!(parse_serials("", 0).is_empty());
     }
 
@@ -630,7 +687,9 @@ mod tests {
         assert_eq!(pick_index(&serials, None), Ok(0));
         assert_eq!(pick_index(&serials, Some("BBB")), Ok(2));
         assert!(pick_index(&serials, Some(IN_USE)).unwrap_err().contains("in use"));
-        assert!(pick_index(&serials, Some("ZZZ")).unwrap_err().contains("no radio with serial ZZZ"));
+        assert!(pick_index(&serials, Some("ZZZ"))
+            .unwrap_err()
+            .contains("no radio with serial ZZZ"));
         assert!(pick_index(&[], None).unwrap_err().contains("no radio found"));
         let busy = vec![IN_USE.to_string()];
         assert!(pick_index(&busy, None).unwrap_err().contains("in use"));

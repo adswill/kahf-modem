@@ -14,8 +14,8 @@
 //!
 //! Not tested on a real radio. The unit tests cover the pure parts only.
 
-use std::ffi::c_void;
 use std::f64::consts::PI;
+use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::Arc;
@@ -132,7 +132,10 @@ fn round_div(clock: u32, d: u32) -> u32 {
 
 /// The entry of `list` nearest to `hz`.
 pub fn choose_rate(list: &[u32], hz: u32) -> u32 {
-    list.iter().copied().min_by_key(|&r| (r as i64 - hz as i64).abs()).unwrap_or(DEFAULT_RATE_HZ)
+    list.iter()
+        .copied()
+        .min_by_key(|&r| (r as i64 - hz as i64).abs())
+        .unwrap_or(DEFAULT_RATE_HZ)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,19 +151,33 @@ pub struct RatePlan {
 /// The ADC clock and divider for a rate. The clock is 128 MHz above 32 MHz, else 64 MHz.
 pub fn plan_rate(rate_hz: u32) -> RatePlan {
     let want = rate_hz.clamp(RATE_MIN_HZ, RATE_MAX_HZ);
-    let adc = if want > 32_000_000 { ADC_HIGH_HZ } else { ADC_LOW_HZ };
+    let adc = if want > 32_000_000 {
+        ADC_HIGH_HZ
+    } else {
+        ADC_LOW_HZ
+    };
     let decim = ((adc as f64 / want as f64 * 1.001).floor() as u32).clamp(2, MAX_DECIM);
-    RatePlan { adc_hz: adc, decim, out_hz: round_div(adc, decim) }
+    RatePlan {
+        adc_hz: adc,
+        decim,
+        out_hz: round_div(adc, decim),
+    }
 }
 
 /// Gain slider in dB, clamped to 0..90.
 pub fn clamp_slider(db: f32) -> f32 {
-    if db.is_nan() { 0.0 } else { db.clamp(0.0, GAIN_MAX_DB) }
+    if db.is_nan() {
+        0.0
+    } else {
+        db.clamp(0.0, GAIN_MAX_DB)
+    }
 }
 
 /// HF attenuator in dB, clamped to 0..31.5 and rounded to half dB.
 pub fn clamp_hf_att(db: f32) -> f32 {
-    if db.is_nan() { return 0.0; }
+    if db.is_nan() {
+        return 0.0;
+    }
     ((db.clamp(0.0, HF_ATT_MAX_DB) * 2.0).round() / 2.0).clamp(0.0, HF_ATT_MAX_DB)
 }
 
@@ -169,7 +186,9 @@ const VHF_RF_DB: [f64; 29] = [
     0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8,
     33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6,
 ];
-const VHF_IF_DB: [f64; 16] = [-4.7, -2.1, 0.5, 3.5, 7.7, 11.2, 13.6, 14.9, 16.3, 19.5, 23.1, 26.5, 30.0, 33.7, 37.2, 40.8];
+const VHF_IF_DB: [f64; 16] = [
+    -4.7, -2.1, 0.5, 3.5, 7.7, 11.2, 13.6, 14.9, 16.3, 19.5, 23.1, 26.5, 30.0, 33.7, 37.2, 40.8,
+];
 const HF_IF_STEPS: usize = 127;
 const HF_IF_SWEET_POINT: usize = 18;
 
@@ -229,17 +248,32 @@ pub fn gain_plan(slider_db: f32, hf_att_db: f32) -> GainPlan {
 
     let lna = nearest(&VHF_RF_DB, slider.min(VHF_RF_DB[28]));
     let vga = nearest(&VHF_IF_DB, VHF_IF_DB[0] + (slider - VHF_RF_DB[28]).max(0.0));
-    GainPlan { att_code, hf_if_code, lna: lna as u16, vga: vga as u16 }
+    GainPlan {
+        att_code,
+        hf_if_code,
+        lna: lna as u16,
+        vga: vga as u16,
+    }
 }
 
 fn gpio_word(vhf: bool) -> u32 {
-    if vhf { GPIO_VHF_EN } else { 0 }
+    if vhf {
+        GPIO_VHF_EN
+    } else {
+        0
+    }
 }
 
 /// Little-endian 16-bit samples from raw bytes. A trailing odd byte is ignored.
 pub fn le_samples(bytes: &[u8], out: &mut Vec<i16>) {
     out.clear();
-    out.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));
+    out.extend(
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes([b[0], b[1]])),
+    );
 }
 
 /// Mixes real samples to baseband and averages them down. Keeps its state between calls.
@@ -258,9 +292,26 @@ pub struct Ddc {
     since_norm: u32,
 }
 
+impl Default for Ddc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ddc {
     pub fn new() -> Ddc {
-        Ddc { decim: 2, step_cos: 1.0, step_sin: 0.0, cos: 1.0, sin: 0.0, sign: -1.0, acc_i: 0.0, acc_q: 0.0, count: 0, since_norm: 0 }
+        Ddc {
+            decim: 2,
+            step_cos: 1.0,
+            step_sin: 0.0,
+            cos: 1.0,
+            sin: 0.0,
+            sign: -1.0,
+            acc_i: 0.0,
+            acc_q: 0.0,
+            count: 0,
+            since_norm: 0,
+        }
     }
 
     /// Sets the ADC clock, the divider, the mixing offset and whether the output is conjugated.
@@ -419,7 +470,8 @@ struct Api {
 
 impl Api {
     fn load() -> Result<Api, String> {
-        let lib = load_library(LIB_NAMES).map_err(|e| format!("the USB library (libusb 1.0) is not installed or cannot be loaded: {e}"))?;
+        let lib = load_library(LIB_NAMES)
+            .map_err(|e| format!("the USB library (libusb 1.0) is not installed or cannot be loaded: {e}"))?;
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
                 let s = unsafe { lib.get::<$ty>(concat!($name, "\0").as_bytes()) }
@@ -470,7 +522,11 @@ struct Found {
 
 impl Found {
     fn id(&self) -> String {
-        if self.serial.is_empty() { format!("{}:{}", self.bus, self.address) } else { self.serial.clone() }
+        if self.serial.is_empty() {
+            format!("{}:{}", self.bus, self.address)
+        } else {
+            self.serial.clone()
+        }
     }
 }
 
@@ -494,7 +550,9 @@ impl Session {
             return String::new();
         }
         let n = (n as usize).min(buf.len());
-        String::from_utf8_lossy(&buf[..n]).trim_end_matches('\0').to_string()
+        String::from_utf8_lossy(&buf[..n])
+            .trim_end_matches('\0')
+            .to_string()
     }
 
     /// Every radio of the bus that is an RX888 MkII (running image) or in loader mode.
@@ -503,7 +561,10 @@ impl Session {
         let mut list: *mut *mut c_void = ptr::null_mut();
         let n = unsafe { (api.get_list)(self.ctx, &mut list) };
         if n < 0 {
-            return Err(format!("could not list the USB devices ({})", usb_error_text(n as i32)));
+            return Err(format!(
+                "could not list the USB devices ({})",
+                usb_error_text(n as i32)
+            ));
         }
         let mut out = Vec::new();
         for i in 0..n as usize {
@@ -515,7 +576,12 @@ impl Session {
             let bus = unsafe { (api.bus)(dev) };
             let address = unsafe { (api.address)(dev) };
             if d.product_id == PID_LOADER {
-                out.push(Found { bus, address, product_id: PID_LOADER, serial: String::new() });
+                out.push(Found {
+                    bus,
+                    address,
+                    product_id: PID_LOADER,
+                    serial: String::new(),
+                });
             } else if d.product_id == PID_APP {
                 let mut h: *mut c_void = ptr::null_mut();
                 if unsafe { (api.open)(dev, &mut h) } != 0 || h.is_null() {
@@ -525,7 +591,12 @@ impl Session {
                 let serial = self.read_string(h, d.serial_idx);
                 unsafe { (api.close)(h) };
                 if product.contains(PRODUCT_MARK) {
-                    out.push(Found { bus, address, product_id: PID_APP, serial });
+                    out.push(Found {
+                        bus,
+                        address,
+                        product_id: PID_APP,
+                        serial,
+                    });
                 }
             }
         }
@@ -554,7 +625,10 @@ impl Link {
         let mut list: *mut *mut c_void = ptr::null_mut();
         let n = unsafe { (api.get_list)(session.ctx, &mut list) };
         if n < 0 {
-            return Err(format!("could not list the USB devices ({})", usb_error_text(n as i32)));
+            return Err(format!(
+                "could not list the USB devices ({})",
+                usb_error_text(n as i32)
+            ));
         }
         let mut result: Result<Link, String> = Err("the radio is no longer connected (unplugged?)".into());
         for i in 0..n as usize {
@@ -572,7 +646,12 @@ impl Link {
                 result = Err(step_error("cannot open the radio", r));
                 break;
             }
-            let mut link = Link { api: api.clone(), handle: h, endpoint: 0, claimed: false };
+            let mut link = Link {
+                api: api.clone(),
+                handle: h,
+                endpoint: 0,
+                claimed: false,
+            };
             if unsafe { (api.kernel_active)(h, 0) } == 1 {
                 unsafe { (api.detach)(h, 0) };
             }
@@ -584,7 +663,8 @@ impl Link {
             link.claimed = true;
             let speed = unsafe { (api.speed)(dev) };
             if speed == SPEED_LOW || speed == SPEED_FULL || speed == SPEED_HIGH {
-                result = Err("the radio is on a USB 2 port; it needs a USB 3 port to carry its samples".into());
+                result =
+                    Err("the radio is on a USB 2 port; it needs a USB 3 port to carry its samples".into());
                 break;
             }
             match find_bulk_in(&api, dev) {
@@ -621,7 +701,11 @@ fn find_bulk_in(api: &Api, dev: *mut c_void) -> Option<u8> {
     let mut found = None;
     unsafe {
         let c = &*cfg;
-        let groups = if c.interface.is_null() { &[][..] } else { std::slice::from_raw_parts(c.interface, c.b_num_interfaces as usize) };
+        let groups = if c.interface.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(c.interface, c.b_num_interfaces as usize)
+        };
         'search: for group in groups {
             if group.altsetting.is_null() || group.num_altsetting <= 0 {
                 continue;
@@ -690,7 +774,16 @@ impl Rx888 {
                 std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
             }
             r = unsafe {
-                (api.control)(self.link.handle, direction, request, value, index, buf.as_mut_ptr(), buf.len() as u16, CONTROL_TIMEOUT_MS)
+                (api.control)(
+                    self.link.handle,
+                    direction,
+                    request,
+                    value,
+                    index,
+                    buf.as_mut_ptr(),
+                    buf.len() as u16,
+                    CONTROL_TIMEOUT_MS,
+                )
             };
             if r >= 0 {
                 return r;
@@ -706,7 +799,11 @@ impl Rx888 {
     fn cmd(&self, what: &str, request: u8, value: u16, index: u16, data: &[u8]) -> Result<(), String> {
         let mut buf = data.to_vec();
         let r = self.raw_ctl(false, request, value, index, &mut buf);
-        if r == data.len() as i32 { Ok(()) } else { Err(step_error(what, r)) }
+        if r == data.len() as i32 {
+            Ok(())
+        } else {
+            Err(step_error(what, r))
+        }
     }
 
     fn set_arg(&self, arg: u16, value: u16, what: &str) -> Result<(), String> {
@@ -714,7 +811,13 @@ impl Rx888 {
     }
 
     fn write_gpio(&mut self, word: u32) -> Result<(), String> {
-        self.cmd("the antenna switch could not be set", CMD_GPIO, 0, 0, &word.to_le_bytes())?;
+        self.cmd(
+            "the antenna switch could not be set",
+            CMD_GPIO,
+            0,
+            0,
+            &word.to_le_bytes(),
+        )?;
         self.applied.gpio = Some(word);
         Ok(())
     }
@@ -723,16 +826,34 @@ impl Rx888 {
         let mut b = [0u8; 1];
         let r = self.raw_ctl(false, CMD_TUNER_STANDBY, 0, 0, &mut b);
         // Some stacks refuse this on the first request after opening; the tuner is in standby by default.
-        if r == 1 || r == ERR_PIPE { Ok(()) } else { Err(step_error("the tuner could not be put on standby", r)) }
+        if r == 1 || r == ERR_PIPE {
+            Ok(())
+        } else {
+            Err(step_error("the tuner could not be put on standby", r))
+        }
     }
 
     fn switch_input(&mut self, vhf: bool) -> Result<(), String> {
         if vhf {
-            self.set_arg(ARG_HF_ATT, 63, "the VHF input could not be switched on (HF attenuator)")?;
+            self.set_arg(
+                ARG_HF_ATT,
+                63,
+                "the VHF input could not be switched on (HF attenuator)",
+            )?;
             self.set_arg(ARG_HF_IF, 1, "the VHF input could not be switched on (HF gain)")?;
             self.write_gpio(gpio_word(true))?;
-            self.set_arg(ARG_HF_IF, 0x80 | 3, "the VHF input could not be switched on (HF gain)")?;
-            self.cmd("the VHF input could not be switched on (tuner reference)", CMD_TUNER_INIT, 0, 0, &TUNER_REF_HZ.to_le_bytes())?;
+            self.set_arg(
+                ARG_HF_IF,
+                0x80 | 3,
+                "the VHF input could not be switched on (HF gain)",
+            )?;
+            self.cmd(
+                "the VHF input could not be switched on (tuner reference)",
+                CMD_TUNER_INIT,
+                0,
+                0,
+                &TUNER_REF_HZ.to_le_bytes(),
+            )?;
             self.applied.att = Some(63);
             self.applied.hf_if = Some(0x80 | 3);
             self.applied.lna = None;
@@ -756,7 +877,10 @@ impl Rx888 {
         let r = self.raw_ctl(true, CMD_TEST, 0, 0, &mut info);
         if r == 4 {
             if info[0] != MODEL_MK2 {
-                return Err(format!("the radio reports model {} and is not an RX888 MkII", info[0]));
+                return Err(format!(
+                    "the radio reports model {} and is not an RX888 MkII",
+                    info[0]
+                ));
             }
         } else if r != ERR_PIPE {
             return Err(step_error("the radio did not answer", r));
@@ -774,7 +898,13 @@ impl Rx888 {
             self.switch_input(false)?;
         }
         if self.applied.adc_hz != plan.adc_hz {
-            self.cmd("the ADC clock was refused", CMD_ADC_CLOCK, 0, 0, &plan.adc_hz.to_le_bytes())?;
+            self.cmd(
+                "the ADC clock was refused",
+                CMD_ADC_CLOCK,
+                0,
+                0,
+                &plan.adc_hz.to_le_bytes(),
+            )?;
             self.applied.adc_hz = plan.adc_hz;
         }
         if self.applied.vhf != Some(vhf) {
@@ -788,7 +918,13 @@ impl Rx888 {
         let g = gain_plan(self.slider_db, self.hf_att_db);
         if vhf {
             if self.applied.tune_hz != Some(self.freq_hz) {
-                self.cmd("the tuner was not told the frequency", CMD_TUNE, 0, 0, &self.freq_hz.to_le_bytes())?;
+                self.cmd(
+                    "the tuner was not told the frequency",
+                    CMD_TUNE,
+                    0,
+                    0,
+                    &self.freq_hz.to_le_bytes(),
+                )?;
                 self.applied.tune_hz = Some(self.freq_hz);
             }
             if self.applied.lna != Some(g.lna) {
@@ -835,7 +971,10 @@ fn pick_device(found: &[Found], id: Option<&str>) -> Result<Found, String> {
             .find(|f| f.product_id == PID_APP)
             .or_else(|| found.first())
             .cloned()
-            .ok_or_else(|| "no RX888 MkII found: check the USB cable and that no other program has the radio open".to_string()),
+            .ok_or_else(|| {
+                "no RX888 MkII found: check the USB cable and that no other program has the radio open"
+                    .to_string()
+            }),
     }
 }
 
@@ -895,8 +1034,20 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
 
 impl RxRadio for Rx888 {
     fn label(&self) -> String {
-        let tail: String = self.serial.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-        if tail.is_empty() { "RX888 MkII".into() } else { format!("RX888 MkII {tail}") }
+        let tail: String = self
+            .serial
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if tail.is_empty() {
+            "RX888 MkII".into()
+        } else {
+            format!("RX888 MkII {tail}")
+        }
     }
 
     fn freq_range_hz(&self) -> (u64, u64) {
@@ -905,7 +1056,9 @@ impl RxRadio for Rx888 {
 
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         if !(HF_MIN_HZ..=VHF_MAX_HZ).contains(&hz) {
-            return Err(format!("{hz} Hz is outside the RX888 MkII tuning range of 10 kHz to 1750 MHz"));
+            return Err(format!(
+                "{hz} Hz is outside the RX888 MkII tuning range of 10 kHz to 1750 MHz"
+            ));
         }
         let old = self.freq_hz;
         self.freq_hz = hz;
@@ -935,8 +1088,20 @@ impl RxRadio for Rx888 {
 
     fn gain_stages(&self) -> Vec<GainStage> {
         vec![
-            GainStage { name: "gain".into(), min_db: 0.0, max_db: GAIN_MAX_DB, step_db: 0.0, auto: false },
-            GainStage { name: "hf_attenuator".into(), min_db: 0.0, max_db: HF_ATT_MAX_DB, step_db: 0.5, auto: false },
+            GainStage {
+                name: "gain".into(),
+                min_db: 0.0,
+                max_db: GAIN_MAX_DB,
+                step_db: 0.0,
+                auto: false,
+            },
+            GainStage {
+                name: "hf_attenuator".into(),
+                min_db: 0.0,
+                max_db: HF_ATT_MAX_DB,
+                step_db: 0.5,
+                auto: false,
+            },
         ]
     }
 
@@ -948,7 +1113,11 @@ impl RxRadio for Rx888 {
         match stage {
             "gain" => self.slider_db = clamp_slider(value),
             "hf_attenuator" => self.hf_att_db = clamp_hf_att(value),
-            other => return Err(format!("no gain stage named {other:?}; the stages are gain and hf_attenuator")),
+            other => {
+                return Err(format!(
+                    "no gain stage named {other:?}; the stages are gain and hf_attenuator"
+                ))
+            }
         }
         self.apply()
     }
@@ -990,7 +1159,14 @@ impl RxRadio for Rx888 {
         let mut raw = vec![0u8; READ_CHUNK_BYTES];
         let mut got: c_int = 0;
         let r = unsafe {
-            (api.bulk)(self.link.handle, self.link.endpoint, raw.as_mut_ptr(), raw.len() as c_int, &mut got, READ_TIMEOUT_MS)
+            (api.bulk)(
+                self.link.handle,
+                self.link.endpoint,
+                raw.as_mut_ptr(),
+                raw.len() as c_int,
+                &mut got,
+                READ_TIMEOUT_MS,
+            )
         };
         let got = got.max(0) as usize;
         if r != 0 && r != ERR_TIMEOUT {
@@ -1048,9 +1224,30 @@ mod tests {
 
     #[test]
     fn rate_plan_never_goes_below_the_request() {
-        assert_eq!(plan_rate(2_000_000), RatePlan { adc_hz: 64_000_000, decim: 32, out_hz: 2_000_000 });
-        assert_eq!(plan_rate(50_000_000), RatePlan { adc_hz: 128_000_000, decim: 2, out_hz: 64_000_000 });
-        assert_eq!(plan_rate(1), RatePlan { adc_hz: 64_000_000, decim: 256, out_hz: 250_000 });
+        assert_eq!(
+            plan_rate(2_000_000),
+            RatePlan {
+                adc_hz: 64_000_000,
+                decim: 32,
+                out_hz: 2_000_000
+            }
+        );
+        assert_eq!(
+            plan_rate(50_000_000),
+            RatePlan {
+                adc_hz: 128_000_000,
+                decim: 2,
+                out_hz: 64_000_000
+            }
+        );
+        assert_eq!(
+            plan_rate(1),
+            RatePlan {
+                adc_hz: 64_000_000,
+                decim: 256,
+                out_hz: 250_000
+            }
+        );
         let p = plan_rate(21_333_333);
         assert_eq!((p.adc_hz, p.decim), (64_000_000, 3));
     }
@@ -1075,7 +1272,11 @@ mod tests {
         let top = gain_plan(90.0, 0.0);
         assert_eq!(top.lna, 28);
         assert_eq!(top.vga, 14);
-        assert_eq!(gain_plan(200.0, 0.0), gain_plan(90.0, 0.0), "out of range values are clamped first");
+        assert_eq!(
+            gain_plan(200.0, 0.0),
+            gain_plan(90.0, 0.0),
+            "out of range values are clamped first"
+        );
     }
 
     #[test]
@@ -1121,8 +1322,16 @@ mod tests {
         mirror.configure(64_000_000, 2, 16_000_000.0, true);
         let mut b = Vec::new();
         mirror.process(&raw, &mut b);
-        assert!((a[0].0 - 0.25).abs() < 1e-4 && (a[0].1 + 0.25).abs() < 1e-4, "normal: {:?}", a[0]);
-        assert!((b[0].0 - 0.25).abs() < 1e-4 && (b[0].1 - 0.25).abs() < 1e-4, "mirror: {:?}", b[0]);
+        assert!(
+            (a[0].0 - 0.25).abs() < 1e-4 && (a[0].1 + 0.25).abs() < 1e-4,
+            "normal: {:?}",
+            a[0]
+        );
+        assert!(
+            (b[0].0 - 0.25).abs() < 1e-4 && (b[0].1 - 0.25).abs() < 1e-4,
+            "mirror: {:?}",
+            b[0]
+        );
     }
 
     #[test]
@@ -1147,8 +1356,18 @@ mod tests {
     #[test]
     fn pick_prefers_running_radio_and_matches_ids() {
         let found = vec![
-            Found { bus: 1, address: 4, product_id: PID_LOADER, serial: String::new() },
-            Found { bus: 2, address: 7, product_id: PID_APP, serial: "ABC12345".into() },
+            Found {
+                bus: 1,
+                address: 4,
+                product_id: PID_LOADER,
+                serial: String::new(),
+            },
+            Found {
+                bus: 2,
+                address: 7,
+                product_id: PID_APP,
+                serial: "ABC12345".into(),
+            },
         ];
         assert_eq!(pick_device(&found, None).unwrap().serial, "ABC12345");
         assert_eq!(pick_device(&found, Some("ABC12345")).unwrap().address, 7);

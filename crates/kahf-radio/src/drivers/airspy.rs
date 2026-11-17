@@ -218,7 +218,9 @@ pub fn clamp_gain(value: f32, min: f32, max: f32) -> u8 {
 /// Converts raw interleaved float pairs to complex samples, limited to -1..1.
 /// A trailing lone value is ignored. A value that is not a number becomes 0.
 pub fn convert_iq(raw: &[f32]) -> Vec<(f32, f32)> {
-    raw.chunks_exact(2)
+    raw.as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| (clean(p[0]), clean(p[1])))
         .collect()
 }
@@ -268,9 +270,7 @@ unsafe extern "C" fn stream_callback(t: *mut Transfer) -> c_int {
     }
     // SAFETY: the library gives `sample_count` complex float pairs at `samples`.
     let shared = unsafe { &*(t.ctx as *const Shared) };
-    let raw = unsafe {
-        std::slice::from_raw_parts(t.samples as *const f32, t.sample_count as usize * 2)
-    };
+    let raw = unsafe { std::slice::from_raw_parts(t.samples as *const f32, t.sample_count as usize * 2) };
     let samples = convert_iq(raw);
     let mut q = shared.lock();
     let dropped = push_capped(&mut q, &samples, QUEUE_CAP);
@@ -286,8 +286,7 @@ unsafe extern "C" fn stream_callback(t: *mut Transfer) -> c_int {
 fn parse_serial(text: &str) -> Result<u64, String> {
     let t = text.trim();
     let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
-    u64::from_str_radix(hex, 16)
-        .map_err(|_| format!("Airspy: serial {t:?} is not a hex number"))
+    u64::from_str_radix(hex, 16).map_err(|_| format!("Airspy: serial {t:?} is not a hex number"))
 }
 
 /// The gain stages the library offers. The linearity step is the one gain control;
@@ -629,10 +628,7 @@ mod tests {
     #[test]
     fn samples_convert_to_pairs_within_range() {
         let raw = [0.5, -0.25, 2.0, f32::NAN, -3.0, 0.0, 0.1];
-        assert_eq!(
-            convert_iq(&raw),
-            vec![(0.5, -0.25), (1.0, 0.0), (-1.0, 0.0)]
-        );
+        assert_eq!(convert_iq(&raw), vec![(0.5, -0.25), (1.0, 0.0), (-1.0, 0.0)]);
         assert!(convert_iq(&[]).is_empty());
     }
 
@@ -650,7 +646,10 @@ mod tests {
         let err = load_with_names(&["/nonexistent/path/libairspy-test.dylib"])
             .err()
             .expect("the library must not load");
-        assert!(err.starts_with("Airspy: the libairspy host library was not found"), "{err}");
+        assert!(
+            err.starts_with("Airspy: the libairspy host library was not found"),
+            "{err}"
+        );
         assert!(err.contains("Install libairspy"), "{err}");
         assert!(err.contains("libairspy-test.dylib"), "{err}");
     }
@@ -663,7 +662,10 @@ mod tests {
 
     #[test]
     fn error_text_names_the_code_and_the_library_name() {
-        assert_eq!(error_text(-2, Some("AIRSPY_ERROR_INVALID_PARAM")), "libairspy error -2 AIRSPY_ERROR_INVALID_PARAM");
+        assert_eq!(
+            error_text(-2, Some("AIRSPY_ERROR_INVALID_PARAM")),
+            "libairspy error -2 AIRSPY_ERROR_INVALID_PARAM"
+        );
         assert_eq!(error_text(-1, None), "libairspy error -1");
         assert_eq!(error_text(-1, Some("")), "libairspy error -1");
     }

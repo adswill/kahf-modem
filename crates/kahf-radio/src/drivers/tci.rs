@@ -208,15 +208,12 @@ impl TciRadio {
     fn next_message(&mut self, wait: Duration) -> Result<Option<Message>, String> {
         let deadline = Instant::now() + wait;
         loop {
-            match parse_frame(&self.rbuf).map_err(|e| self.lost(&e))? {
-                Some((used, frame)) => {
-                    self.rbuf.drain(..used);
-                    if let Some(message) = self.on_frame(frame)? {
-                        return Ok(Some(message));
-                    }
-                    continue;
+            if let Some((used, frame)) = parse_frame(&self.rbuf).map_err(|e| self.lost(&e))? {
+                self.rbuf.drain(..used);
+                if let Some(message) = self.on_frame(frame)? {
+                    return Ok(Some(message));
                 }
-                None => {}
+                continue;
             }
             let now = Instant::now();
             if now >= deadline {
@@ -253,7 +250,7 @@ impl TciRadio {
                 Ok(None)
             }
             0xA => Ok(None),
-            0x0 | 0x1 | 0x2 => {
+            0x0..=0x2 => {
                 if frame.opcode != 0 {
                     if self.partial.is_some() {
                         return Err(self.lost("a new message started before the last one ended"));
@@ -450,9 +447,9 @@ fn parse_address(text: &str) -> Result<(String, u16), String> {
         return Err(NEED_ADDRESS.into());
     }
     let (host, port): (String, Option<String>) = if let Some(rest) = t.strip_prefix('[') {
-        let end = rest
-            .find(']')
-            .ok_or_else(|| format!("bad address {t:?}: the square bracket is not closed. Write it as [address]:port"))?;
+        let end = rest.find(']').ok_or_else(|| {
+            format!("bad address {t:?}: the square bracket is not closed. Write it as [address]:port")
+        })?;
         let after = &rest[end + 1..];
         let port = if after.is_empty() {
             None
@@ -470,7 +467,9 @@ fn parse_address(text: &str) -> Result<(String, u16), String> {
         }
     };
     if host.trim().is_empty() {
-        return Err(format!("bad address {t:?}: the host part is empty. {NEED_ADDRESS}"));
+        return Err(format!(
+            "bad address {t:?}: the host part is empty. {NEED_ADDRESS}"
+        ));
     }
     let port = match port {
         None => DEFAULT_PORT,
@@ -587,7 +586,7 @@ fn decode_iq_block(msg: &[u8], rx: u32) -> Result<Option<Vec<(f32, f32)>>, Strin
     };
     let payload = &msg[64..];
     let pair = width * 2;
-    if payload.is_empty() || payload.len() % pair != 0 {
+    if payload.is_empty() || !payload.len().is_multiple_of(pair) {
         return Err("sample data does not match the sample format".into());
     }
     let samples = payload
@@ -700,12 +699,22 @@ fn read_head(stream: &mut TcpStream, addr: &str) -> Result<Vec<u8>, String> {
     let mut one = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() > 8192 {
-            return Err(format!("{addr} sent a reply to the connection request that is too long"));
+            return Err(format!(
+                "{addr} sent a reply to the connection request that is too long"
+            ));
         }
         match stream.read(&mut one) {
-            Ok(0) => return Err(format!("{addr} closed the connection during the WebSocket handshake")),
+            Ok(0) => {
+                return Err(format!(
+                    "{addr} closed the connection during the WebSocket handshake"
+                ))
+            }
             Ok(_) => head.push(one[0]),
-            Err(e) => return Err(format!("no valid reply from {addr} during the WebSocket handshake: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "no valid reply from {addr} during the WebSocket handshake: {e}"
+                ))
+            }
         }
     }
     Ok(head)
@@ -731,7 +740,9 @@ fn check_handshake(head: &[u8], key: &str, addr: &str) -> Result<(), String> {
         }
     });
     if got.as_deref() != Some(want.as_str()) {
-        return Err(format!("{addr} sent a wrong WebSocket accept key, so it is not a valid WebSocket server"));
+        return Err(format!(
+            "{addr} sent a wrong WebSocket accept key, so it is not a valid WebSocket server"
+        ));
     }
     Ok(())
 }
@@ -772,8 +783,16 @@ fn base64(data: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         s.push(ALPHA[((n >> 18) & 63) as usize] as char);
         s.push(ALPHA[((n >> 12) & 63) as usize] as char);
-        s.push(if chunk.len() > 1 { ALPHA[((n >> 6) & 63) as usize] as char } else { '=' });
-        s.push(if chunk.len() > 2 { ALPHA[(n & 63) as usize] as char } else { '=' });
+        s.push(if chunk.len() > 1 {
+            ALPHA[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        s.push(if chunk.len() > 2 {
+            ALPHA[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     s
 }
@@ -787,7 +806,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
@@ -865,7 +884,10 @@ mod tests {
 
     #[test]
     fn accept_key_matches_rfc_example() {
-        assert_eq!(accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     #[test]
@@ -961,7 +983,9 @@ mod tests {
     #[test]
     fn decodes_int16_block() {
         let payload = [0x00, 0x40, 0x00, 0xC0];
-        let samples = decode_iq_block(&block_bytes(0, 0, 0, 2, &payload), 0).unwrap().unwrap();
+        let samples = decode_iq_block(&block_bytes(0, 0, 0, 2, &payload), 0)
+            .unwrap()
+            .unwrap();
         assert_eq!(samples.len(), 1);
         assert!((samples[0].0 - 0.5).abs() < 1e-6);
         assert!((samples[0].1 + 0.5).abs() < 1e-6);
@@ -971,7 +995,9 @@ mod tests {
     fn decodes_int24_with_sign() {
         // -4194304 is -0.5 of full scale in 24 bits: 0xC00000 little endian.
         let payload = [0x00, 0x00, 0x40, 0x00, 0x00, 0xC0];
-        let samples = decode_iq_block(&block_bytes(0, 1, 0, 2, &payload), 0).unwrap().unwrap();
+        let samples = decode_iq_block(&block_bytes(0, 1, 0, 2, &payload), 0)
+            .unwrap()
+            .unwrap();
         assert!((samples[0].0 - 0.5).abs() < 1e-6);
         assert!((samples[0].1 + 0.5).abs() < 1e-6);
     }
@@ -995,8 +1021,12 @@ mod tests {
     #[test]
     fn skips_other_receivers_and_other_types() {
         let p = [0u8; 4];
-        assert!(decode_iq_block(&block_bytes(1, 0, 0, 2, &p), 0).unwrap().is_none());
-        assert!(decode_iq_block(&block_bytes(0, 0, 3, 2, &p), 0).unwrap().is_none());
+        assert!(decode_iq_block(&block_bytes(1, 0, 0, 2, &p), 0)
+            .unwrap()
+            .is_none());
+        assert!(decode_iq_block(&block_bytes(0, 0, 3, 2, &p), 0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1011,9 +1041,15 @@ mod tests {
 
     #[test]
     fn address_parsing_and_errors() {
-        assert_eq!(parse_address("192.168.1.5:1234").unwrap(), ("192.168.1.5".to_string(), 1234));
+        assert_eq!(
+            parse_address("192.168.1.5:1234").unwrap(),
+            ("192.168.1.5".to_string(), 1234)
+        );
         assert_eq!(parse_address("[::1]:50001").unwrap(), ("::1".to_string(), 50001));
-        assert_eq!(parse_address("localhost").unwrap(), ("localhost".to_string(), DEFAULT_PORT));
+        assert_eq!(
+            parse_address("localhost").unwrap(),
+            ("localhost".to_string(), DEFAULT_PORT)
+        );
         assert!(parse_address("  ").unwrap_err().contains("host:port"));
         assert!(parse_address("host:0").unwrap_err().contains("port"));
         assert!(parse_address("host:99999").unwrap_err().contains("port"));
@@ -1035,7 +1071,10 @@ mod tests {
     #[test]
     fn refused_connection_says_what_to_do() {
         let err = open(Some("127.0.0.1:1")).err().unwrap();
-        assert!(err.contains("cannot connect to the TCI server at 127.0.0.1:1"), "{err}");
+        assert!(
+            err.contains("cannot connect to the TCI server at 127.0.0.1:1"),
+            "{err}"
+        );
         assert!(err.contains("TCI is switched on"), "{err}");
     }
 
@@ -1064,8 +1103,11 @@ mod tests {
                 accept_key(&key)
             );
             s.write_all(reply.as_bytes()).unwrap();
-            s.write_all(&server_frame(0x1, b"device:Test Box;protocol:TCI,2.0;vfo_limits:0,30000000;ready;"))
-                .unwrap();
+            s.write_all(&server_frame(
+                0x1,
+                b"device:Test Box;protocol:TCI,2.0;vfo_limits:0,30000000;ready;",
+            ))
+            .unwrap();
             for b in blocks {
                 s.write_all(&server_frame(0x2, &b)).unwrap();
             }

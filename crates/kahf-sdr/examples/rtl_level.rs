@@ -63,6 +63,10 @@ fn main() {
     let rms_db = 10.0 * mean_power.max(1e-20).log10();
     let peak_db = 20.0 * (peak as f64).max(1e-10).log10();
     println!("samples read: {total} ({:.2} s)", total as f64 / rate);
-    println!("DC offset: I {:.4}, Q {:.4}", sum_i / total as f64, sum_q / total as f64);
+    println!(
+        "DC offset: I {:.4}, Q {:.4}",
+        sum_i / total as f64,
+        sum_q / total as f64
+    );
     println!("mean power: {rms_db:.1} dBFS, peak: {peak_db:.1} dBFS");
 }

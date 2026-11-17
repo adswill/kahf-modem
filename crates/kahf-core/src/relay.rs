@@ -140,9 +140,7 @@ fn hour_start(at_unix: u64) -> u64 {
 }
 
 fn on_channel(channels_khz: &[f32], khz: f32) -> bool {
-    channels_khz
-        .iter()
-        .any(|c| (c - khz).abs() < CHANNEL_MATCH_KHZ)
+    channels_khz.iter().any(|c| (c - khz).abs() < CHANNEL_MATCH_KHZ)
 }
 
 /// True when two slots of the same direction overlap, checked on a sorted list.
@@ -238,9 +236,7 @@ impl Relay {
                     return Err("A half-duplex relay cannot have overlapping slots.".to_string());
                 }
                 if pair[0].direction == pair[1].direction {
-                    return Err(
-                        "A half-duplex relay must alternate receive and transmit slots.".to_string(),
-                    );
+                    return Err("A half-duplex relay must alternate receive and transmit slots.".to_string());
                 }
             }
         }
@@ -386,7 +382,8 @@ mod tests {
     #[test]
     fn assign_channels_keeps_schedule_valid() {
         let mut r = half_relay();
-        r.accept_schedule(vec![slot(100, 10, Direction::Receive)]).unwrap();
+        r.accept_schedule(vec![slot(100, 10, Direction::Receive)])
+            .unwrap();
         assert!(r.assign_channels(&[CH_B]).is_err());
         assert!(r.assign_channels(&[CH_A]).is_ok());
     }
@@ -403,7 +400,9 @@ mod tests {
     #[test]
     fn zero_length_slot_is_rejected() {
         let mut r = half_relay();
-        assert!(r.accept_schedule(vec![slot(100, 0, Direction::Transmit)]).is_err());
+        assert!(r
+            .accept_schedule(vec![slot(100, 0, Direction::Transmit)])
+            .is_err());
     }
 
     #[test]
@@ -426,9 +425,15 @@ mod tests {
     #[test]
     fn half_duplex_rejects_overlap_and_same_direction_runs() {
         let mut r = half_relay();
-        let overlap = vec![slot(100, 20, Direction::Receive), slot(110, 10, Direction::Transmit)];
+        let overlap = vec![
+            slot(100, 20, Direction::Receive),
+            slot(110, 10, Direction::Transmit),
+        ];
         assert!(r.accept_schedule(overlap).is_err());
-        let run = vec![slot(100, 10, Direction::Receive), slot(110, 10, Direction::Receive)];
+        let run = vec![
+            slot(100, 10, Direction::Receive),
+            slot(110, 10, Direction::Receive),
+        ];
         assert!(r.accept_schedule(run).is_err());
         assert!(r.slots().is_empty(), "rejected schedules must not be kept");
     }
@@ -443,14 +448,18 @@ mod tests {
         .unwrap();
         assert!(r.may_relay_transmit_at(110));
         assert!(r.may_receive_at(110));
-        let same = vec![slot(100, 60, Direction::Transmit), slot(120, 60, Direction::Transmit)];
+        let same = vec![
+            slot(100, 60, Direction::Transmit),
+            slot(120, 60, Direction::Transmit),
+        ];
         assert!(r.accept_schedule(same).is_err());
     }
 
     #[test]
     fn plain_station_never_relays() {
         let mut r = Relay::new("KA1ABC", Role::Station, Radio::HalfDuplex, &[CH_A]).unwrap();
-        r.accept_schedule(vec![slot(100, 10, Direction::Transmit)]).unwrap();
+        r.accept_schedule(vec![slot(100, 10, Direction::Transmit)])
+            .unwrap();
         assert!(!r.may_relay_transmit_at(105));
     }
 }

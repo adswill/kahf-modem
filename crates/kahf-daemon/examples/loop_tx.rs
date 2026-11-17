@@ -46,9 +46,7 @@ fn parse_args() -> Result<Options, String> {
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
-        let val = args
-            .get(i + 1)
-            .ok_or_else(|| format!("{flag} needs a value"))?;
+        let val = args.get(i + 1).ok_or_else(|| format!("{flag} needs a value"))?;
         match flag {
             "--freq-hz" => o.freq_hz = val.parse().map_err(|_| format!("bad --freq-hz: {val}"))?,
             "--txvga-db" => o.txvga_db = val.parse().map_err(|_| format!("bad --txvga-db: {val}"))?,
@@ -78,7 +76,11 @@ fn encode_audio(data: &[u8]) -> Result<Vec<f32>, String> {
         }
         let bits = frame::build_payload(chunk);
         if bits.len() != ldpc::K {
-            return Err(format!("build_payload gave {} bits, expected {}", bits.len(), ldpc::K));
+            return Err(format!(
+                "build_payload gave {} bits, expected {}",
+                bits.len(),
+                ldpc::K
+            ));
         }
         let coded = ldpc::encode(&bits);
         out.extend(phy::modulate_frame(&coded, Modulation::Qpsk));
@@ -134,7 +136,13 @@ fn run() -> Result<(), String> {
         o.seconds
     );
 
-    let mut tx = HackrfTx::open(o.serial.as_deref(), centre_hz as u64, SAMPLE_RATE_HZ, o.txvga_db, false)?;
+    let mut tx = HackrfTx::open(
+        o.serial.as_deref(),
+        centre_hz as u64,
+        SAMPLE_RATE_HZ,
+        o.txvga_db,
+        false,
+    )?;
     let end = Instant::now() + Duration::from_secs(o.seconds);
     let mut loops = 0u64;
     while Instant::now() < end {

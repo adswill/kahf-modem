@@ -169,7 +169,9 @@ unsafe fn required<T: Copy>(lib: &Library, name: &str) -> Result<T, String> {
     let symbol = format!("{name}\0");
     match unsafe { lib.get::<T>(symbol.as_bytes()) } {
         Ok(f) => Ok(*f),
-        Err(_) => Err(format!("bladeRF: the host library has no {name}; it is too old or not the bladeRF library")),
+        Err(_) => Err(format!(
+            "bladeRF: the host library has no {name}; it is too old or not the bladeRF library"
+        )),
     }
 }
 
@@ -207,13 +209,18 @@ pub(crate) fn choose_bandwidth(rate: u32) -> u32 {
 }
 
 const COMMON_RATES: &[u32] = &[
-    520_834, 1_000_000, 2_000_000, 2_400_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 12_000_000, 16_000_000,
-    20_000_000, 25_000_000, 30_000_000, 40_000_000, 50_000_000, 61_440_000,
+    520_834, 1_000_000, 2_000_000, 2_400_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 12_000_000,
+    16_000_000, 20_000_000, 25_000_000, 30_000_000, 40_000_000, 50_000_000, 61_440_000,
 ];
 
 /// Rates offered in the range, ascending. The two ends of the range are always included.
 pub(crate) fn offered_rates(lo: u32, hi: u32) -> Vec<u32> {
-    let mut v: Vec<u32> = COMMON_RATES.iter().copied().chain([lo, hi]).filter(|r| *r >= lo && *r <= hi).collect();
+    let mut v: Vec<u32> = COMMON_RATES
+        .iter()
+        .copied()
+        .chain([lo, hi])
+        .filter(|r| *r >= lo && *r <= hi)
+        .collect();
     v.sort_unstable();
     v.dedup();
     v
@@ -244,6 +251,7 @@ pub(crate) fn clamp_gain_db(db: f32, lo: f32, hi: f32) -> i32 {
 }
 
 /// Turns raw Q11 pairs (I, Q) into floats in -1..1.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub(crate) fn convert_samples(raw: &[i16], out: &mut [(f32, f32)]) {
     for (dst, pair) in out.iter_mut().zip(raw.chunks_exact(2)) {
         *dst = (pair[0] as f32 / FULL_SCALE, pair[1] as f32 / FULL_SCALE);
@@ -264,10 +272,18 @@ pub(crate) fn parse_id(id: Option<&str>) -> Result<(Option<String>, u8), String>
         None => 0,
         Some(p) => match p.parse::<u8>() {
             Ok(v @ 0..=1) => v,
-            _ => return Err(format!("bladeRF: the input must be 0 (RX1) or 1 (RX2), not {p:?}")),
+            _ => {
+                return Err(format!(
+                    "bladeRF: the input must be 0 (RX1) or 1 (RX2), not {p:?}"
+                ))
+            }
         },
     };
-    let serial = if serial.is_empty() { None } else { Some(serial.to_string()) };
+    let serial = if serial.is_empty() {
+        None
+    } else {
+        Some(serial.to_string())
+    };
     Ok((serial, port))
 }
 
@@ -335,13 +351,21 @@ pub fn probe() -> Vec<DeviceInfo> {
         let product = c_field(&d.product);
         let ports: u8 = if product.contains("2.0") { 2 } else { 1 };
         for port in 0..ports {
-            let id = if port == 0 { serial.clone() } else { format!("{serial}#{port}") };
+            let id = if port == 0 {
+                serial.clone()
+            } else {
+                format!("{serial}#{port}")
+            };
             let mut label = board_label(&product, port);
             let tail = serial_tail(&serial);
             if !tail.is_empty() {
                 label = format!("{label} {tail}");
             }
-            out.push(DeviceInfo { driver: "bladerf", label, id });
+            out.push(DeviceInfo {
+                driver: "bladerf",
+                label,
+                id,
+            });
         }
     }
     // SAFETY: `list` came from the library's list call above and is freed once.
@@ -354,7 +378,10 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let (serial, port) = parse_id(id)?;
     let api = load_api()?;
     let serial_arg = match &serial {
-        Some(s) => Some(CString::new(format!("*:serial={s}")).map_err(|_| "bladeRF: the serial number has a bad character".to_string())?),
+        Some(s) => Some(
+            CString::new(format!("*:serial={s}"))
+                .map_err(|_| "bladeRF: the serial number has a bad character".to_string())?,
+        ),
         None => None,
     };
     let arg_ptr = serial_arg.as_ref().map_or(null(), |c| c.as_ptr());
@@ -366,7 +393,10 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
             Some(s) => format!("serial {s}"),
             None => "the first radio found".to_string(),
         };
-        let mut msg = format!("bladeRF: cannot open {what}: {}", describe_error(api.strerror_text(r), r));
+        let mut msg = format!(
+            "bladeRF: cannot open {what}: {}",
+            describe_error(api.strerror_text(r), r)
+        );
         if USB_ACCESS_CODES.contains(&r) {
             msg.push_str(". Check the USB cable and that this user may access the radio");
         }
@@ -436,7 +466,10 @@ impl BladeRx {
             self.rate_lo = to_u32(lo.ceil());
             self.rate_hi = to_u32(hi.floor());
         }
-        if let Some((lo, hi, step)) = self.read_range(Some(self.api.get_gain_range)).and_then(usable_gain) {
+        if let Some((lo, hi, step)) = self
+            .read_range(Some(self.api.get_gain_range))
+            .and_then(usable_gain)
+        {
             self.gain_lo = lo as f32;
             self.gain_hi = hi as f32;
             self.gain_step = step.max(0.0) as f32;
@@ -460,7 +493,9 @@ impl BladeRx {
     }
 
     fn board_name(&self) -> String {
-        let Some(f) = self.api.get_board_name else { return String::new() };
+        let Some(f) = self.api.get_board_name else {
+            return String::new();
+        };
         // SAFETY: the library returns a static name or NULL for an open handle.
         let p = unsafe { f(self.dev) };
         if p.is_null() {
@@ -482,13 +517,23 @@ impl BladeRx {
         }
         // SAFETY: `p` was checked not to be NULL above.
         let range = unsafe { *p };
-        let scale = if range.scale > 0.0 { range.scale as f64 } else { 1.0 };
-        Some((range.min as f64 * scale, range.max as f64 * scale, range.step as f64 * scale))
+        let scale = if range.scale > 0.0 {
+            range.scale as f64
+        } else {
+            1.0
+        };
+        Some((
+            range.min as f64 * scale,
+            range.max as f64 * scale,
+            range.step as f64 * scale,
+        ))
     }
 
     /// bladeRF 1 keeps its FPGA only until power-off. Load the image from the program folder when it is missing.
     fn load_fpga_if_needed(&self) -> Result<(), String> {
-        let Some(configured) = self.api.is_fpga_configured else { return Ok(()) };
+        let Some(configured) = self.api.is_fpga_configured else {
+            return Ok(());
+        };
         // SAFETY: the handle is open.
         if unsafe { configured(self.dev) } != 0 {
             return Ok(());
@@ -515,7 +560,11 @@ impl BladeRx {
                     // SAFETY: the path is a valid C string for the call.
                     let r = unsafe { load(self.dev, c.as_ptr()) };
                     if r != 0 {
-                        return Err(format!("bladeRF: loading the FPGA image {} failed: {}", path.display(), self.describe(r)));
+                        return Err(format!(
+                            "bladeRF: loading the FPGA image {} failed: {}",
+                            path.display(),
+                            self.describe(r)
+                        ));
                     }
                     return Ok(());
                 }
@@ -586,7 +635,8 @@ impl RxRadio for BladeRx {
         let rate = if actual > 0 { actual } else { want };
         let mut bw_actual: c_uint = 0;
         // SAFETY: `bw_actual` is a valid out value. A refused filter is left at the radio's own setting.
-        let _ = unsafe { (self.api.set_bandwidth)(self.dev, self.ch, choose_bandwidth(rate), &mut bw_actual) };
+        let _ =
+            unsafe { (self.api.set_bandwidth)(self.dev, self.ch, choose_bandwidth(rate), &mut bw_actual) };
         self.rate = rate;
         Ok(rate)
     }
@@ -603,7 +653,9 @@ impl RxRadio for BladeRx {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != GAIN_NAME {
-            return Err(format!("bladeRF has no gain stage named {stage:?}; it has {GAIN_NAME:?}"));
+            return Err(format!(
+                "bladeRF has no gain stage named {stage:?}; it has {GAIN_NAME:?}"
+            ));
         }
         match setting {
             GainSetting::Auto => self.set_mode(GAIN_MODE_DEFAULT),
@@ -649,7 +701,13 @@ impl RxRadio for BladeRx {
         self.raw.resize(2 * n, 0);
         // SAFETY: `raw` holds 2 * n i16 values, which is what the library writes for n complex samples.
         let r = unsafe {
-            (self.api.sync_rx)(self.dev, self.raw.as_mut_ptr().cast::<c_void>(), n as c_uint, null_mut(), READ_TIMEOUT_MS)
+            (self.api.sync_rx)(
+                self.dev,
+                self.raw.as_mut_ptr().cast::<c_void>(),
+                n as c_uint,
+                null_mut(),
+                READ_TIMEOUT_MS,
+            )
         };
         if r == 0 {
             convert_samples(&self.raw[..2 * n], &mut out[..n]);
@@ -740,7 +798,10 @@ mod tests {
 
     #[test]
     fn error_text_uses_library_message_or_code() {
-        assert_eq!(describe_error(Some("I/O error".into()), -5), "I/O error (code -5)");
+        assert_eq!(
+            describe_error(Some("I/O error".into()), -5),
+            "I/O error (code -5)"
+        );
         assert_eq!(describe_error(None, -5), "error code -5");
         assert_eq!(describe_error(Some("  ".into()), -7), "error code -7");
     }

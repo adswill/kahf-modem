@@ -10,7 +10,7 @@ use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{canvas, image, operation, text_editor};
 use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
-use kahf_daemon::{Config, Engine, RelayAck, Event as EngineEvent, TxState};
+use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, TxState};
 
 use crate::sample::{self, Kind};
 use crate::spectrum::{self, Sim, Waterfall};
@@ -438,7 +438,10 @@ impl App {
         }
         // Test hook: KAHF_START=messages opens that screen first.
         if let Ok(name) = std::env::var("KAHF_START") {
-            if let Some(sec) = Section::ALL.iter().find(|s| s.label().eq_ignore_ascii_case(&name)) {
+            if let Some(sec) = Section::ALL
+                .iter()
+                .find(|s| s.label().eq_ignore_ascii_case(&name))
+            {
                 app.section = *sec;
             }
         }
@@ -629,17 +632,26 @@ impl App {
     }
 
     pub fn sdr_selected(&self) -> String {
-        if self.sdr.is_empty() { s::SDR_NONE_CHOICE.to_string() } else { self.sdr.clone() }
+        if self.sdr.is_empty() {
+            s::SDR_NONE_CHOICE.to_string()
+        } else {
+            self.sdr.clone()
+        }
     }
 
     pub fn linked_to(&self, call: &str) -> bool {
-        self.link.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(call.trim()))
+        self.link
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(call.trim()))
     }
 
     /// What the engine is asked to do for a transmit action, in order.
     pub fn tx_plan(&self, action: TxAction) -> Vec<Step> {
         let to = self.target.trim().to_uppercase();
-        let waiting = self.connect_try.as_ref().is_some_and(|t| t.peer.eq_ignore_ascii_case(&to));
+        let waiting = self
+            .connect_try
+            .as_ref()
+            .is_some_and(|t| t.peer.eq_ignore_ascii_case(&to));
         let mut plan = Vec::new();
         if matches!(action, TxAction::Connect | TxAction::Send | TxAction::SendFile)
             && !self.linked_to(&to)
@@ -648,7 +660,11 @@ impl App {
             plan.push(Step::Connect(to.clone()));
         }
         match action {
-            TxAction::Send => plan.push(Step::Message(to, self.composer.text().trim().to_string(), self.kind)),
+            TxAction::Send => plan.push(Step::Message(
+                to,
+                self.composer.text().trim().to_string(),
+                self.kind,
+            )),
             TxAction::SendFile => plan.push(Step::File(to, PathBuf::from(self.attach_path.trim()))),
             _ => {}
         }
@@ -659,9 +675,18 @@ impl App {
     pub fn status_line(&self) -> Option<(String, bool)> {
         if let Some(t) = &self.connect_try {
             let attempt = (t.since.elapsed().as_millis() as u64 / CONNECT_TIMEOUT_MS) as u32 + 1;
-            return Some((s::connecting(&t.peer, attempt.min(MAX_CONNECT_RETRIES + 1), MAX_CONNECT_RETRIES + 1), true));
+            return Some((
+                s::connecting(
+                    &t.peer,
+                    attempt.min(MAX_CONNECT_RETRIES + 1),
+                    MAX_CONNECT_RETRIES + 1,
+                ),
+                true,
+            ));
         }
-        self.no_reply.as_ref().map(|(peer, what)| (s::no_reply(peer, what), false))
+        self.no_reply
+            .as_ref()
+            .map(|(peer, what)| (s::no_reply(peer, what), false))
     }
 
     pub fn composer_len(&self) -> usize {
@@ -695,7 +720,11 @@ impl App {
         let chats = self.conv_chats();
         let index = self.msg_sel.unwrap_or(chats.len().saturating_sub(1));
         let chat = chats.get(index)?;
-        let me = if self.my_call().is_empty() { "You" } else { self.my_call() };
+        let me = if self.my_call().is_empty() {
+            "You"
+        } else {
+            self.my_call()
+        };
         let peer = sample::CONVERSATIONS.get(self.conv_sel)?.call;
         Some(sample::route(chat, index, me, peer))
     }
@@ -713,7 +742,10 @@ impl App {
     }
 
     pub fn commands(&self) -> Vec<Command> {
-        let cmd = |label: &str, msg: Message| Command { label: label.to_string(), msg };
+        let cmd = |label: &str, msg: Message| Command {
+            label: label.to_string(),
+            msg,
+        };
         let mut out = vec![if self.listen_only {
             cmd(s::CMD_LISTEN_OFF, Message::ToggleListen(false))
         } else {
@@ -725,7 +757,10 @@ impl App {
             } else {
                 s::connect_to(self.target.trim())
             };
-            out.push(Command { label, msg: Message::RequestTx(TxAction::Connect) });
+            out.push(Command {
+                label,
+                msg: Message::RequestTx(TxAction::Connect),
+            });
         }
         if self.link.is_some() {
             out.push(cmd(s::CMD_DISCONNECT, Message::RequestDisconnect));
@@ -775,9 +810,16 @@ impl App {
 
     /// Simulated signal to noise ratio in dB (peak over the noise floor).
     pub fn snr_now(&self) -> f32 {
-        let lo = (((self.tune + (spectrum::PASS_LO_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32).max(0.0)) as usize;
-        let hi = ((((self.tune + (spectrum::PASS_HI_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32) as usize).min(self.bins.len())).max(lo + 1);
-        let peak = self.bins[lo.min(self.bins.len() - 1)..hi].iter().copied().fold(f32::MIN, f32::max);
+        let lo = (((self.tune + (spectrum::PASS_LO_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32)
+            .max(0.0)) as usize;
+        let hi = ((((self.tune + (spectrum::PASS_HI_HZ / spectrum::SPAN_HZ) as f32) * spectrum::BINS as f32)
+            as usize)
+            .min(self.bins.len()))
+        .max(lo + 1);
+        let peak = self.bins[lo.min(self.bins.len() - 1)..hi]
+            .iter()
+            .copied()
+            .fold(f32::MIN, f32::max);
         (peak + 106.0).max(0.0)
     }
 
@@ -803,7 +845,12 @@ impl App {
     fn load_sample(&mut self, on: bool) {
         self.sample = on;
         if on {
-            let me = if self.my_call().is_empty() { "You" } else { self.my_call() }.to_string();
+            let me = if self.my_call().is_empty() {
+                "You"
+            } else {
+                self.my_call()
+            }
+            .to_string();
             self.thread = sample::thread(&me);
             self.conv_unread = sample::CONVERSATIONS.iter().map(|c| c.unread).collect();
             self.mail_unread = sample::MAILS.iter().map(|m| m.unread).collect();
@@ -871,8 +918,10 @@ impl App {
 
     pub fn rescan(&mut self) {
         self.detected_audio = kahf_audio::list_devices();
-        let mut sdrs: Vec<String> =
-            kahf_sdr::hackrf::list_devices().into_iter().map(|d| format!("{} {d}", s::SDR_HACKRF)).collect();
+        let mut sdrs: Vec<String> = kahf_sdr::hackrf::list_devices()
+            .into_iter()
+            .map(|d| format!("{} {d}", s::SDR_HACKRF))
+            .collect();
         sdrs.extend(kahf_sdr::rtlsdr::list_devices());
         self.detected_sdr = sdrs;
     }
@@ -891,16 +940,27 @@ impl App {
             ("call", self.callsign.clone()),
             ("audio_in", self.audio_in.clone()),
             ("audio_out", self.audio_out.clone()),
-            ("location", match self.location { Location::Off => "off", Location::Precise => "precise", Location::Area => "area" }.into()),
+            (
+                "location",
+                match self.location {
+                    Location::Off => "off",
+                    Location::Precise => "precise",
+                    Location::Area => "area",
+                }
+                .into(),
+            ),
             ("vol_in", format!("{:.0}", self.vol_in)),
             ("vol_out", format!("{:.0}", self.vol_out)),
             ("sdr", self.sdr.clone()),
-            ("rig", match self.rig {
-                RigControl::None => "none",
-                RigControl::Cat => "cat",
-                RigControl::Vox => "vox",
-            }
-            .into()),
+            (
+                "rig",
+                match self.rig {
+                    RigControl::None => "none",
+                    RigControl::Cat => "cat",
+                    RigControl::Vox => "vox",
+                }
+                .into(),
+            ),
             ("rigctld", self.rig_addr.clone()),
         ]
     }
@@ -961,7 +1021,11 @@ impl App {
             Step::Connect(to) => {
                 self.ensure_engine()?.connect(&to)?;
                 self.no_reply = None;
-                self.connect_try = Some(ConnectTry { peer: to, since: Instant::now(), what });
+                self.connect_try = Some(ConnectTry {
+                    peer: to,
+                    since: Instant::now(),
+                    what,
+                });
                 self.busy = Some((Busy::Connecting, Instant::now() + Duration::from_secs(30)));
                 None
             }
@@ -969,7 +1033,9 @@ impl App {
                 let e = self.ensure_engine()?;
                 match kind {
                     Kind::Private => e.send_message_private(&to, &text)?,
-                    Kind::Urgent if !text.starts_with("URGENT:") => e.send_message(&to, &format!("URGENT: {text}"))?,
+                    Kind::Urgent if !text.starts_with("URGENT:") => {
+                        e.send_message(&to, &format!("URGENT: {text}"))?
+                    }
                     _ => e.send_message(&to, &text)?,
                 }
                 None
@@ -994,7 +1060,9 @@ impl App {
     }
 
     fn poll_engine(&mut self, now: Instant) {
-        let Some(engine) = self.engine.as_mut() else { return };
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
         let events = engine.poll_events();
         // The daemon decides whether relay mode runs; the role shown follows it.
         if self.role.is_relay() && !engine.relay_running() {
@@ -1005,7 +1073,11 @@ impl App {
             self.on_engine_event(ev, now);
         }
         let limit = Duration::from_millis((MAX_CONNECT_RETRIES as u64 + 1) * CONNECT_TIMEOUT_MS + 2500);
-        if self.connect_try.as_ref().is_some_and(|t| t.since.elapsed() > limit) {
+        if self
+            .connect_try
+            .as_ref()
+            .is_some_and(|t| t.since.elapsed() > limit)
+        {
             self.connect_failed();
         }
     }
@@ -1026,7 +1098,11 @@ impl App {
             }
             EngineEvent::Link(LinkState::Connecting { peer }) => {
                 if self.connect_try.is_none() {
-                    self.connect_try = Some(ConnectTry { peer, since: now, what: "message" });
+                    self.connect_try = Some(ConnectTry {
+                        peer,
+                        since: now,
+                        what: "message",
+                    });
                 }
             }
             EngineEvent::Link(LinkState::Idle) => {
@@ -1038,14 +1114,33 @@ impl App {
             }
             EngineEvent::Link(LinkState::Disconnecting) => {}
             EngineEvent::Message { from, text } => {
-                self.thread.push(sample::Chat { time: crate::view::utc_hm(), from, text, kind: Kind::Chat, mine: false });
+                self.thread.push(sample::Chat {
+                    time: crate::view::utc_hm(),
+                    from,
+                    text,
+                    kind: Kind::Chat,
+                    mine: false,
+                });
             }
             EngineEvent::Mail { from, subject, .. } => {
                 self.toast(&format!("Mail from {from}: {subject}"), ToastKind::Info);
             }
-            EngineEvent::FileProgress { id, name, done, total } => {
-                let progress = if total == 0 { 1.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) };
-                let state = if done >= total { sample::FileState::Done } else { sample::FileState::Active };
+            EngineEvent::FileProgress {
+                id,
+                name,
+                done,
+                total,
+            } => {
+                let progress = if total == 0 {
+                    1.0
+                } else {
+                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                };
+                let state = if done >= total {
+                    sample::FileState::Done
+                } else {
+                    sample::FileState::Active
+                };
                 if let Some(f) = self.files.iter_mut().find(|f| f.id == Some(id)) {
                     f.progress = progress;
                     f.state = state;
@@ -1110,13 +1205,23 @@ impl App {
     /// Sends the relay start request to the daemon, with the acknowledgement of both ticks.
     /// The daemon's own relay start must also refuse without it; the panel is not the only gate.
     fn start_relay(&mut self, role: Role) {
-        let channels: Vec<f32> = spectrum::channels().iter().map(|(hz, _)| (*hz / 1000.0) as f32).collect();
+        let channels: Vec<f32> = spectrum::channels()
+            .iter()
+            .map(|(hz, _)| (*hz / 1000.0) as f32)
+            .collect();
         let acknowledged = self.relay_licence && self.relay_terms;
         if !acknowledged {
             return;
         }
-        let core_role = if role == Role::Both { kahf_core::relay::Role::RelayAndStation } else { kahf_core::relay::Role::Relay };
-        let ack = RelayAck { licence_held: self.relay_licence, terms_accepted: self.relay_terms };
+        let core_role = if role == Role::Both {
+            kahf_core::relay::Role::RelayAndStation
+        } else {
+            kahf_core::relay::Role::Relay
+        };
+        let ack = RelayAck {
+            licence_held: self.relay_licence,
+            terms_accepted: self.relay_terms,
+        };
         let result = match self.ensure_engine() {
             Ok(e) => e
                 .configure_relay(core_role, kahf_core::relay::Radio::HalfDuplex, &channels)
@@ -1136,11 +1241,6 @@ impl App {
         }
     }
 
-    /// True while the daemon reports relay mode running.
-    pub fn relay_on(&self) -> bool {
-        self.engine.as_ref().is_some_and(|e| e.relay_running())
-    }
-
     fn toast(&mut self, text: &str, kind: ToastKind) {
         self.events.push((crate::view::utc_clock(), text.to_string()));
         if self.events.len() > 8 {
@@ -1154,7 +1254,10 @@ impl App {
     }
 
     fn open_palette(&mut self) -> Task<Message> {
-        self.palette = Some(Palette { query: String::new(), selected: 0 });
+        self.palette = Some(Palette {
+            query: String::new(),
+            selected: 0,
+        });
         operation::focus(PALETTE_INPUT)
     }
 
@@ -1163,7 +1266,11 @@ impl App {
     fn request_tx(&mut self, action: TxAction) {
         let warn = |app: &mut Self, text: &str| app.toast(text, ToastKind::Warning);
         if self.listen_only {
-            let text = if action == TxAction::Beacon { s::BLOCK_BEACON } else { s::BLOCK_LISTEN };
+            let text = if action == TxAction::Beacon {
+                s::BLOCK_BEACON
+            } else {
+                s::BLOCK_LISTEN
+            };
             return warn(self, text);
         }
         if self.my_call().is_empty() {
@@ -1188,18 +1295,28 @@ impl App {
 
     /// Size in bytes of the file in the attach field, 0 if unknown.
     pub fn attach_bytes(&self) -> u64 {
-        std::fs::metadata(self.attach_path.trim()).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(self.attach_path.trim())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     fn do_tx(&mut self, action: TxAction) {
         if self.listen_only {
             return;
         }
-        let what = if action == TxAction::SendFile { "file" } else { "message" };
+        let what = if action == TxAction::SendFile {
+            "file"
+        } else {
+            "message"
+        };
         let to = self.target.trim().to_uppercase();
         let connecting = !self.linked_to(&to);
         for step in self.tx_plan(action) {
-            let file_path = if let Step::File(_, p) = &step { Some(p.clone()) } else { None };
+            let file_path = if let Step::File(_, p) = &step {
+                Some(p.clone())
+            } else {
+                None
+            };
             match self.exec(step, what) {
                 Ok(id) => {
                     if let Some(path) = file_path {
@@ -1258,7 +1375,10 @@ impl App {
     /// A file that was handed to the engine: a row in Files and a line in the conversation.
     fn add_sent_file(&mut self, id: Option<u64>, to: &str, path: &std::path::Path) {
         let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.files.push(sample::FileRow {
             id,
             name: name.clone(),
@@ -1296,7 +1416,9 @@ impl App {
                 .unwrap_or(0);
             if let Some(p) = self.palette.as_mut() {
                 match key {
-                    Key::Named(Named::ArrowDown) => p.selected = (p.selected + 1).min(count.saturating_sub(1)),
+                    Key::Named(Named::ArrowDown) => {
+                        p.selected = (p.selected + 1).min(count.saturating_sub(1))
+                    }
                     Key::Named(Named::ArrowUp) => p.selected = p.selected.saturating_sub(1),
                     _ => {}
                 }
@@ -1351,7 +1473,9 @@ impl App {
                 self.clock = now;
                 self.ticks += 1;
                 self.poll_engine(now);
-                let live = self.live_spectrum.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
+                let live = self
+                    .live_spectrum
+                    .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
                 if !live {
                     self.sim.step(&mut self.bins);
                 }
@@ -1468,7 +1592,10 @@ impl App {
             }
             Message::OpenPalette => return self.open_palette(),
             Message::PaletteQuery(q) => {
-                self.palette = Some(Palette { query: q, selected: 0 });
+                self.palette = Some(Palette {
+                    query: q,
+                    selected: 0,
+                });
             }
             Message::PaletteRun => {
                 let selected = self.palette.as_ref().map(|p| p.selected).unwrap_or(0);
@@ -1577,7 +1704,12 @@ impl App {
                 }
             }
             Message::Callsign(c) => {
-                self.callsign = c.to_uppercase().chars().filter(|c| !c.is_whitespace()).take(12).collect();
+                self.callsign = c
+                    .to_uppercase()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .take(12)
+                    .collect();
                 self.restart_engine();
                 self.save();
             }
@@ -1676,7 +1808,9 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn load_state() -> std::collections::HashMap<String, String> {
-    let text = state_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let text = state_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
     text.lines()
         .filter_map(|l| l.split_once('='))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
@@ -1688,7 +1822,10 @@ fn save_state(pairs: &[(&'static str, String)]) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let text: String = pairs.iter().map(|(k, v)| format!("{k}={}\n", v.replace('\n', " "))).collect();
+        let text: String = pairs
+            .iter()
+            .map(|(k, v)| format!("{k}={}\n", v.replace('\n', " ")))
+            .collect();
         let _ = std::fs::write(p, text);
     }
 }
@@ -1786,7 +1923,9 @@ mod tests {
         let mut app = ready();
         app.listen_only = false;
         app.dry_run = true;
-        let _ = app.update(Message::Composer(text_editor::Action::Edit(text_editor::Edit::Insert('a'))));
+        let _ = app.update(Message::Composer(text_editor::Action::Edit(
+            text_editor::Edit::Insert('a'),
+        )));
         let _ = app.update(Message::RequestTx(TxAction::Send));
         assert_eq!(app.confirm, Some(Confirm::Transmit(TxAction::Send)));
         let _ = app.update(Message::ConfirmTx);
@@ -1807,11 +1946,15 @@ mod tests {
     fn message_is_limited_to_500_characters() {
         let mut app = ready();
         for _ in 0..(s::MESSAGE_LIMIT + 20) {
-            let _ = app.update(Message::Composer(text_editor::Action::Edit(text_editor::Edit::Insert('x'))));
+            let _ = app.update(Message::Composer(text_editor::Action::Edit(
+                text_editor::Edit::Insert('x'),
+            )));
         }
         assert_eq!(app.composer_len(), s::MESSAGE_LIMIT);
         let long = Arc::new("y".repeat(100));
-        let _ = app.update(Message::Composer(text_editor::Action::Edit(text_editor::Edit::Paste(long))));
+        let _ = app.update(Message::Composer(text_editor::Action::Edit(
+            text_editor::Edit::Paste(long),
+        )));
         assert_eq!(app.composer_len(), s::MESSAGE_LIMIT);
     }
 
@@ -1883,7 +2026,9 @@ mod tests {
         assert!(spectrum::segment_at(14_105_000.0).is_some());
         assert!(spectrum::segment_at(7_050_000.0).is_none());
         assert_eq!(spectrum::segment_text(7_050_000.0), "No segment");
-        assert!(spectrum::channels().iter().all(|(hz, _)| spectrum::segment_at(*hz).is_some()));
+        assert!(spectrum::channels()
+            .iter()
+            .all(|(hz, _)| spectrum::segment_at(*hz).is_some()));
     }
 
     #[test]

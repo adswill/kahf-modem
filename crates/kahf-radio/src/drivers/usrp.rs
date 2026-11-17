@@ -37,8 +37,8 @@ const FALLBACK_RATE_RANGE: (f64, f64) = (200e3, 56e6);
 const GAIN_STAGE: &str = "gain";
 /// Common sample rates; the ones inside the radio's range are offered.
 const RATE_STEPS: &[u32] = &[
-    200_000, 500_000, 1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000,
-    12_500_000, 16_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 56_000_000,
+    200_000, 500_000, 1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 12_500_000,
+    16_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 56_000_000,
 ];
 
 #[cfg(target_os = "macos")]
@@ -255,7 +255,10 @@ impl Uhd {
                 (self.strvec_free)(&mut v);
             }
             if rc != 0 {
-                return Err(format!("USRP: the radio search failed: {}", self.text(null_mut())));
+                return Err(format!(
+                    "USRP: the radio search failed: {}",
+                    self.text(null_mut())
+                ));
             }
             Ok(out)
         }
@@ -363,7 +366,11 @@ pub fn device_args(id: Option<&str>) -> Result<String, String> {
             Some((k, v)) => !k.is_empty() && !v.is_empty(),
             None => false,
         });
-        return if chars_ok && parts_ok { Ok(t.to_string()) } else { Err(bad()) };
+        return if chars_ok && parts_ok {
+            Ok(t.to_string())
+        } else {
+            Err(bad())
+        };
     }
     if t.parse::<IpAddr>().is_ok() {
         return Ok(format!("addr={t}"));
@@ -380,7 +387,11 @@ pub fn parse_find_entry(entry: &str) -> DeviceInfo {
     let field = |key: &str| -> String {
         entry
             .split(',')
-            .find_map(|p| p.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.trim().to_string()))
+            .find_map(|p| {
+                p.split_once('=')
+                    .filter(|(k, _)| *k == key)
+                    .map(|(_, v)| v.trim().to_string())
+            })
             .unwrap_or_default()
     };
     let serial = field("serial");
@@ -388,11 +399,19 @@ pub fn parse_find_entry(entry: &str) -> DeviceInfo {
     if product.is_empty() {
         product = field("type");
     }
-    let mut label = if product.is_empty() { "USRP".to_string() } else { format!("USRP {product}") };
+    let mut label = if product.is_empty() {
+        "USRP".to_string()
+    } else {
+        format!("USRP {product}")
+    };
     if !serial.is_empty() {
         label = format!("{label} serial {serial}");
     }
-    DeviceInfo { driver: "usrp", label, id: serial }
+    DeviceInfo {
+        driver: "usrp",
+        label,
+        id: serial,
+    }
 }
 
 /// Common rates inside the range [lo, hi], plus the ends of the range, ascending.
@@ -425,6 +444,7 @@ pub fn clamp_gain(value: f32, min: f32, max: f32) -> f32 {
 
 /// Converts interleaved fc32 samples (I, Q, I, Q, ...) into pairs. Values are held
 /// to -1..1, and NaN becomes 0. Returns how many pairs were written.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn fc32_to_pairs(src: &[f32], dst: &mut [(f32, f32)]) -> usize {
     fn clean(v: f32) -> f32 {
         if v.is_nan() {
@@ -479,7 +499,10 @@ impl UsrpRadio {
         // SAFETY: each handle is made here, checked, and freed in release_stream.
         unsafe {
             if (self.uhd.rx_streamer_make)(&mut self.streamer) != 0 || self.streamer.is_null() {
-                return Err(format!("USRP: cannot make the sample stream: {}", self.uhd.text(self.dev)));
+                return Err(format!(
+                    "USRP: cannot make the sample stream: {}",
+                    self.uhd.text(self.dev)
+                ));
             }
             if (self.uhd.rx_metadata_make)(&mut self.md) != 0 || self.md.is_null() {
                 return Err("USRP: cannot make the sample packet header".into());
@@ -493,7 +516,10 @@ impl UsrpRadio {
                 n_channels: 1,
             };
             if (self.uhd.get_rx_stream)(self.dev, &mut sa, self.streamer) != 0 {
-                return Err(format!("USRP: cannot set up the sample stream: {}", self.uhd.text(self.dev)));
+                return Err(format!(
+                    "USRP: cannot set up the sample stream: {}",
+                    self.uhd.text(self.dev)
+                ));
             }
             let mut n: usize = 0;
             (self.uhd.rx_streamer_max_num_samps)(self.streamer, &mut n);
@@ -507,7 +533,10 @@ impl UsrpRadio {
                 time_spec_frac_secs: 0.0,
             };
             if (self.uhd.rx_streamer_issue_stream_cmd)(self.streamer, &cmd) != 0 {
-                return Err(format!("USRP: cannot start the sample stream: {}", self.uhd.text(self.dev)));
+                return Err(format!(
+                    "USRP: cannot start the sample stream: {}",
+                    self.uhd.text(self.dev)
+                ));
             }
         }
         self.failures = 0;
@@ -558,7 +587,10 @@ impl RxRadio for UsrpRadio {
         // SAFETY: the request and result live on this stack frame during the call.
         let rc = unsafe { (self.uhd.set_rx_freq)(self.dev, &mut req, 0, &mut res) };
         if rc != 0 {
-            return Err(format!("USRP: the radio refused {hz} Hz: {}", self.uhd.text(self.dev)));
+            return Err(format!(
+                "USRP: the radio refused {hz} Hz: {}",
+                self.uhd.text(self.dev)
+            ));
         }
         Ok(())
     }
@@ -599,7 +631,9 @@ impl RxRadio for UsrpRadio {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != GAIN_STAGE {
-            return Err(format!("USRP: no gain stage named {stage:?}; the radio has {GAIN_STAGE}"));
+            return Err(format!(
+                "USRP: no gain stage named {stage:?}; the radio has {GAIN_STAGE}"
+            ));
         }
         let value = match setting {
             GainSetting::Auto => return Err("USRP: this radio has no automatic gain setting".into()),
@@ -611,7 +645,10 @@ impl RxRadio for UsrpRadio {
         // SAFETY: the device handle is valid; the empty name asks for the overall gain.
         let rc = unsafe { (self.uhd.set_rx_gain)(self.dev, value as f64, 0, EMPTY.as_ptr().cast()) };
         if rc != 0 {
-            return Err(format!("USRP: the gain {value} dB was refused: {}", self.uhd.text(self.dev)));
+            return Err(format!(
+                "USRP: the gain {value} dB was refused: {}",
+                self.uhd.text(self.dev)
+            ));
         }
         Ok(())
     }
@@ -777,7 +814,11 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
         .map(|(a, b)| (a as f32, b as f32))
         .unwrap_or(FALLBACK_GAIN);
 
-    let label = if args.is_empty() { "USRP".to_string() } else { format!("USRP ({args})") };
+    let label = if args.is_empty() {
+        "USRP".to_string()
+    } else {
+        format!("USRP ({args})")
+    };
     let mut radio = UsrpRadio {
         uhd,
         dev,
@@ -834,8 +875,14 @@ mod tests {
 
     #[test]
     fn rate_choice_takes_the_closest_offered() {
-        assert_eq!(pick_rate(&[1_000_000, 2_000_000, 10_000_000], 4_000_000), Some(2_000_000));
-        assert_eq!(pick_rate(&[1_000_000, 10_000_000], 1_000_000_000), Some(10_000_000));
+        assert_eq!(
+            pick_rate(&[1_000_000, 2_000_000, 10_000_000], 4_000_000),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            pick_rate(&[1_000_000, 10_000_000], 1_000_000_000),
+            Some(10_000_000)
+        );
         assert_eq!(pick_rate(&[], 1), None);
         let c = rate_candidates(200e3, 56e6);
         assert!(c.contains(&200_000) && c.contains(&56_000_000));

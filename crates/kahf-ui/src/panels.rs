@@ -1,28 +1,41 @@
 //! Setup steps, the attach-file panel and the device lists.
 
-use iced::widget::{center, column, container, opaque, pick_list, row, scrollable, slider, space, text_input, toggler};
+use iced::widget::{
+    center, column, container, opaque, pick_list, row, scrollable, slider, space, text_input, toggler,
+};
 use iced::{Fill, Length};
 
-use crate::app::{App, Message, RigControl, SETUP_STEPS, TxAction};
+use crate::app::{App, Message, RigControl, TxAction, SETUP_STEPS};
 use crate::icons;
 use crate::strings as s;
 use crate::theme::{self, Kind};
 use crate::view::*;
 
-const STEP_TITLES: [&str; SETUP_STEPS] = [s::STEP_CALL, s::STEP_RADIO, s::STEP_SDR, s::STEP_AUDIO, s::STEP_LISTEN, s::STEP_LOCATION];
-const STEP_HINTS: [&str; SETUP_STEPS] =
-    [s::STEP_CALL_HINT, s::STEP_RADIO_HINT, s::STEP_SDR_HINT, s::STEP_AUDIO_HINT, s::STEP_LISTEN_HINT, s::STEP_LOCATION_HINT];
+const STEP_TITLES: [&str; SETUP_STEPS] = [
+    s::STEP_CALL,
+    s::STEP_RADIO,
+    s::STEP_SDR,
+    s::STEP_AUDIO,
+    s::STEP_LISTEN,
+    s::STEP_LOCATION,
+];
+const STEP_HINTS: [&str; SETUP_STEPS] = [
+    s::STEP_CALL_HINT,
+    s::STEP_RADIO_HINT,
+    s::STEP_SDR_HINT,
+    s::STEP_AUDIO_HINT,
+    s::STEP_LISTEN_HINT,
+    s::STEP_LOCATION_HINT,
+];
 
 impl App {
     fn detected_list(&self, items: &[String]) -> El<'_> {
-        let mut col = column![
-            row![
-                label_caps(s::DETECTED),
-                space().width(Fill),
-                btn(s::RESCAN, Kind::Secondary).on_press(Message::Rescan),
-            ]
-            .align_y(iced::Center)
+        let mut col = column![row![
+            label_caps(s::DETECTED),
+            space().width(Fill),
+            btn(s::RESCAN, Kind::Secondary).on_press(Message::Rescan),
         ]
+        .align_y(iced::Center)]
         .spacing(4);
         if items.is_empty() {
             col = col.push(muted(s::NOTHING_DETECTED));
@@ -34,8 +47,17 @@ impl App {
     }
 
     fn audio_pick(&self, label: &'static str, value: &str, on: fn(String) -> Message) -> El<'_> {
-        let shown = if value.is_empty() { s::DEVICE_SYSTEM.to_string() } else { value.to_string() };
-        field(label, pick_list(self.audio_options(), Some(shown), on).style(theme::dropdown).width(Fill))
+        let shown = if value.is_empty() {
+            s::DEVICE_SYSTEM.to_string()
+        } else {
+            value.to_string()
+        };
+        field(
+            label,
+            pick_list(self.audio_options(), Some(shown), on)
+                .style(theme::dropdown)
+                .width(Fill),
+        )
     }
 
     /// Input level meter and the two volume sliders.
@@ -43,17 +65,23 @@ impl App {
         let slide = |label: &'static str, v: f32, on: fn(f32) -> Message| {
             field(
                 label,
-                row![slider(0.0..=100.0, v, on).step(1.0f32).width(Fill), small(s::level_pct(v)).width(40)]
-                    .spacing(8)
-                    .align_y(iced::Center),
+                row![
+                    slider(0.0..=100.0, v, on).step(1.0f32).width(Fill),
+                    small(s::level_pct(v)).width(40)
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
             )
         };
         column![
             field(
                 s::INPUT_LEVEL_LABEL,
-                iced::widget::canvas(crate::icons::LevelBar { level: self.level_now, peak: self.level_peak })
-                    .width(Fill)
-                    .height(12),
+                iced::widget::canvas(crate::icons::LevelBar {
+                    level: self.level_now,
+                    peak: self.level_peak
+                })
+                .width(Fill)
+                .height(12),
             ),
             slide(s::VOL_IN_LABEL, self.vol_in, Message::VolIn),
             slide(s::VOL_OUT_LABEL, self.vol_out, Message::VolOut),
@@ -88,12 +116,13 @@ impl App {
                 col.into()
             }
             2 => {
-                let mut col = column![
-                    pick_list(self.sdr_options(), Some(self.sdr_selected()), Message::SdrChosen)
-                        .style(theme::dropdown)
-                        .width(Fill),
-                ]
-                .spacing(6);
+                let mut col =
+                    column![
+                        pick_list(self.sdr_options(), Some(self.sdr_selected()), Message::SdrChosen)
+                            .style(theme::dropdown)
+                            .width(Fill),
+                    ]
+                    .spacing(6);
                 if self.sdr == s::SDR_RTL {
                     col = col.push(notice(s::SDR_RTL_NOTE, theme::AMBER));
                 }
@@ -110,7 +139,12 @@ impl App {
             5 => {
                 let mut col = column![].spacing(4);
                 for l in crate::app::Location::ALL {
-                    col = col.push(iced::widget::radio(l.label(), l, Some(self.location), Message::LocationChosen));
+                    col = col.push(iced::widget::radio(
+                        l.label(),
+                        l,
+                        Some(self.location),
+                        Message::LocationChosen,
+                    ));
                 }
                 col.into()
             }
@@ -147,7 +181,8 @@ impl App {
                 .align_y(iced::Center),
             );
         }
-        col.push(btn(s::SETUP_RUN_ALL, Kind::Primary).on_press(Message::OpenSetup(None))).into()
+        col.push(btn(s::SETUP_RUN_ALL, Kind::Primary).on_press(Message::OpenSetup(None)))
+            .into()
     }
 
     /// The setup panel: every step, or only the one that was opened from Settings.
@@ -198,12 +233,22 @@ impl App {
             )
             .padding(10),
         ];
-        center(opaque(container(col).width(520).max_height(880).style(theme::modal(self.modal_alpha)))).into()
+        center(opaque(
+            container(col)
+                .width(520)
+                .max_height(880)
+                .style(theme::modal(self.modal_alpha)),
+        ))
+        .into()
     }
 
     /// Attach-file panel in the composer: the path, then Send file, which asks to confirm.
     pub fn attach_panel(&self) -> El<'_> {
-        let size = if self.attach_bytes() > 0 { s::size_text(self.attach_bytes()) } else { String::new() };
+        let size = if self.attach_bytes() > 0 {
+            s::size_text(self.attach_bytes())
+        } else {
+            String::new()
+        };
         container(
             column![
                 row![
@@ -214,9 +259,14 @@ impl App {
                         .style(theme::input)
                         .width(Fill),
                     tip(
-                        btn(s::ATTACH_SEND, Kind::Primary)
-                            .on_press_maybe((!self.listen_only).then_some(Message::RequestTx(TxAction::SendFile))),
-                        if self.listen_only { s::TIP_SEND_BLOCKED } else { s::TIP_ATTACH },
+                        btn(s::ATTACH_SEND, Kind::Primary).on_press_maybe(
+                            (!self.listen_only).then_some(Message::RequestTx(TxAction::SendFile))
+                        ),
+                        if self.listen_only {
+                            s::TIP_SEND_BLOCKED
+                        } else {
+                            s::TIP_ATTACH
+                        },
                     ),
                     btn(s::ATTACH_CANCEL, Kind::Secondary).on_press(Message::AttachOpen(false)),
                 ]

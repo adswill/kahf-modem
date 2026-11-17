@@ -233,7 +233,13 @@ mod tests {
         // 40 m: one channel (7 041 350 Hz). 20 m: four channels from 14 102 350 Hz.
         assert_eq!(
             freqs,
-            vec![7_041_350.0, 14_102_350.0, 14_105_050.0, 14_107_750.0, 14_110_450.0]
+            vec![
+                7_041_350.0,
+                14_102_350.0,
+                14_105_050.0,
+                14_107_750.0,
+                14_110_450.0
+            ]
         );
     }
 
@@ -265,9 +271,7 @@ mod tests {
     fn default_segments_lie_inside_region1_allocations() {
         for seg in bandplan::KAHF_SEGMENTS {
             let inside = bandplan::ALLOCATIONS.iter().any(|a| {
-                a.region == Region::Region1
-                    && seg.lower_hz >= a.lower_hz
-                    && seg.upper_hz <= a.upper_hz
+                a.region == Region::Region1 && seg.lower_hz >= a.lower_hz && seg.upper_hz <= a.upper_hz
             });
             assert!(inside, "{} is not inside a Region 1 allocation", seg.name);
         }

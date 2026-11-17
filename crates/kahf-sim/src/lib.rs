@@ -455,7 +455,11 @@ mod tests {
         let inner = 100..7900;
         let resid: Vec<f32> = out.iter().zip(&expected).map(|(&o, &e)| o - e).collect();
         let err = power(&resid, inner.clone()) / power(&expected, inner.clone());
-        assert!(err < 0.005, "residual power {:.4} % of tone (limit 0.5 %)", err * 100.0);
+        assert!(
+            err < 0.005,
+            "residual power {:.4} % of tone (limit 0.5 %)",
+            err * 100.0
+        );
     }
 
     #[test]
@@ -466,7 +470,11 @@ mod tests {
         let expected_hz = 2000.0 * (1.0 + CLOCK_PPM * 1e-6);
         let amp = amplitude_at(&out, expected_hz, 100..7900);
         let err = (amp - 1.0).abs();
-        assert!(err < 0.005, "amplitude residual {:.4} % (limit 0.5 %)", err * 100.0);
+        assert!(
+            err < 0.005,
+            "amplitude residual {:.4} % (limit 0.5 %)",
+            err * 100.0
+        );
     }
 
     #[test]
@@ -482,9 +490,18 @@ mod tests {
     #[ignore]
     fn measure_profile_fer() {
         let name = std::env::var("KAHF_FER_PROFILE").unwrap_or_else(|_| "two-path".into());
-        let snr: f32 = std::env::var("KAHF_FER_SNR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let frames: usize = std::env::var("KAHF_FER_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-        let seed: u64 = std::env::var("KAHF_FER_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let snr: f32 = std::env::var("KAHF_FER_SNR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let frames: usize = std::env::var("KAHF_FER_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000);
+        let seed: u64 = std::env::var("KAHF_FER_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         let profile = match name.as_str() {
             "awgn" => Profile::Awgn,
             "two-path" => Profile::TwoPath,

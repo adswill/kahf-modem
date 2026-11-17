@@ -403,7 +403,9 @@ mod tests {
     #[test]
     fn rigctld_connect_refused_names_the_address() {
         // Port 1 on loopback is closed; the connect must fail with the address in the message.
-        let err = RigctldClient::connect("127.0.0.1:1").err().expect("connect should fail");
+        let err = RigctldClient::connect("127.0.0.1:1")
+            .err()
+            .expect("connect should fail");
         assert!(err.contains("127.0.0.1:1"), "got {err}");
     }
 }

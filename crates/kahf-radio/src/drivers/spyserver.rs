@@ -213,7 +213,11 @@ impl SpyServer {
             return Err(format!("{id} has no radio connected"));
         }
 
-        let frequency_hz = if info.device_centre > 0 { info.device_centre } else { info.min_freq };
+        let frequency_hz = if info.device_centre > 0 {
+            info.device_centre
+        } else {
+            info.min_freq
+        };
         let mut radio = SpyServer {
             addr: id.to_string(),
             stream,
@@ -297,20 +301,24 @@ impl SpyServer {
 
     fn handle_message(&mut self, ty: u32, flags: u32, body: &[u8]) {
         // The server's digital gain (flags, in dB) is taken back out of the samples.
-        let scale = if flags == 0 { 1.0 } else { 10f32.powf(-(flags as f32) / 20.0) };
+        let scale = if flags == 0 {
+            1.0
+        } else {
+            10f32.powf(-(flags as f32) / 20.0)
+        };
         match ty {
-            MSG_IQ_UINT8 => self.samples.extend(body.chunks_exact(2).map(|p| {
+            MSG_IQ_UINT8 => self.samples.extend(body.as_chunks::<2>().0.iter().map(|p| {
                 (
                     (p[0] as f32 - 128.0) / 128.0 * scale,
                     (p[1] as f32 - 128.0) / 128.0 * scale,
                 )
             })),
-            MSG_IQ_INT16 => self.samples.extend(body.chunks_exact(4).map(|c| {
+            MSG_IQ_INT16 => self.samples.extend(body.as_chunks::<4>().0.iter().map(|c| {
                 let re = i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0 * scale;
                 let im = i16::from_le_bytes([c[2], c[3]]) as f32 / 32768.0 * scale;
                 (re, im)
             })),
-            MSG_IQ_FLOAT => self.samples.extend(body.chunks_exact(8).map(|c| {
+            MSG_IQ_FLOAT => self.samples.extend(body.as_chunks::<8>().0.iter().map(|c| {
                 let re = f32::from_le_bytes([c[0], c[1], c[2], c[3]]) * scale;
                 let im = f32::from_le_bytes([c[4], c[5], c[6], c[7]]) * scale;
                 (re, im)
@@ -492,8 +500,8 @@ fn connect(id: &str) -> Result<TcpStream, String> {
 fn read_message(s: &mut TcpStream) -> io::Result<(u32, u32, Vec<u8>)> {
     let mut h = [0u8; HEADER_LEN];
     s.read_exact(&mut h)?;
-    let (ty, flags, size) = parse_header(&h)
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "bad message header"))?;
+    let (ty, flags, size) =
+        parse_header(&h).ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "bad message header"))?;
     let mut body = vec![0u8; size as usize];
     s.read_exact(&mut body)?;
     Ok((ty, flags, body))
@@ -558,7 +566,10 @@ fn dev_name(t: u32) -> &'static str {
 }
 
 fn is_wait(e: &io::Error) -> bool {
-    matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted)
+    matches!(
+        e.kind(),
+        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+    )
 }
 
 #[cfg(test)]
@@ -580,12 +591,35 @@ mod tests {
 
     /// DEVICE_INFO: type 1, 10 Msps, 4 decimation steps, 24 MHz to 1.8 GHz.
     fn device_info(max_gain: u32) -> Vec<u8> {
-        words(&[1, 0x1234, 10_000_000, 10_000_000, 4, 1, max_gain, 24_000_000, 1_800_000_000, 0, 0, 0])
+        words(&[
+            1,
+            0x1234,
+            10_000_000,
+            10_000_000,
+            4,
+            1,
+            max_gain,
+            24_000_000,
+            1_800_000_000,
+            0,
+            0,
+            0,
+        ])
     }
 
     /// CLIENT_SYNC: control flag, gain 7, centre 100 MHz, IQ centre range 24 MHz to 1.8 GHz.
     fn sync(can_control: u32) -> Vec<u8> {
-        words(&[can_control, 7, 100_000_000, 100_000_000, 0, 24_000_000, 1_800_000_000, 0, 0])
+        words(&[
+            can_control,
+            7,
+            100_000_000,
+            100_000_000,
+            0,
+            24_000_000,
+            1_800_000_000,
+            0,
+            0,
+        ])
     }
 
     /// Reads one command from the client; None when the client has closed.
@@ -610,9 +644,13 @@ mod tests {
     fn answer_hello(s: &mut TcpStream, can_control: u32) {
         let (ty, body) = read_command(s).expect("hello");
         assert_eq!(ty, CMD_HELLO);
-        assert_eq!(body, [PROTOCOL_VERSION.to_le_bytes().to_vec(), b"KAHF".to_vec()].concat());
+        assert_eq!(
+            body,
+            [PROTOCOL_VERSION.to_le_bytes().to_vec(), b"KAHF".to_vec()].concat()
+        );
         s.write_all(&frame(MSG_DEVICE_INFO, 0, &device_info(21))).unwrap();
-        s.write_all(&frame(MSG_CLIENT_SYNC, 0, &sync(can_control))).unwrap();
+        s.write_all(&frame(MSG_CLIENT_SYNC, 0, &sync(can_control)))
+            .unwrap();
     }
 
     /// Reads commands until the client switches streaming on.
@@ -654,7 +692,10 @@ mod tests {
         {
             let mut r = open(Some(&addr)).expect("open");
             assert_eq!(r.freq_range_hz(), (24_000_000, 1_800_000_000));
-            assert_eq!(r.sample_rates(), vec![1_250_000, 2_500_000, 5_000_000, 10_000_000]);
+            assert_eq!(
+                r.sample_rates(),
+                vec![1_250_000, 2_500_000, 5_000_000, 10_000_000]
+            );
             assert!(r.label().contains("Airspy One"));
             let stages = r.gain_stages();
             assert_eq!(stages.len(), 1);
@@ -683,7 +724,8 @@ mod tests {
             answer_hello(&mut s, 1);
             wait_for_stream_start(&mut s);
             // one 16-bit sample (0.5, -0.5)
-            s.write_all(&frame(MSG_IQ_INT16, 0, &[0x00, 0x40, 0x00, 0xC0])).unwrap();
+            s.write_all(&frame(MSG_IQ_INT16, 0, &[0x00, 0x40, 0x00, 0xC0]))
+                .unwrap();
             // two 8-bit samples, sent in two writes
             let u8_packet = frame(MSG_IQ_UINT8, 0, &[128, 255, 0, 128]);
             s.write_all(&u8_packet[..7]).unwrap();
@@ -713,7 +755,10 @@ mod tests {
         let expect: [(f32, f32); 4] = [(0.5, -0.5), (0.0, 127.0 / 128.0), (-1.0, 0.0), (0.1, -0.2)];
         assert_eq!(got.len(), 4, "{got:?}");
         for (g, e) in got.iter().zip(expect.iter()) {
-            assert!((g.0 - e.0).abs() < 1e-5 && (g.1 - e.1).abs() < 1e-5, "{g:?} is not {e:?}");
+            assert!(
+                (g.0 - e.0).abs() < 1e-5 && (g.1 - e.1).abs() < 1e-5,
+                "{g:?} is not {e:?}"
+            );
         }
     }
 
@@ -764,7 +809,11 @@ mod tests {
 
     #[test]
     fn refused_connection_gives_a_clear_error() {
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let err = open(Some(&format!("127.0.0.1:{port}"))).err().expect("an error");
         assert!(err.contains("refused"), "{err}");
     }
@@ -774,7 +823,10 @@ mod tests {
         assert!(open(None).err().unwrap().contains("host:port"));
         assert!(open(Some("  ")).err().unwrap().contains("host:port"));
         assert!(open(Some("localhost")).err().unwrap().contains("host:port"));
-        assert!(open(Some("127.0.0.1:notaport")).err().unwrap().contains("host:port"));
+        assert!(open(Some("127.0.0.1:notaport"))
+            .err()
+            .unwrap()
+            .contains("host:port"));
     }
 
     #[test]
@@ -793,7 +845,10 @@ mod tests {
         });
         {
             let mut r = open(Some(&addr)).expect("open");
-            let e = r.set_gain("gain", GainSetting::Manual(3.0)).err().expect("an error");
+            let e = r
+                .set_gain("gain", GainSetting::Manual(3.0))
+                .err()
+                .expect("an error");
             assert!(e.contains("read only"), "{e}");
             assert!(r.set_gain("nope", GainSetting::Manual(1.0)).is_err());
         }
@@ -802,7 +857,10 @@ mod tests {
 
     #[test]
     fn rates_and_headers_decode() {
-        assert_eq!(offered_rates(10_000_000, 4, 0), vec![10_000_000, 5_000_000, 2_500_000, 1_250_000]);
+        assert_eq!(
+            offered_rates(10_000_000, 4, 0),
+            vec![10_000_000, 5_000_000, 2_500_000, 1_250_000]
+        );
         assert_eq!(offered_rates(10_000_000, 3, 2), vec![2_500_000]);
         assert_eq!(parse_header(&frame(1, 20, &[])), Some((1, 20, 0)));
         assert_eq!(parse_header(&words(&[0, 0, 0, 0, MAX_BODY + 1])), None);

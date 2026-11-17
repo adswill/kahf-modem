@@ -48,8 +48,8 @@ const GAINS_FC0013: &[i16] = &[
 ];
 const GAINS_FC2580: &[i16] = &[0];
 const GAINS_R820T: &[i16] = &[
-    0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372, 386, 402, 421,
-    434, 439, 445, 480, 496,
+    0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372, 386, 402,
+    421, 434, 439, 445, 480, 496,
 ];
 
 /// What the greeting says about the server.
@@ -109,7 +109,8 @@ fn u8_to_f32(b: u8) -> f32 {
 
 /// Splits "host:port" or "[v6-address]:port". The port must be 1 to 65535.
 fn split_host_port(id: &str) -> Result<(String, u16), String> {
-    let bad = || format!("{id:?} is not a host and port; write it as host:port, for example 192.168.1.5:1234");
+    let bad =
+        || format!("{id:?} is not a host and port; write it as host:port, for example 192.168.1.5:1234");
     let (host, port) = if let Some(rest) = id.strip_prefix('[') {
         let end = rest.find(']').ok_or_else(bad)?;
         let port = rest[end + 1..].strip_prefix(':').ok_or_else(bad)?;
@@ -135,7 +136,10 @@ fn connect_error(id: &str, e: Option<io::Error>) -> String {
                 format!("{id} refused the connection; check that the server is running and the port is right")
             }
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
-                format!("no answer from {id} within {} s; check the address and the network", CONNECT_TIMEOUT.as_secs())
+                format!(
+                    "no answer from {id} within {} s; check the address and the network",
+                    CONNECT_TIMEOUT.as_secs()
+                )
             }
             _ => format!("could not connect to {id}: {e}"),
         },
@@ -148,10 +152,9 @@ fn is_timeout(e: &io::Error) -> bool {
 
 /// Connects to the server named by `id` (host:port) and reads its greeting.
 pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
-    let id = id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "this radio needs its server address as host:port, for example 192.168.1.5:1234".to_string())?;
+    let id = id.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+        "this radio needs its server address as host:port, for example 192.168.1.5:1234".to_string()
+    })?;
     let (host, port) = split_host_port(id)?;
 
     let mut last_err = None;
@@ -176,16 +179,22 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let mut hdr = [0u8; GREETING_LEN];
     if let Err(e) = stream.read_exact(&mut hdr) {
         return Err(if is_timeout(&e) {
-            format!("{id} sent no greeting within {} s; another client may be connected to it", GREETING_TIMEOUT.as_secs())
+            format!(
+                "{id} sent no greeting within {} s; another client may be connected to it",
+                GREETING_TIMEOUT.as_secs()
+            )
         } else if e.kind() == io::ErrorKind::UnexpectedEof {
             format!("{id} closed the connection before its greeting; another client may be connected to it")
         } else {
             format!("could not read the greeting from {id}: {e}")
         });
     }
-    let greeting = parse_greeting(&hdr).ok_or_else(|| format!("{id} is not a network radio server (the greeting did not match)"))?;
+    let greeting = parse_greeting(&hdr)
+        .ok_or_else(|| format!("{id} is not a network radio server (the greeting did not match)"))?;
 
-    stream.set_read_timeout(Some(READ_WAIT)).map_err(|e| format!("could not set up {id}: {e}"))?;
+    stream
+        .set_read_timeout(Some(READ_WAIT))
+        .map_err(|e| format!("could not set up {id}: {e}"))?;
     stream
         .set_write_timeout(Some(GREETING_TIMEOUT))
         .map_err(|e| format!("could not set up {id}: {e}"))?;
@@ -344,12 +353,20 @@ impl RxRadio for RtlTcpRadio {
 
     fn gain_stages(&self) -> Vec<GainStage> {
         let (min_db, max_db) = self.gain_limits();
-        vec![GainStage { name: "gain".into(), min_db, max_db, step_db: 0.0, auto: true }]
+        vec![GainStage {
+            name: "gain".into(),
+            min_db,
+            max_db,
+            step_db: 0.0,
+            auto: true,
+        }]
     }
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != "gain" {
-            return Err(format!("no gain stage named {stage:?}; this radio has one stage, \"gain\""));
+            return Err(format!(
+                "no gain stage named {stage:?}; this radio has one stage, \"gain\""
+            ));
         }
         match setting {
             GainSetting::Auto => self.gain_auto = true,
@@ -369,7 +386,10 @@ impl RxRadio for RtlTcpRadio {
             return Ok(());
         }
         if !self.alive {
-            return Err(format!("the connection to {} is closed; open the radio again", self.id));
+            return Err(format!(
+                "the connection to {} is closed; open the radio again",
+                self.id
+            ));
         }
         self.send_all()?;
         self.started = true;
@@ -489,10 +509,16 @@ mod tests {
 
     #[test]
     fn command_bytes_are_big_endian() {
-        assert_eq!(command_bytes(CMD_FREQ, 100_000_000), [0x01, 0x05, 0xF5, 0xE1, 0x00]);
+        assert_eq!(
+            command_bytes(CMD_FREQ, 100_000_000),
+            [0x01, 0x05, 0xF5, 0xE1, 0x00]
+        );
         assert_eq!(command_bytes(CMD_RATE, 2_048_000), [0x02, 0x00, 0x1F, 0x40, 0x00]);
         assert_eq!(command_bytes(CMD_AGC, 1), [0x08, 0, 0, 0, 1]);
-        assert_eq!(command_bytes(CMD_GAIN, -99i32 as u32), [0x04, 0xFF, 0xFF, 0xFF, 0x9D]);
+        assert_eq!(
+            command_bytes(CMD_GAIN, -99i32 as u32),
+            [0x04, 0xFF, 0xFF, 0xFF, 0x9D]
+        );
     }
 
     #[test]
@@ -504,7 +530,10 @@ mod tests {
 
     #[test]
     fn host_and_port_are_split() {
-        assert_eq!(split_host_port("192.168.1.5:1234").unwrap(), ("192.168.1.5".into(), 1234));
+        assert_eq!(
+            split_host_port("192.168.1.5:1234").unwrap(),
+            ("192.168.1.5".into(), 1234)
+        );
         assert_eq!(split_host_port("[::1]:1234").unwrap(), ("::1".into(), 1234));
         assert!(split_host_port("192.168.1.5").is_err());
         assert!(split_host_port("192.168.1.5:0").is_err());
@@ -515,7 +544,11 @@ mod tests {
 
     #[test]
     fn refused_connection_gives_clear_error() {
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         match open(Some(&format!("127.0.0.1:{port}"))) {
             Ok(_) => panic!("open should fail"),
             Err(e) => assert!(e.contains("refused"), "message was: {e}"),
@@ -547,7 +580,8 @@ mod tests {
             s.read_exact(&mut cmds).expect("read commands");
             cmd_tx.send(cmds.to_vec()).unwrap();
             // 8 pairs: byte 0 and 255 alternate
-            s.write_all(&[0, 255, 255, 0, 0, 0, 255, 255, 127, 127, 0, 255, 255, 0, 127, 0]).unwrap();
+            s.write_all(&[0, 255, 255, 0, 0, 0, 255, 255, 127, 127, 0, 255, 255, 0, 127, 0])
+                .unwrap();
             thread::sleep(Duration::from_millis(300));
         });
         let mut r = open_ok(&id);

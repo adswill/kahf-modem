@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let sdr = args.get(1).cloned().unwrap_or_else(|| "rtlsdr@145500000".to_string());
+    let sdr = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "rtlsdr@145500000".to_string());
     let seconds: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let dir = std::env::temp_dir().join("kahf-rx-check");
     let config = Config {
@@ -55,6 +58,9 @@ fn main() {
     }
     println!("spectrum frames: {spectra}");
     if spectra > 0 {
-        println!("audio peak: {peak_db:.1} dB at {} Hz", peak_bin as f32 * 8000.0 / 2048.0);
+        println!(
+            "audio peak: {peak_db:.1} dB at {} Hz",
+            peak_bin as f32 * 8000.0 / 2048.0
+        );
     }
 }

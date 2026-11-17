@@ -39,7 +39,8 @@ const MINI_RATES: [u32; 9] = [
     1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 15_000_000, 20_000_000, 30_720_000,
 ];
 const WIDE_RATES: [u32; 11] = [
-    100_000, 1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 15_000_000, 20_000_000, 30_720_000, 61_440_000,
+    100_000, 1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 15_000_000, 20_000_000,
+    30_720_000, 61_440_000,
 ];
 
 // ---------------------------------------------------------------------------
@@ -69,7 +70,11 @@ pub fn board_from_info(info: &str) -> Board {
     let mini = low.contains("mini");
     let v2 = mini && (low.contains("v2") || low.contains("mini 2") || low.contains("mini2"));
     let model = if mini {
-        if v2 { "LimeSDR Mini 2".to_string() } else { "LimeSDR Mini".to_string() }
+        if v2 {
+            "LimeSDR Mini 2".to_string()
+        } else {
+            "LimeSDR Mini".to_string()
+        }
     } else if head.is_empty() {
         "LimeSDR".to_string()
     } else {
@@ -83,22 +88,40 @@ pub fn board_from_info(info: &str) -> Board {
         }
         None => String::new(),
     };
-    Board { mini, v2, usb3, model, serial }
+    Board {
+        mini,
+        v2,
+        usb3,
+        model,
+        serial,
+    }
 }
 
 /// Sample rates the board offers, in ascending order (Hz).
 pub fn board_rates(b: &Board) -> Vec<u32> {
-    if b.mini { MINI_RATES.to_vec() } else { WIDE_RATES.to_vec() }
+    if b.mini {
+        MINI_RATES.to_vec()
+    } else {
+        WIDE_RATES.to_vec()
+    }
 }
 
 /// The smallest offered rate at or above `want`, or the largest one when `want` is above all of them.
 pub fn pick_rate(rates: &[u32], want: u32) -> Option<u32> {
-    rates.iter().copied().find(|&r| r >= want).or_else(|| rates.last().copied())
+    rates
+        .iter()
+        .copied()
+        .find(|&r| r >= want)
+        .or_else(|| rates.last().copied())
 }
 
 /// Tuning range in Hz, inclusive.
 pub fn board_freq_range(b: &Board) -> (u64, u64) {
-    if b.mini { (10_000_000, 3_500_000_000) } else { (100_000, 3_800_000_000) }
+    if b.mini {
+        (10_000_000, 3_500_000_000)
+    } else {
+        (100_000, 3_800_000_000)
+    }
 }
 
 /// The index in the library's input list to use at `hz`, or None when no input suits.
@@ -137,7 +160,9 @@ pub fn open_hint(b: &Board, windows: bool) -> String {
         ". If the board is plugged in, its gateware or firmware may not match this LimeSuite library: run the LimeSuite update tool so the matching images are loaded",
     );
     if b.mini && windows {
-        s.push_str(". On Windows the LimeSDR Mini needs the FTDI FT60x USB 3 driver, not a generic USB driver");
+        s.push_str(
+            ". On Windows the LimeSDR Mini needs the FTDI FT60x USB 3 driver, not a generic USB driver",
+        );
     } else if windows {
         s.push_str(". On Windows the LimeSuite USB driver must be installed");
     }
@@ -173,7 +198,9 @@ fn mhz_text(hz: u64) -> String {
 
 /// Splits the raw scan buffer into info strings.
 fn split_infos(raw: &[u8], count: usize) -> Vec<String> {
-    raw.chunks_exact(INFO_LEN)
+    raw.as_chunks::<INFO_LEN>()
+        .0
+        .iter()
         .take(count.min(MAX_DEVICES))
         .map(|c| {
             let end = c.iter().position(|&b| b == 0).unwrap_or(c.len());
@@ -251,7 +278,10 @@ struct Api {
 fn required<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
     // SAFETY: each caller names a symbol with the C signature declared above.
     let sym: Symbol<T> = unsafe { lib.get(name) }.map_err(|e| {
-        format!("LimeSDR: the LimeSuite library has no {} ({e})", String::from_utf8_lossy(&name[..name.len() - 1]))
+        format!(
+            "LimeSDR: the LimeSuite library has no {} ({e})",
+            String::from_utf8_lossy(&name[..name.len() - 1])
+        )
     })?;
     Ok(*sym)
 }
@@ -292,14 +322,20 @@ impl Api {
 
     /// The library's own words for the last failure, with a leading ": ", or empty.
     fn text(&self) -> String {
-        let Some(f) = self.last_error else { return String::new() };
+        let Some(f) = self.last_error else {
+            return String::new();
+        };
         // SAFETY: the library returns a pointer to its own message text or null.
         let p = unsafe { f() };
         if p.is_null() {
             return String::new();
         }
         let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().trim().to_string();
-        if s.is_empty() { String::new() } else { format!(": {s}") }
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!(": {s}")
+        }
     }
 }
 
@@ -328,13 +364,19 @@ fn scan(api: &Api) -> Result<Vec<String>, String> {
 
 /// Lists the LimeSDR boards the library can see. Returns nothing when the library is missing.
 pub fn probe() -> Vec<DeviceInfo> {
-    let Ok(api) = Api::load(library_names()) else { return Vec::new() };
+    let Ok(api) = Api::load(library_names()) else {
+        return Vec::new();
+    };
     let Ok(infos) = scan(&api) else { return Vec::new() };
     infos
         .iter()
         .map(|info| {
             let b = board_from_info(info);
-            DeviceInfo { driver: DRIVER, label: b.model, id: b.serial }
+            DeviceInfo {
+                driver: DRIVER,
+                label: b.model,
+                id: b.serial,
+            }
         })
         .collect()
 }
@@ -344,9 +386,14 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let api = Api::load(library_names())?;
     let infos = scan(&api)?;
     if infos.is_empty() {
-        return Err("LimeSDR: no radio found; check the USB cable and the port, and that the board has power".into());
+        return Err(
+            "LimeSDR: no radio found; check the USB cable and the port, and that the board has power".into(),
+        );
     }
-    let info = match id.map(|s| s.trim().trim_start_matches("serial=")).filter(|s| !s.is_empty()) {
+    let info = match id
+        .map(|s| s.trim().trim_start_matches("serial="))
+        .filter(|s| !s.is_empty())
+    {
         None => infos[0].clone(),
         Some(serial) => infos
             .iter()
@@ -354,11 +401,15 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
             .cloned()
             .ok_or_else(|| {
                 let found: Vec<String> = infos.iter().map(|i| board_from_info(i).serial).collect();
-                format!("LimeSDR: no radio with serial {serial}; found: {}", found.join(", "))
+                format!(
+                    "LimeSDR: no radio with serial {serial}; found: {}",
+                    found.join(", ")
+                )
             })?,
     };
     let board = board_from_info(&info);
-    let c_info = CString::new(info.clone()).map_err(|_| "LimeSDR: the device info has a NUL byte".to_string())?;
+    let c_info =
+        CString::new(info.clone()).map_err(|_| "LimeSDR: the device info has a NUL byte".to_string())?;
     let mut dev: *mut c_void = null_mut();
     // SAFETY: `dev` receives the handle; the info string is a valid C string.
     let rc = unsafe { (api.open)(&mut dev, c_info.as_ptr(), null_mut()) };
@@ -417,7 +468,11 @@ impl LimeSdr {
     fn init_device(&mut self) -> Result<(), String> {
         // SAFETY: `dev` is the open handle.
         if unsafe { (self.api.init)(self.dev) } != 0 {
-            return Err(format!("{}{}", self.fail("initialisation failed"), open_hint(&self.board, cfg!(windows))));
+            return Err(format!(
+                "{}{}",
+                self.fail("initialisation failed"),
+                open_hint(&self.board, cfg!(windows))
+            ));
         }
         // SAFETY: as above; channel 0 of the receiver.
         if unsafe { (self.api.enable_channel)(self.dev, false, 0, true) } != 0 {
@@ -428,7 +483,8 @@ impl LimeSdr {
 
     /// Sets the rate, restarting the stream when it runs.
     fn apply_rate(&mut self, want: u32) -> Result<u32, String> {
-        let chosen = pick_rate(&board_rates(&self.board), want).ok_or("LimeSDR: this board offers no sample rate")?;
+        let chosen =
+            pick_rate(&board_rates(&self.board), want).ok_or("LimeSDR: this board offers no sample rate")?;
         let was_streaming = self.streaming;
         self.halt_stream();
         // SAFETY: `dev` is open; receive channel 0.
@@ -527,7 +583,12 @@ impl RxRadio for LimeSdr {
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         let (lo, hi) = board_freq_range(&self.board);
         if hz < lo || hz > hi {
-            return Err(format!("LimeSDR: {} MHz is outside the range {}-{} MHz", mhz_text(hz), mhz_text(lo), mhz_text(hi)));
+            return Err(format!(
+                "LimeSDR: {} MHz is outside the range {}-{} MHz",
+                mhz_text(hz),
+                mhz_text(lo),
+                mhz_text(hi)
+            ));
         }
         // SAFETY: `dev` is open; receive channel 0.
         if unsafe { (self.api.set_lo)(self.dev, false, 0, hz as f64) } != 0 {
@@ -548,8 +609,12 @@ impl RxRadio for LimeSdr {
             })
             .collect();
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        let pick = input_for_frequency(&self.board, hz, &refs)
-            .ok_or_else(|| format!("LimeSDR: no receive input suits {} MHz on this board", mhz_text(hz)))?;
+        let pick = input_for_frequency(&self.board, hz, &refs).ok_or_else(|| {
+            format!(
+                "LimeSDR: no receive input suits {} MHz on this board",
+                mhz_text(hz)
+            )
+        })?;
         // SAFETY: `pick` is an index into the list the library just gave.
         if unsafe { (self.api.set_input)(self.dev, false, 0, pick) } != 0 {
             return Err(self.fail("the receive input could not be set"));
@@ -567,15 +632,25 @@ impl RxRadio for LimeSdr {
     }
 
     fn gain_stages(&self) -> Vec<GainStage> {
-        vec![GainStage { name: GAIN_STAGE.into(), min_db: 0.0, max_db: GAIN_MAX_DB, step_db: 1.0, auto: false }]
+        vec![GainStage {
+            name: GAIN_STAGE.into(),
+            min_db: 0.0,
+            max_db: GAIN_MAX_DB,
+            step_db: 1.0,
+            auto: false,
+        }]
     }
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != GAIN_STAGE {
-            return Err(format!("LimeSDR has no gain stage named {stage:?}; it has: {GAIN_STAGE}"));
+            return Err(format!(
+                "LimeSDR has no gain stage named {stage:?}; it has: {GAIN_STAGE}"
+            ));
         }
         let db = match setting {
-            GainSetting::Auto => return Err("LimeSDR gain has no automatic setting; give a value in dB".into()),
+            GainSetting::Auto => {
+                return Err("LimeSDR gain has no automatic setting; give a value in dB".into())
+            }
             GainSetting::Manual(v) => v,
         };
         // SAFETY: `dev` is open; receive channel 0.
@@ -606,12 +681,23 @@ impl RxRadio for LimeSdr {
         let mut meta = Meta::default();
         let recv = self.api.recv;
         // SAFETY: the buffer holds 2 * n floats, which is room for n complex samples.
-        let got = unsafe { recv(&mut self.stream, self.buf.as_mut_ptr() as *mut c_void, n, &mut meta, READ_TIMEOUT_MS) };
+        let got = unsafe {
+            recv(
+                &mut self.stream,
+                self.buf.as_mut_ptr() as *mut c_void,
+                n,
+                &mut meta,
+                READ_TIMEOUT_MS,
+            )
+        };
         if got < 0 {
             self.stream_errors += 1;
             if self.stream_errors > MAX_STREAM_ERRORS {
                 self.halt_stream();
-                return Err(self.fail(&format!("the sample stream failed {} times in a row", self.stream_errors)));
+                return Err(self.fail(&format!(
+                    "the sample stream failed {} times in a row",
+                    self.stream_errors
+                )));
             }
             return Ok(0);
         }
@@ -642,7 +728,8 @@ impl RxRadio for LimeSdr {
 mod tests {
     use super::*;
 
-    const MINI_INFO: &str = "LimeSDR Mini, media=USB 3.0, module=FT601, addr=24607:1027, serial=1D40CA8B2ED29A";
+    const MINI_INFO: &str =
+        "LimeSDR Mini, media=USB 3.0, module=FT601, addr=24607:1027, serial=1D40CA8B2ED29A";
 
     #[test]
     fn board_name_and_flags() {
@@ -694,8 +781,14 @@ mod tests {
 
     #[test]
     fn frequency_ranges() {
-        assert_eq!(board_freq_range(&board_from_info(MINI_INFO)), (10_000_000, 3_500_000_000));
-        assert_eq!(board_freq_range(&board_from_info("LimeSDR-USB")), (100_000, 3_800_000_000));
+        assert_eq!(
+            board_freq_range(&board_from_info(MINI_INFO)),
+            (10_000_000, 3_500_000_000)
+        );
+        assert_eq!(
+            board_freq_range(&board_from_info("LimeSDR-USB")),
+            (100_000, 3_800_000_000)
+        );
     }
 
     #[test]
@@ -704,7 +797,10 @@ mod tests {
         let mini_names = ["LNAW", "LNAH", "LNAL_NC"];
         assert_eq!(input_for_frequency(&mini, 900_000_000, &mini_names), Some(0));
         assert_eq!(input_for_frequency(&mini, 2_400_000_000, &mini_names), Some(1));
-        assert_eq!(input_for_frequency(&mini, 500_000_000, &["LNAL_NC", "LNAW", "LNAH"]), Some(1));
+        assert_eq!(
+            input_for_frequency(&mini, 500_000_000, &["LNAL_NC", "LNAW", "LNAH"]),
+            Some(1)
+        );
 
         let wide = board_from_info("LimeSDR-USB");
         let names = ["LNAL", "LNAH", "LNAW"];
@@ -738,7 +834,9 @@ mod tests {
 
     #[test]
     fn missing_library_message() {
-        let err = Api::load(&["kahf-no-such-limesuite-library.so"]).err().expect("loading a missing library must fail");
+        let err = Api::load(&["kahf-no-such-limesuite-library.so"])
+            .err()
+            .expect("loading a missing library must fail");
         assert!(err.contains("cannot load the LimeSuite library"), "{err}");
         assert!(err.contains("install LimeSuite"), "{err}");
         assert!(err.contains("tried"), "{err}");

@@ -112,7 +112,9 @@ pub fn split_message(msg: &[u8]) -> Option<(u16, &[u8])> {
 /// -1.0 .. 1.0 (divided by 32768). A trailing partial sample is ignored.
 pub fn iq_from_i16_le(payload: &[u8]) -> Vec<(f32, f32)> {
     payload
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| {
             let re = i16::from_le_bytes([b[0], b[1]]);
             let im = i16::from_le_bytes([b[2], b[3]]);
@@ -313,7 +315,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
         msg.push(0);
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for t in 0..16 {
             w[t] = u32::from_be_bytes([chunk[4 * t], chunk[4 * t + 1], chunk[4 * t + 2], chunk[4 * t + 3]]);
@@ -329,7 +331,12 @@ fn sha1(data: &[u8]) -> [u8; 20] {
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
                 _ => (b ^ c ^ d, 0xCA62_C1D6),
             };
-            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wt);
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wt);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -359,8 +366,16 @@ fn base64(data: &[u8]) -> String {
         let v = b0 << 16 | b1 << 8 | b2;
         out.push(T[(v >> 18 & 63) as usize] as char);
         out.push(T[(v >> 12 & 63) as usize] as char);
-        out.push(if c.len() > 1 { T[(v >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if c.len() > 2 { T[(v & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(v >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[(v & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -407,19 +422,27 @@ impl Link {
     }
 
     fn set_timeout(&mut self, d: Duration) {
-        let _ = self.stream.set_read_timeout(Some(d.max(Duration::from_millis(1))));
+        let _ = self
+            .stream
+            .set_read_timeout(Some(d.max(Duration::from_millis(1))));
     }
 
     /// Upgrades the TCP connection to WebSocket. Checks the server's accept key.
     fn handshake(&mut self, host: &str, port: u16, addr: &str) -> Result<(), String> {
         self.set_timeout(ANSWER_TIMEOUT);
         let key = base64(&random_bytes16());
-        let hp = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        let hp = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
         let req = format!(
             "GET {PATH} HTTP/1.1\r\nHost: {hp}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
         if self.stream.write_all(req.as_bytes()).is_err() {
-            return Err(format!("nRSP-ST: the connection to {addr} dropped during the handshake"));
+            return Err(format!(
+                "nRSP-ST: the connection to {addr} dropped during the handshake"
+            ));
         }
         let mut head: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
@@ -429,18 +452,31 @@ impl Link {
             }
             match self.stream.read(&mut byte) {
                 Ok(1) => head.push(byte[0]),
-                Ok(_) => return Err(format!("nRSP-ST: the connection to {addr} closed during the handshake")),
-                Err(e) if is_timeout(&e) => {
-                    return Err(format!("nRSP-ST: no answer from {addr} within {} s during the handshake", ANSWER_TIMEOUT.as_secs()))
+                Ok(_) => {
+                    return Err(format!(
+                        "nRSP-ST: the connection to {addr} closed during the handshake"
+                    ))
                 }
-                Err(_) => return Err(format!("nRSP-ST: the connection to {addr} dropped during the handshake")),
+                Err(e) if is_timeout(&e) => {
+                    return Err(format!(
+                        "nRSP-ST: no answer from {addr} within {} s during the handshake",
+                        ANSWER_TIMEOUT.as_secs()
+                    ))
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "nRSP-ST: the connection to {addr} dropped during the handshake"
+                    ))
+                }
             }
         }
         let text = String::from_utf8_lossy(&head).to_string();
         let is_101 = text.starts_with("HTTP/") && text.split_whitespace().nth(1) == Some("101");
         if !is_101 {
             let first = text.lines().next().unwrap_or("").trim();
-            return Err(format!("nRSP-ST: {addr} is not a WebSocket server, or refused the connection: {first}"));
+            return Err(format!(
+                "nRSP-ST: {addr} is not a WebSocket server, or refused the connection: {first}"
+            ));
         }
         let accept = text.lines().find_map(|l| {
             let (k, v) = l.split_once(':')?;
@@ -452,7 +488,9 @@ impl Link {
         });
         let expect = base64(&sha1(format!("{key}{WS_GUID}").as_bytes()));
         if accept.as_deref() != Some(expect.as_str()) {
-            return Err(format!("nRSP-ST: {addr} gave a WebSocket accept key that does not match"));
+            return Err(format!(
+                "nRSP-ST: {addr} gave a WebSocket accept key that does not match"
+            ));
         }
         Ok(())
     }
@@ -609,7 +647,8 @@ struct Peer {
 }
 
 fn absorb(peer: &mut Peer, kv: &HashMap<String, String>) {
-    let (Some(event), Some(prop), Some(value)) = (kv.get("event_type"), kv.get("property"), kv.get("value")) else {
+    let (Some(event), Some(prop), Some(value)) = (kv.get("event_type"), kv.get("property"), kv.get("value"))
+    else {
         return;
     };
     if event != "get_property_response" && event != "property_changed" {
@@ -656,20 +695,24 @@ impl NrspSt {
 
     fn link_mut(&mut self) -> Result<&mut Link, String> {
         let addr = self.addr.clone();
-        self.link.as_mut().ok_or_else(|| format!("nRSP-ST: not connected to {addr}; open it again"))
+        self.link
+            .as_mut()
+            .ok_or_else(|| format!("nRSP-ST: not connected to {addr}; open it again"))
     }
 
     fn send_prop(&mut self, prop: &str, value: &str) -> Result<(), String> {
         let text = control_message("set_property", prop, value);
         let addr = self.addr.clone();
         let link = self.link_mut()?;
-        link.send_text(&text).map_err(|_| format!("nRSP-ST: the connection to {addr} dropped"))
+        link.send_text(&text)
+            .map_err(|_| format!("nRSP-ST: the connection to {addr} dropped"))
     }
 
     fn send_raw(&mut self, text: &str) -> Result<(), String> {
         let addr = self.addr.clone();
         let link = self.link_mut()?;
-        link.send_text(text).map_err(|_| format!("nRSP-ST: the connection to {addr} dropped"))
+        link.send_text(text)
+            .map_err(|_| format!("nRSP-ST: the connection to {addr} dropped"))
     }
 
     fn queue(&mut self, s: (f32, f32)) {
@@ -698,7 +741,9 @@ impl RxRadio for NrspSt {
 
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         if !(MIN_FREQ_HZ..=MAX_FREQ_HZ).contains(&hz) {
-            return Err(format!("nRSP-ST: {hz} Hz is outside the tuning range of 1 kHz to 2 GHz"));
+            return Err(format!(
+                "nRSP-ST: {hz} Hz is outside the tuning range of 1 kHz to 2 GHz"
+            ));
         }
         self.send_prop("device_center_frequency", &hz.to_string())?;
         self.send_prop("device_vfo_frequency", &hz.to_string())
@@ -726,7 +771,9 @@ impl RxRadio for NrspSt {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != LNA_STAGE {
-            return Err(format!("nRSP-ST: no gain stage named {stage:?}; the stage is {LNA_STAGE:?}"));
+            return Err(format!(
+                "nRSP-ST: no gain stage named {stage:?}; the stage is {LNA_STAGE:?}"
+            ));
         }
         let db = match setting {
             GainSetting::Auto => {
@@ -844,8 +891,9 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
         Some(a) if !a.is_empty() => a,
         _ => return Err(NO_ADDRESS.into()),
     };
-    let (host, port) = split_host_port(addr)
-        .ok_or_else(|| format!("nRSP-ST: bad address {addr:?}; use host:port, for example 192.168.1.5:5454"))?;
+    let (host, port) = split_host_port(addr).ok_or_else(|| {
+        format!("nRSP-ST: bad address {addr:?}; use host:port, for example 192.168.1.5:5454")
+    })?;
     let stream = connect(host, port, addr)?;
     let mut link = Link::new(stream);
     link.handshake(host, port, addr)?;
@@ -887,7 +935,8 @@ fn connect(host: &str, port: u16, addr: &str) -> Result<TcpStream, String> {
 fn ask_peer(link: &mut Link, addr: &str) -> Result<Peer, String> {
     let dropped = || format!("nRSP-ST: the connection to {addr} dropped");
     for p in PEER_QUESTIONS {
-        link.send_text(&control_message("get_property", p, "")).map_err(|_| dropped())?;
+        link.send_text(&control_message("get_property", p, ""))
+            .map_err(|_| dropped())?;
     }
     link.set_timeout(ANSWER_TIMEOUT);
     let mut peer = Peer::default();
@@ -973,7 +1022,10 @@ mod tests {
     #[test]
     fn sample_conversion_scales_signed_16_bit_values() {
         assert_eq!(iq_from_i16_le(&[0x00, 0x40, 0x00, 0xC0]), vec![(0.5, -0.5)]);
-        assert_eq!(iq_from_i16_le(&[0x00, 0x80, 0xFF, 0x7F]), vec![(-1.0, 32767.0 / 32768.0)]);
+        assert_eq!(
+            iq_from_i16_le(&[0x00, 0x80, 0xFF, 0x7F]),
+            vec![(-1.0, 32767.0 / 32768.0)]
+        );
         assert_eq!(iq_from_i16_le(&[0x00, 0x40, 0x00, 0xC0, 0x01]).len(), 1);
     }
 
@@ -1112,7 +1164,11 @@ mod tests {
         )
         .unwrap();
         for (p, v) in WS_ANSWERS {
-            send_server_frame(&mut s, 0x1, control_message("get_property_response", p, v).as_bytes());
+            send_server_frame(
+                &mut s,
+                0x1,
+                control_message("get_property_response", p, v).as_bytes(),
+            );
         }
         while let Some((op, payload)) = read_client_frame(&mut s) {
             match op {
@@ -1136,7 +1192,9 @@ mod tests {
     /// Waits until the fake peer has received a message for `prop` with `value`.
     fn expect_set(rx: &mpsc::Receiver<String>, prop: &str, value: &str) {
         loop {
-            let t = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|_| panic!("no {prop} message"));
+            let t = rx
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|_| panic!("no {prop} message"));
             let kv = parse_flat_json(&t).unwrap();
             let named = kv.get("property").map(String::as_str) == Some(prop)
                 || kv.get("event_type").map(String::as_str) == Some(prop);
@@ -1147,7 +1205,11 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     #[test]

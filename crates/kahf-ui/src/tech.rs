@@ -35,7 +35,11 @@ pub fn crc32(data: &[u8]) -> u32 {
     for b in data {
         crc ^= *b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -125,7 +129,16 @@ pub fn transfer(bytes: u32, progress: f32, state: FileState, key: u32, channel: 
     } else {
         0
     };
-    Transfer { bytes, frames, bursts_total: total, bursts_done: done, checksum: crc32(&key.to_le_bytes()), rate_bps, retries, window }
+    Transfer {
+        bytes,
+        frames,
+        bursts_total: total,
+        bursts_done: done,
+        checksum: crc32(&key.to_le_bytes()),
+        rate_bps,
+        retries,
+        window,
+    }
 }
 
 pub fn mail_transfer(m: &Mail) -> Transfer {
@@ -204,11 +217,21 @@ fn dheader<'a>(cols: &[(&str, Length)]) -> El<'a> {
     for (label, w) in cols {
         r = r.push(label_caps(label).size(10).width(*w));
     }
-    container(r).padding([2, 6]).width(Fill).style(theme::header_row).into()
+    container(r)
+        .padding([2, 6])
+        .width(Fill)
+        .style(theme::header_row)
+        .into()
 }
 
 fn drow<'a>(cells: Vec<El<'a>>) -> El<'a> {
-    column![container(Row::with_children(cells).spacing(6)).padding([3, 8]).width(Fill), hline()].into()
+    column![
+        container(Row::with_children(cells).spacing(6))
+            .padding([3, 8])
+            .width(Fill),
+        hline()
+    ]
+    .into()
 }
 
 /// A line of the form "Label    value" with monospace value.
@@ -217,15 +240,13 @@ fn kv<'a>(label: &'static str, value: impl Into<String>, color: Option<Color>) -
     if let Some(c) = color {
         v = v.color(c);
     }
-    container(row![small(label).size(11).width(110), v].spacing(6)).padding([3, 8]).into()
+    container(row![small(label).size(11).width(110), v].spacing(6))
+        .padding([3, 8])
+        .into()
 }
 
 fn section<'a>(title: &'static str, body: impl Into<El<'a>>) -> El<'a> {
-    column![
-        container(label_caps(title)).padding([8, 8]),
-        body.into(),
-    ]
-    .into()
+    column![container(label_caps(title)).padding([8, 8]), body.into(),].into()
 }
 
 /// The right-hand technical panel: a hairline on the left, scrolling content.
@@ -233,7 +254,10 @@ pub fn side_panel<'a>(title: &'static str, content: Column<'a, Message>) -> El<'
     row![
         vline(),
         column![
-            container(label_caps(title).color(theme::TEXT)).padding([8, 8]).width(Fill).style(theme::header_row),
+            container(label_caps(title).color(theme::TEXT))
+                .padding([8, 8])
+                .width(Fill)
+                .style(theme::header_row),
             crate::view::scroll(content),
         ]
         .width(Fill),
@@ -276,13 +300,24 @@ pub fn hop_table<'a>(hops: &[Hop]) -> El<'a> {
     ];
     let mut col = column![dheader(&cols)];
     for (i, h) in hops.iter().enumerate() {
-        let (label, color) =
-            if h.heard { (s::HOP_HEARD, theme::ACCENT) } else { (s::HOP_NOT_HEARD, theme::WARNING) };
+        let (label, color) = if h.heard {
+            (s::HOP_HEARD, theme::ACCENT)
+        } else {
+            (s::HOP_NOT_HEARD, theme::WARNING)
+        };
         col = col.push(drow(vec![
             dcell((i + 1).to_string(), cols[0].1, Some(theme::MUTED)),
             dcell(h.who.clone(), cols[1].1, None),
             dcell(h.role, cols[2].1, Some(theme::MUTED)),
-            dcell(if h.time.is_empty() { "--:--:--".to_string() } else { h.time.clone() }, cols[3].1, None),
+            dcell(
+                if h.time.is_empty() {
+                    "--:--:--".to_string()
+                } else {
+                    h.time.clone()
+                },
+                cols[3].1,
+                None,
+            ),
             dcell(label, cols[4].1, Some(color)),
         ]));
     }
@@ -298,17 +333,33 @@ fn transfer_panel<'a>(tr: &Transfer, state_label: &str) -> Vec<El<'a>> {
     } else {
         "--".to_string()
     };
-    let rate = if tr.rate_bps > 0 { format!("{} B/s", tr.rate_bps) } else { "0 B/s".to_string() };
+    let rate = if tr.rate_bps > 0 {
+        format!("{} B/s", tr.rate_bps)
+    } else {
+        "0 B/s".to_string()
+    };
     vec![
         section(
             "Transfer",
             column![
                 kv("State", state_label, None),
                 kv("Size", format!("{} bytes, {} frames", tr.bytes, tr.frames), None),
-                kv("Bursts", format!("{} of {} done  ({pct:.0}%)", tr.bursts_done, tr.bursts_total), None),
+                kv(
+                    "Bursts",
+                    format!("{} of {} done  ({pct:.0}%)", tr.bursts_done, tr.bursts_total),
+                    None
+                ),
                 kv("Rate", rate, None),
                 kv("Time left", eta, None),
-                kv("Retries", tr.retries.to_string(), if tr.retries > 0 { Some(theme::WARNING) } else { None }),
+                kv(
+                    "Retries",
+                    tr.retries.to_string(),
+                    if tr.retries > 0 {
+                        Some(theme::WARNING)
+                    } else {
+                        None
+                    }
+                ),
                 kv("CRC-32", format!("{:08X}", tr.checksum), None),
             ],
         ),
@@ -316,7 +367,8 @@ fn transfer_panel<'a>(tr: &Transfer, state_label: &str) -> Vec<El<'a>> {
             "Bursts",
             column![
                 burst_table(&tr.window),
-                container(small(format!("Showing {} of {}", tr.window.len(), tr.bursts_total)).size(11)).padding([4, 8]),
+                container(small(format!("Showing {} of {}", tr.window.len(), tr.bursts_total)).size(11))
+                    .padding([4, 8]),
             ],
         ),
     ]
@@ -341,7 +393,11 @@ impl App {
             Some((Busy::Transmitting, until)) => {
                 let left = until.saturating_duration_since(self.clock).as_millis() as u64;
                 let elapsed = 2600u64.saturating_sub(left.min(2600));
-                ((1 + (elapsed / 180) as u32).min(TX_DEMO_FRAMES), TX_DEMO_FRAMES, true)
+                (
+                    (1 + (elapsed / 180) as u32).min(TX_DEMO_FRAMES),
+                    TX_DEMO_FRAMES,
+                    true,
+                )
             }
             _ => (0, TX_DEMO_FRAMES, false),
         }
@@ -361,7 +417,11 @@ impl App {
         let (tx_sent, tx_total, tx_on) = self.tx_burst();
         let w_l = Length::Fixed(64.0);
         let w_c = Length::Fixed(110.0);
-        let (rx_state, rx_color) = if rx_on { ("RECEIVING", theme::ACCENT) } else { ("IDLE", theme::FAINT) };
+        let (rx_state, rx_color) = if rx_on {
+            ("RECEIVING", theme::ACCENT)
+        } else {
+            ("IDLE", theme::FAINT)
+        };
         let (tx_state, tx_color) = if tx_on {
             ("ON AIR", theme::DANGER)
         } else if self.listen_only {
@@ -371,12 +431,22 @@ impl App {
         };
         let dbfs = self.sim.peak_db;
         let rows: Vec<MonitorRow> = vec![
-            ("State", rx_state.into(), Some(rx_color), tx_state.into(), Some(tx_color)),
+            (
+                "State",
+                rx_state.into(),
+                Some(rx_color),
+                tx_state.into(),
+                Some(tx_color),
+            ),
             (
                 "Frames",
                 if rx_on { rx_frames.to_string() } else { "0".into() },
                 None,
-                if tx_on { format!("{tx_sent} of {tx_total}") } else { "0".into() },
+                if tx_on {
+                    format!("{tx_sent} of {tx_total}")
+                } else {
+                    "0".into()
+                },
                 None,
             ),
             (
@@ -386,9 +456,27 @@ impl App {
                 (if tx_on { tx_sent * FRAME_BYTES } else { 0 }).to_string(),
                 None,
             ),
-            ("Channel", self.nearest_channel(), None, self.nearest_channel(), None),
-            ("SNR", format!("{:.0} dB", self.snr_now()), None, "n/a".into(), Some(theme::FAINT)),
-            ("Level", format!("{dbfs:.0} dBFS"), None, format!("{:.0} %", self.level), None),
+            (
+                "Channel",
+                self.nearest_channel(),
+                None,
+                self.nearest_channel(),
+                None,
+            ),
+            (
+                "SNR",
+                format!("{:.0} dB", self.snr_now()),
+                None,
+                "n/a".into(),
+                Some(theme::FAINT),
+            ),
+            (
+                "Level",
+                format!("{dbfs:.0} dBFS"),
+                None,
+                format!("{:.0} %", self.level),
+                None,
+            ),
         ];
         let mut col = column![container(
             Row::new()
@@ -419,25 +507,43 @@ impl App {
             freq_readout(self.tuned_hz(), 30.0),
             column![
                 label_caps(s::INPUT_LEVEL_SHORT),
-                canvas(LevelBar { level: self.level_now, peak: self.level_peak }).width(110).height(12),
-                num(format!("{:.0} dBFS", self.sim.peak_db)).size(11).color(theme::MUTED),
+                canvas(LevelBar {
+                    level: self.level_now,
+                    peak: self.level_peak
+                })
+                .width(110)
+                .height(12),
+                num(format!("{:.0} dBFS", self.sim.peak_db))
+                    .size(11)
+                    .color(theme::MUTED),
             ]
             .spacing(2),
             column![
                 label_caps(s::BAND_LABEL),
-                iced::widget::pick_list(spectrum::Band::ALL, Some(self.band), Message::BandChosen).style(theme::dropdown),
+                iced::widget::pick_list(spectrum::Band::ALL, Some(self.band), Message::BandChosen)
+                    .style(theme::dropdown),
             ]
             .spacing(2),
             kv_inline(s::SEGMENT_LABEL, spectrum::segment_text(self.tuned_hz())),
             kv_inline(s::MODE_LABEL, s::MODE_VALUE.to_string()),
-            kv_inline(s::WIDTH_LABEL, format!("{:.1} kHz", spectrum::BANDWIDTH_HZ / 1000.0)),
+            kv_inline(
+                s::WIDTH_LABEL,
+                format!("{:.1} kHz", spectrum::BANDWIDTH_HZ / 1000.0)
+            ),
             kv_inline(s::OFFSET_LABEL, format!("{offset:+.0} Hz")),
             kv_inline("Span", format!("{:.0} kHz", spectrum::SPAN_HZ / 1000.0)),
             space().width(Fill),
             tip(chip(s::SIMULATED_INPUT, theme::AMBER), s::SIMULATED_HINT),
             tip(
-                btn(if self.band_open { "Hide spectrum" } else { "Show spectrum" }, Kind::Secondary)
-                    .on_press(Message::ToggleBand),
+                btn(
+                    if self.band_open {
+                        "Hide spectrum"
+                    } else {
+                        "Show spectrum"
+                    },
+                    Kind::Secondary
+                )
+                .on_press(Message::ToggleBand),
                 "Collapse or expand the spectrum and waterfall. The choice is remembered.",
             ),
         ]
@@ -456,8 +562,16 @@ impl App {
             .width(Fill)
             .height(sh);
             let waterfall = stack![
-                image(self.wf_handle.clone()).width(Fill).height(wh).content_fit(ContentFit::Fill),
-                canvas(WaterfallMarker { tune: self.tune, scale: full }).width(Fill).height(wh),
+                image(self.wf_handle.clone())
+                    .width(Fill)
+                    .height(wh)
+                    .content_fit(ContentFit::Fill),
+                canvas(WaterfallMarker {
+                    tune: self.tune,
+                    scale: full
+                })
+                .width(Fill)
+                .height(wh),
             ];
             let mut monitor = column![strip(s::MONITOR_HEADING), self.monitor_table()].spacing(0);
             if full {
@@ -465,7 +579,10 @@ impl App {
                 monitor = monitor.push(
                     container(
                         column![
-                            row![space().width(Fill), num(format!("{:.0} dB", self.snr_now())).size(12)],
+                            row![
+                                space().width(Fill),
+                                num(format!("{:.0} dB", self.snr_now())).size(12)
+                            ],
                             canvas(Sparkline { data: &self.snr_hist }).width(Fill).height(34),
                         ]
                         .spacing(2),
@@ -491,7 +608,10 @@ impl App {
         let chats = self.conv_chats();
         let index = self.msg_sel.unwrap_or(chats.len().saturating_sub(1));
         let (Some(chat), Some(hops)) = (chats.get(index), self.selected_route()) else {
-            return side_panel("Technical detail", column![container(muted(s::HOP_NONE_HINT)).padding(10)]);
+            return side_panel(
+                "Technical detail",
+                column![container(muted(s::HOP_NONE_HINT)).padding(10)],
+            );
         };
         let bursts = message_bursts(chat, &hops);
         let delivered = hops.last().is_some_and(|h| h.heard);
@@ -502,7 +622,10 @@ impl App {
         };
         let delivery = if delivered {
             let when = hops.last().map(|h| h.time.clone()).unwrap_or_default();
-            (format!("{} {when}", if chat.mine { "Delivered" } else { "Received" }), theme::ACCENT)
+            (
+                format!("{} {when}", if chat.mine { "Delivered" } else { "Received" }),
+                theme::ACCENT,
+            )
         } else {
             ("Not delivered, retry waiting".to_string(), theme::WARNING)
         };
@@ -515,7 +638,11 @@ impl App {
                     column![
                         kv("Sent at", chat.time.clone(), None),
                         kv("Kind", chat.kind.label(), None),
-                        kv("Size", format!("{bytes} bytes, {} frames", frames_for(bytes)), None),
+                        kv(
+                            "Size",
+                            format!("{bytes} bytes, {} frames", frames_for(bytes)),
+                            None
+                        ),
                         kv("Signature", sig, Some(sig_color)),
                         kv("Delivery", delivery.0, Some(delivery.1)),
                     ],
@@ -537,21 +664,55 @@ impl App {
                     column![
                         kv("Size", format!("{bytes} bytes"), None),
                         kv("Frames", frames_for(bytes).to_string(), None),
-                        kv("Bursts", frames_for(bytes).div_ceil(BURST_FRAMES).max(1).to_string(), None),
-                        kv("Signature", if self.mail_signed { "Will be signed" } else { "Not signed" }, None),
-                        kv("Air time", format!("about {} s", frames_for(bytes).div_ceil(BURST_FRAMES).max(1) * BURST_SECONDS), None),
+                        kv(
+                            "Bursts",
+                            frames_for(bytes).div_ceil(BURST_FRAMES).max(1).to_string(),
+                            None
+                        ),
+                        kv(
+                            "Signature",
+                            if self.mail_signed {
+                                "Will be signed"
+                            } else {
+                                "Not signed"
+                            },
+                            None
+                        ),
+                        kv(
+                            "Air time",
+                            format!(
+                                "about {} s",
+                                frames_for(bytes).div_ceil(BURST_FRAMES).max(1) * BURST_SECONDS
+                            ),
+                            None
+                        ),
                     ],
                 )],
             );
         }
-        let Some(m) = self.mail_sel.and_then(|i| sample::MAILS.get(i)).filter(|_| self.sample) else {
-            return side_panel("Technical detail", column![container(muted("Choose a message to see its bursts.")).padding(10)]);
+        let Some(m) = self
+            .mail_sel
+            .and_then(|i| sample::MAILS.get(i))
+            .filter(|_| self.sample)
+        else {
+            return side_panel(
+                "Technical detail",
+                column![container(muted("Choose a message to see its bursts.")).padding(10)],
+            );
         };
         let tr = mail_transfer(m);
         let mut items = transfer_panel(&tr, "Received in full");
         items.push(section(
             "Signature",
-            kv("State", if m.signed { "Signed, signature valid" } else { "Not signed" }, Some(if m.signed { theme::ACCENT } else { theme::MUTED })),
+            kv(
+                "State",
+                if m.signed {
+                    "Signed, signature valid"
+                } else {
+                    "Not signed"
+                },
+                Some(if m.signed { theme::ACCENT } else { theme::MUTED }),
+            ),
         ));
         side_panel("Technical detail", Column::with_children(items))
     }
@@ -560,7 +721,10 @@ impl App {
         let chats = self.conv_chats();
         let index = self.msg_sel.unwrap_or(chats.len().saturating_sub(1));
         let (Some(chat), Some(hops)) = (chats.get(index), self.selected_route()) else {
-            return side_panel("Hop path", column![container(muted(s::HOP_NONE_HINT)).padding(10)]);
+            return side_panel(
+                "Hop path",
+                column![container(muted(s::HOP_NONE_HINT)).padding(10)],
+            );
         };
         side_panel(
             "Hop path",
@@ -585,11 +749,20 @@ impl App {
             .or_else(|| self.files.iter().position(|f| f.state == FileState::Active))
             .unwrap_or(0);
         let Some(f) = self.files.get(index) else {
-            return side_panel("Technical detail", column![container(muted("No file selected.")).padding(10)]);
+            return side_panel(
+                "Technical detail",
+                column![container(muted("No file selected.")).padding(10)],
+            );
         };
         let tr = file_transfer(f);
         let state = match f.state {
-            FileState::Active => if f.sending { "Sending" } else { "Receiving" },
+            FileState::Active => {
+                if f.sending {
+                    "Sending"
+                } else {
+                    "Receiving"
+                }
+            }
             FileState::Paused => "Paused",
             FileState::Done => "Complete",
             FileState::Cancelled => "Cancelled",
@@ -597,7 +770,18 @@ impl App {
         };
         let mut items = vec![section(
             "File",
-            column![kv("Name", f.name.clone(), None), kv("To", if f.to.is_empty() { "-".to_string() } else { f.to.clone() }, None)],
+            column![
+                kv("Name", f.name.clone(), None),
+                kv(
+                    "To",
+                    if f.to.is_empty() {
+                        "-".to_string()
+                    } else {
+                        f.to.clone()
+                    },
+                    None
+                )
+            ],
         )];
         items.extend(transfer_panel(&tr, state));
         side_panel("Technical detail", Column::with_children(items))
@@ -652,8 +836,12 @@ mod shots {
                 app.modal_alpha = 1.0;
             }
             app.attach_open = name == "operate";
-            let settings = iced::Settings { default_font: crate::theme::UI_FONT, ..Default::default() };
-            let mut sim = iced_test::Simulator::with_size(settings, iced::Size::new(1512.0, 940.0), app.view());
+            let settings = iced::Settings {
+                default_font: crate::theme::UI_FONT,
+                ..Default::default()
+            };
+            let mut sim =
+                iced_test::Simulator::with_size(settings, iced::Size::new(1512.0, 940.0), app.view());
             let snap = sim.snapshot(&app.theme()).unwrap();
             let path = dir.join(format!("{name}.png"));
             let _ = std::fs::remove_file(dir.join(format!("{name}-tiny-skia.png")));

@@ -86,7 +86,10 @@ fn key_from_file_bytes(bytes: &[u8]) -> io::Result<StationKey> {
     let secret: [u8; SECRET_LEN] = bytes.try_into().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("station key file must be {SECRET_LEN} bytes, found {}", bytes.len()),
+            format!(
+                "station key file must be {SECRET_LEN} bytes, found {}",
+                bytes.len()
+            ),
         )
     })?;
     Ok(StationKey::from_bytes(&secret))

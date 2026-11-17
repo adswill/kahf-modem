@@ -53,10 +53,9 @@ pub fn probe() -> Vec<DeviceInfo> {
 
 /// Opens the receiver at `host:port`. A bare serial number is refused with a clear message.
 pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
-    let id = id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "give the receiver's network address as host:port, for example 192.168.1.5:1234".to_string())?;
+    let id = id.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+        "give the receiver's network address as host:port, for example 192.168.1.5:1234".to_string()
+    })?;
     if !id.contains(':') {
         return Err(format!(
             "{id:?} looks like a serial number. USB receivers are not supported yet; give the network address as host:port"
@@ -123,9 +122,27 @@ impl RxRadio for IcomNet {
 
     fn gain_stages(&self) -> Vec<GainStage> {
         vec![
-            GainStage { name: "rfgain".into(), min_db: 0.0, max_db: 255.0, step_db: 1.0, auto: false },
-            GainStage { name: "att".into(), min_db: 0.0, max_db: 30.0, step_db: 10.0, auto: false },
-            GainStage { name: "preamp".into(), min_db: 0.0, max_db: 1.0, step_db: 1.0, auto: false },
+            GainStage {
+                name: "rfgain".into(),
+                min_db: 0.0,
+                max_db: 255.0,
+                step_db: 1.0,
+                auto: false,
+            },
+            GainStage {
+                name: "att".into(),
+                min_db: 0.0,
+                max_db: 30.0,
+                step_db: 10.0,
+                auto: false,
+            },
+            GainStage {
+                name: "preamp".into(),
+                min_db: 0.0,
+                max_db: 1.0,
+                step_db: 1.0,
+                auto: false,
+            },
         ]
     }
 
@@ -248,7 +265,9 @@ impl IcomNet {
             reads += 1;
             let n = match self.stream.read(&mut buf) {
                 Ok(0) => {
-                    return Err(format!("{LABEL}: the connection closed while waiting for a CI-V answer"))
+                    return Err(format!(
+                        "{LABEL}: the connection closed while waiting for a CI-V answer"
+                    ))
                 }
                 Ok(n) => n,
                 Err(e) if is_timeout(&e) => {
@@ -296,6 +315,7 @@ struct IqDecoder {
 }
 
 impl IqDecoder {
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn feed(&mut self, bytes: &[u8], out: &mut Vec<(i16, i16)>) {
         let mut rest = bytes;
         if let Some(lo) = self.byte_carry.take() {
@@ -342,7 +362,12 @@ impl IqDecoder {
 /// Finds an ack or refusal frame. Returns (true for ack, index just after the frame).
 fn find_answer(seen: &[u8]) -> Option<(bool, usize)> {
     for k in 0..seen.len().saturating_sub(5) {
-        if seen[k] == 0xfe && seen[k + 1] == 0xfe && seen[k + 2] == 0xe0 && seen[k + 3] == 0x96 && seen[k + 5] == CIV_TAIL {
+        if seen[k] == 0xfe
+            && seen[k + 1] == 0xfe
+            && seen[k + 2] == 0xe0
+            && seen[k + 3] == 0x96
+            && seen[k + 5] == CIV_TAIL
+        {
             match seen[k + 4] {
                 0xfb => return Some((true, k + 6)),
                 0xfa => return Some((false, k + 6)),
@@ -389,12 +414,18 @@ fn set_rate_payload(index: usize) -> Vec<u8> {
 
 /// RF gain 0 to 255 in radio units, as two BCD bytes after the 0x14 0x02 sub-command.
 fn rfgain_payload(n: u32) -> Vec<u8> {
-    vec![0x14, 0x02, (n / 100) as u8, ((((n % 100) / 10) << 4) | (n % 10)) as u8]
+    vec![
+        0x14,
+        0x02,
+        (n / 100) as u8,
+        ((((n % 100) / 10) << 4) | (n % 10)) as u8,
+    ]
 }
 
 /// Splits "host:port" or "[v6-address]:port". The port must be 1 to 65535.
 fn split_host_port(id: &str) -> Result<(String, u16), String> {
-    let bad = || format!("{id:?} is not a host and port; write it as host:port, for example 192.168.1.5:1234");
+    let bad =
+        || format!("{id:?} is not a host and port; write it as host:port, for example 192.168.1.5:1234");
     let (host, port) = if let Some(rest) = id.strip_prefix('[') {
         let end = rest.find(']').ok_or_else(bad)?;
         let port = rest[end + 1..].strip_prefix(':').ok_or_else(bad)?;
@@ -440,7 +471,10 @@ fn connect_error(id: &str, e: Option<io::Error>) -> String {
                 format!("{id} refused the connection; check that the receiver is on its network and the port is right")
             }
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
-                format!("no answer from {id} within {} s; check the address and the network", CONNECT_TIMEOUT.as_secs())
+                format!(
+                    "no answer from {id} within {} s; check the address and the network",
+                    CONNECT_TIMEOUT.as_secs()
+                )
             }
             _ => format!("could not connect to {id}: {e}"),
         },
@@ -557,7 +591,10 @@ mod tests {
 
     #[test]
     fn host_port_parsing() {
-        assert_eq!(split_host_port("192.168.1.5:1234").unwrap(), ("192.168.1.5".to_string(), 1234));
+        assert_eq!(
+            split_host_port("192.168.1.5:1234").unwrap(),
+            ("192.168.1.5".to_string(), 1234)
+        );
         assert_eq!(split_host_port("[::1]:1234").unwrap(), ("::1".to_string(), 1234));
         assert!(split_host_port("192.168.1.5").is_err());
         assert!(split_host_port("host:0").is_err());
@@ -651,7 +688,11 @@ mod tests {
         let t = Instant::now();
         let n = r.read_iq(&mut out).unwrap();
         assert_eq!(n, 0);
-        assert!(t.elapsed() < Duration::from_millis(900), "waited {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_millis(900),
+            "waited {:?}",
+            t.elapsed()
+        );
         h.join().unwrap();
     }
 

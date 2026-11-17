@@ -316,7 +316,7 @@ impl SdrppRadio {
         let data = &body[8..];
         match sample_type {
             SAMPLE_FLOAT => {
-                for c in data.chunks_exact(8) {
+                for c in data.as_chunks::<8>().0 {
                     let i = f32_at(c, 0).unwrap_or(0.0);
                     let q = f32_at(c, 4).unwrap_or(0.0);
                     self.push_sample(i, q);
@@ -324,7 +324,7 @@ impl SdrppRadio {
             }
             SAMPLE_INT16 => {
                 let m = scale / 32768.0;
-                for c in data.chunks_exact(4) {
+                for c in data.as_chunks::<4>().0 {
                     let i = i16::from_le_bytes([c[0], c[1]]) as f32 * m;
                     let q = i16::from_le_bytes([c[2], c[3]]) as f32 * m;
                     self.push_sample(i, q);
@@ -332,7 +332,7 @@ impl SdrppRadio {
             }
             SAMPLE_INT8 => {
                 let m = scale / 128.0;
-                for c in data.chunks_exact(2) {
+                for c in data.as_chunks::<2>().0 {
                     self.push_sample(c[0] as i8 as f32 * m, c[1] as i8 as f32 * m);
                 }
             }
@@ -417,7 +417,11 @@ impl RxRadio for SdrppRadio {
             }
         };
         if !acked {
-            let detail = self.server_error.take().map(|e| format!(" (server said: {e})")).unwrap_or_default();
+            let detail = self
+                .server_error
+                .take()
+                .map(|e| format!(" (server said: {e})"))
+                .unwrap_or_default();
             return Err(format!(
                 "{} did not confirm the frequency within {} s{detail}",
                 self.id,
@@ -436,7 +440,8 @@ impl RxRadio for SdrppRadio {
     /// The server runs at one rate, and this driver cannot change it. The rate in use is
     /// returned, which is the only rate the server offers.
     fn set_sample_rate(&mut self, _hz: u32) -> Result<u32, String> {
-        self.rate_hz().ok_or_else(|| format!("{} has not reported its sample rate yet", self.id))
+        self.rate_hz()
+            .ok_or_else(|| format!("{} has not reported its sample rate yet", self.id))
     }
 
     /// The gain is set in the server's own menu, so the driver lists no stages.
@@ -497,7 +502,11 @@ impl RxRadio for SdrppRadio {
         }
         if self.queue.is_empty() && self.last_rx.elapsed() > STALL_LIMIT {
             self.alive = false;
-            return Err(format!("no samples from {} for {} s", self.id, STALL_LIMIT.as_secs()));
+            return Err(format!(
+                "no samples from {} for {} s",
+                self.id,
+                STALL_LIMIT.as_secs()
+            ));
         }
         let n = out.len().min(self.queue.len());
         for (slot, s) in out.iter_mut().zip(self.queue.drain(..n)) {
@@ -712,7 +721,11 @@ mod tests {
         let mut buf = vec![(0.0f32, 0.0f32); 8];
         let t = Instant::now();
         assert_eq!(radio.read_iq(&mut buf), Ok(0));
-        assert!(t.elapsed() < Duration::from_millis(600), "waited {:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_millis(600),
+            "waited {:?}",
+            t.elapsed()
+        );
     }
 
     #[test]
@@ -803,7 +816,10 @@ mod tests {
 
     #[test]
     fn address_must_be_host_and_port() {
-        assert_eq!(split_host_port("192.168.1.5:5259").unwrap(), ("192.168.1.5".to_string(), 5259));
+        assert_eq!(
+            split_host_port("192.168.1.5:5259").unwrap(),
+            ("192.168.1.5".to_string(), 5259)
+        );
         assert_eq!(split_host_port("[::1]:5259").unwrap(), ("::1".to_string(), 5259));
         assert!(split_host_port("192.168.1.5").is_err());
         assert!(split_host_port("192.168.1.5:0").is_err());

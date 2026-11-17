@@ -35,7 +35,6 @@ pub const SAMPLE_BANNER: &str =
 // Operate
 pub const BAND_LABEL: &str = "Band";
 pub const MODE_LABEL: &str = "Mode";
-pub const BAND_VALUE: &str = "40 m";
 pub const MODE_VALUE: &str = "Data";
 pub const DATA_NOT_CHOSEN: &str = "Not chosen yet";
 pub const WIDTH_LABEL: &str = "Width";
@@ -55,7 +54,6 @@ pub const MESSAGE_LIMIT: usize = 500;
 // Right column
 pub const LINK_HEADING: &str = "Link";
 pub const TRANSMIT_HEADING: &str = "Transmit";
-pub const LAST_MESSAGE_HEADING: &str = "Last message";
 pub const TARGET_LABEL: &str = "Station";
 pub const TARGET_PLACEHOLDER: &str = "Callsign to connect to";
 pub const STATE_LABEL: &str = "State";
@@ -69,9 +67,7 @@ pub const DISCONNECT: &str = "Disconnect";
 pub const SEND_BEACON: &str = "Send beacon";
 pub const NOT_REPORTED: &str = "Not reported yet";
 pub const NO_LINK_TEXT: &str = "Not linked to any station.";
-pub const NO_MESSAGES_SENT: &str = "No message sent in this session.";
-pub const LISTEN_ONLY_WHY: &str =
-    "Transmit is off because Listen only is on. Nothing leaves this computer.";
+pub const LISTEN_ONLY_WHY: &str = "Transmit is off because Listen only is on. Nothing leaves this computer.";
 pub const LISTEN_ONLY_TURN_OFF: &str = "Turn off Listen only";
 pub const ATTACH: &str = "Attach file";
 pub const ATTACH_PATH_LABEL: &str = "File to send";
@@ -96,8 +92,7 @@ pub const CONFIRM_TX_CALL: &str = "Your callsign";
 pub const CONFIRM_TX_BUTTON: &str = "Transmit";
 pub const CONFIRM_CANCEL: &str = "Cancel";
 pub const CONFIRM_DISCONNECT_TITLE: &str = "Disconnect?";
-pub const CONFIRM_DISCONNECT_BODY: &str =
-    "The link will close and any message still being sent will stop.";
+pub const CONFIRM_DISCONNECT_BODY: &str = "The link will close and any message still being sent will stop.";
 pub const CONFIRM_DISCONNECT_KEEP: &str = "Keep link";
 pub const CONFIRM_ESC_HINT: &str = "Press Escape to cancel";
 pub const ACTION_CONNECT: &str = "Connect";
@@ -258,8 +253,10 @@ pub const MAP_SUMMARY: &str = "This session";
 // Draft for owner legal review: the relay terms text below must be checked by a lawyer before release.
 pub const RELAY_MODAL_TITLE: &str = "Relay mode";
 pub const RELAY_MODAL_BODY: &str = "In some countries the law prohibits automatic stations unless the operator holds a licence for them. In Finland, an automatic station needs a licence or permit from Traficom. Relay mode forwards messages while the operator may not be at the station.";
-pub const RELAY_TICK_LICENCE: &str = "I hold the licence or permit my country requires for an automatic station.";
-pub const RELAY_TICK_TERMS: &str = "I accept the terms of use. KAHF is not responsible for what I do with it.";
+pub const RELAY_TICK_LICENCE: &str =
+    "I hold the licence or permit my country requires for an automatic station.";
+pub const RELAY_TICK_TERMS: &str =
+    "I accept the terms of use. KAHF is not responsible for what I do with it.";
 pub const RELAY_CANCEL: &str = "Cancel";
 pub const RELAY_START: &str = "Start relay";
 pub const TOAST_RELAY_STARTED: &str = "Relay mode started.";
@@ -287,7 +284,8 @@ pub const SET_DATA: &str = "Data folder";
 pub const SET_DATA_DESC: &str = "Where messages, mail, files and the logbook are stored.";
 pub const SET_DATA_PATH: &str = "Folder";
 pub const SET_LOCATION: &str = "Location sharing";
-pub const SET_LOCATION_DESC: &str = "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
+pub const SET_LOCATION_DESC: &str =
+    "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
 pub const LOC_OFF: &str = "Off";
 pub const LOC_OFF_DESC: &str = "Nobody sees your location.";
 pub const LOC_PRECISE: &str = "Precise";
@@ -379,8 +377,10 @@ pub const HOP_NONE_HINT: &str = "Choose a message to see the path it took.";
 pub const COL_HEARD: &str = "Heard";
 
 // Tooltips
-pub const TIP_CALL_SET: &str = "Your callsign. It is sent with every transmission. Change it in Settings, Station.";
-pub const TIP_CALL_UNSET: &str = "No callsign yet. Transmit stays blocked until you set one in Settings, Station.";
+pub const TIP_CALL_SET: &str =
+    "Your callsign. It is sent with every transmission. Change it in Settings, Station.";
+pub const TIP_CALL_UNSET: &str =
+    "No callsign yet. Transmit stays blocked until you set one in Settings, Station.";
 pub const TIP_LINK_IDLE: &str = "No station is connected. Choose a station and press Connect on Operate.";
 pub const TIP_LINK_UP: &str = "Messages go to this station. The link stays open until you disconnect.";
 pub const TIP_TX_BLOCKED: &str = "Transmit is off because Listen only is on. Turn Listen only off to send.";
@@ -389,7 +389,8 @@ pub const TIP_TX_READY: &str =
 pub const TIP_LISTEN: &str = "When on, nothing is sent. KAHF only receives. Shortcut Ctrl+L.";
 pub const TIP_UTC: &str = "Universal time, used for schedules and the logbook.";
 pub const TIP_COMMANDS: &str = "Find any action by typing. Shortcut Ctrl+K.";
-pub const TIP_STATUS_ENGINE: &str = "The part that does the radio work. It is not running yet, so screens show sample or simulated data.";
+pub const TIP_STATUS_ENGINE: &str =
+    "The part that does the radio work. It is not running yet, so screens show sample or simulated data.";
 pub const TIP_STATUS_RIG: &str = "Link to your radio for tuning and keying.";
 pub const TIP_STATUS_AUDIO: &str = "Sound card used to hear and send signals.";
 pub const TIP_STATUS_UPDATES: &str = "KAHF only checks for updates when you ask.";
@@ -439,11 +440,11 @@ pub const TIP_RAIL_STATIONS: &str = "Stations you have heard.";
 pub const TIP_RAIL_MESSAGES: &str = "Your conversations and the route each message took.";
 pub const TIP_RAIL_MAIL: &str = "Longer messages that can wait in an inbox.";
 pub const TIP_RAIL_FILES: &str = "Files being sent or received.";
-pub const TIP_RAIL_RELAY: &str = "Schedule and log for passing messages on. Used when this station is a relay.";
+pub const TIP_RAIL_RELAY: &str =
+    "Schedule and log for passing messages on. Used when this station is a relay.";
 pub const TIP_RAIL_LOGBOOK: &str = "A record of your contacts.";
 pub const TIP_RAIL_MAP: &str = "Where stations are, and the path of a message.";
 pub const TIP_RAIL_SETTINGS: &str = "Callsign, audio, radio and privacy choices.";
-
 
 // ---- Setup, blocked actions and plain-word explanations
 pub const SETUP_TITLE: &str = "Set up KAHF";
@@ -462,12 +463,14 @@ pub const STEP_RADIO: &str = "Choose your radio";
 pub const STEP_SDR: &str = "Choose your SDR";
 pub const STEP_AUDIO: &str = "Choose audio input and output";
 pub const STEP_LOCATION: &str = "Location sharing";
-pub const STEP_LOCATION_HINT: &str = "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
+pub const STEP_LOCATION_HINT: &str =
+    "Precise shows your exact position on the public map. You can choose Off or Area at any time.";
 pub const STEP_LISTEN: &str = "Listen only";
 pub const STEP_CALL_HINT: &str = "Sent with every transmission. Letters and digits only.";
 pub const STEP_RADIO_HINT: &str = "KAHF talks to a radio through rigctld. Pick no rig if you tune by hand.";
 pub const STEP_SDR_HINT: &str = "Use a software defined radio instead of a sound card, or none.";
-pub const STEP_AUDIO_HINT: &str = "The sound card connected to your radio. Watch the meter while a signal plays.";
+pub const STEP_AUDIO_HINT: &str =
+    "The sound card connected to your radio. Watch the meter while a signal plays.";
 pub const STEP_LISTEN_HINT: &str = "The app receives but never transmits until you turn this off.";
 pub const RIG_ADDR_LABEL: &str = "rigctld address";
 pub const RIG_ADDR_PLACEHOLDER: &str = "host:port, for example 192.168.1.20:4532";
@@ -478,16 +481,19 @@ pub const SDR_RTL_NOTE: &str = "RTL-SDR can only receive. Choose a sound card or
 pub const DETECTED: &str = "Detected";
 pub const NOTHING_DETECTED: &str = "No devices found. Plug one in and press Rescan.";
 pub const RESCAN: &str = "Rescan";
-pub const BLOCK_LISTEN: &str = "Sending is off because Listen only is on. Turn it off in the top bar, then try again.";
+pub const BLOCK_LISTEN: &str =
+    "Sending is off because Listen only is on. Turn it off in the top bar, then try again.";
 pub const BLOCK_NO_TO: &str = "Type the station's callsign in To, then press Send.";
 pub const BLOCK_NO_TEXT: &str = "Write a message first, then press Send.";
 pub const BLOCK_NO_CALL: &str = "Set your callsign in Settings, then try again.";
 pub const BLOCK_NO_FILE: &str = "Type the path of the file to send, then press Send file.";
 pub const BLOCK_FILE_MISSING: &str = "That file cannot be found. Check the path and try again.";
 pub const BLOCK_BEACON: &str = "A beacon needs Listen only off. Turn it off in the top bar, then try again.";
-pub const BLOCK_NO_ENGINE: &str = "The engine did not start. Check your callsign and audio in Settings, then try again.";
+pub const BLOCK_NO_ENGINE: &str =
+    "The engine did not start. Check your callsign and audio in Settings, then try again.";
 pub const BLOCK_MAIL_NO_TO: &str = "Type the station's callsign in To, then press Queue.";
-pub const BLOCK_START_FILE: &str = "Sending is off because Listen only is on. Turn it off in the top bar, then press Start.";
+pub const BLOCK_START_FILE: &str =
+    "Sending is off because Listen only is on. Turn it off in the top bar, then press Start.";
 pub const TOAST_FILE_QUEUED: &str = "File queued for sending.";
 
 // Console frame
@@ -513,7 +519,8 @@ pub const STATUS_MESSAGES: &str = "Messages";
 pub const CHANNEL_RATE: &str = "12 kS/s";
 pub const TIP_SOURCE: &str = "Where the signal comes from: the sound card or a software defined radio.";
 pub const TIP_CENTRE: &str = "The centre frequency of the capture. The tuned channel sits inside it.";
-pub const TIP_RECORD: &str = "Start recording the received signal. Nothing is written while the input is simulated.";
+pub const TIP_RECORD: &str =
+    "Start recording the received signal. Nothing is written while the input is simulated.";
 pub const TIP_STOP: &str = "Stop the recording.";
 pub const TIP_MODE: &str = "How the signal is decoded. Data is the only mode so far.";
 pub const STATIONS_HEARD_HEADING: &str = "Stations heard";

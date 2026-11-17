@@ -45,7 +45,11 @@ impl CarrierSense {
 
     /// Add one frame of mean power for this channel. Invalid values count as zero.
     pub fn push(&mut self, power: f32) {
-        let p = if power.is_finite() && power > 0.0 { power } else { 0.0 };
+        let p = if power.is_finite() && power > 0.0 {
+            power
+        } else {
+            0.0
+        };
         self.frames.push_back(p);
         if self.frames.len() > LEVEL_FRAMES {
             self.frames.pop_front();

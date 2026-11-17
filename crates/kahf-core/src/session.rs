@@ -852,7 +852,12 @@ mod tests {
 
         let msg = chat();
         let forged_block = auth_for(&msg, "KA9ZZZ");
-        let forged = decode_signed(&raw_stream(META_SIGNED | (KIND_CHAT << 1), &forged_block, &serialise(&msg))).unwrap();
+        let forged = decode_signed(&raw_stream(
+            META_SIGNED | (KIND_CHAT << 1),
+            &forged_block,
+            &serialise(&msg),
+        ))
+        .unwrap();
         assert_eq!(signature_label(&forged), "Signature not verified");
     }
 

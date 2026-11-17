@@ -95,7 +95,9 @@ fn parse_address(text: &str) -> Result<SocketAddr, String> {
         },
     };
     if !addr.is_ipv4() {
-        return Err(format!("{text:?}: only IPv4 addresses are supported for the Hermes Lite 2"));
+        return Err(format!(
+            "{text:?}: only IPv4 addresses are supported for the Hermes Lite 2"
+        ));
     }
     Ok(addr)
 }
@@ -179,9 +181,7 @@ fn control_regs(cc: usize) -> [u8; 2] {
 fn register_value(reg: u8, freq_hz: u32, rate_idx: usize, lna_raw: u8) -> u32 {
     match reg {
         // rate in bits 25..24, filter relays in bits 23..16, one receiver (bits 6..3), bit 2 set
-        REG_RATE => {
-            ((rate_idx as u32 & 3) << 24) | (filter_bits(freq_hz as f64) << 16) | 0x04
-        }
+        REG_RATE => ((rate_idx as u32 & 3) << 24) | (filter_bits(freq_hz as f64) << 16) | 0x04,
         REG_TX_NCO | REG_RX1_NCO => freq_hz,
         REG_LNA => 0x40 | (lna_raw as u32 & 0x3f),
         _ => 0,
@@ -225,7 +225,8 @@ fn decode_slots(f0: &[u8], f1: &[u8], out: &mut Vec<(f32, f32)>) {
 
 fn discover_at(targets: &[SocketAddr], timeout: Duration) -> Result<Vec<DeviceInfo>, String> {
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("cannot open a network socket: {e}"))?;
-    sock.set_broadcast(true).map_err(|e| format!("cannot allow broadcast: {e}"))?;
+    sock.set_broadcast(true)
+        .map_err(|e| format!("cannot allow broadcast: {e}"))?;
     let q = discovery_packet();
     for t in targets {
         // a target that cannot be reached is skipped; the others still answer
@@ -242,32 +243,31 @@ fn discover_at(targets: &[SocketAddr], timeout: Duration) -> Result<Vec<DeviceIn
         }
         sock.set_read_timeout(Some((end - now).max(Duration::from_millis(1))))
             .map_err(|e| format!("cannot set the discovery wait: {e}"))?;
-        match sock.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                let Ok(r) = parse_discovery_reply(&buf[..n]) else { continue };
-                if r.board_id != BOARD_HL2 || seen.contains(&from.ip()) {
-                    continue;
-                }
-                seen.push(from.ip());
-                let mut label = format!("Hermes Lite 2 at {}", from.ip());
-                match r.gateware_minor {
-                    Some(minor) => label.push_str(&format!(", gateware {}.{}", r.gateware_major, minor)),
-                    None => label.push_str(&format!(", gateware {}", r.gateware_major)),
-                }
-                if r.receivers > 0 {
-                    label.push_str(&format!(", {} receivers", r.receivers));
-                }
-                if r.busy {
-                    label.push_str(" (busy, streaming to another host)");
-                }
-                found.push(DeviceInfo {
-                    driver: "hermeslite2",
-                    label,
-                    id: from.ip().to_string(),
-                });
+        // a read that times out or an error from an unreachable host: keep listening until the end time
+        if let Ok((n, from)) = sock.recv_from(&mut buf) {
+            let Ok(r) = parse_discovery_reply(&buf[..n]) else {
+                continue;
+            };
+            if r.board_id != BOARD_HL2 || seen.contains(&from.ip()) {
+                continue;
             }
-            // a read that times out or an error from an unreachable host: keep listening until the end time
-            Err(_) => {}
+            seen.push(from.ip());
+            let mut label = format!("Hermes Lite 2 at {}", from.ip());
+            match r.gateware_minor {
+                Some(minor) => label.push_str(&format!(", gateware {}.{}", r.gateware_major, minor)),
+                None => label.push_str(&format!(", gateware {}", r.gateware_major)),
+            }
+            if r.receivers > 0 {
+                label.push_str(&format!(", {} receivers", r.receivers));
+            }
+            if r.busy {
+                label.push_str(" (busy, streaming to another host)");
+            }
+            found.push(DeviceInfo {
+                driver: "hermeslite2",
+                label,
+                id: from.ip().to_string(),
+            });
         }
     }
     Ok(found)
@@ -581,10 +581,14 @@ impl RxRadio for Hl2 {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != "LNA" {
-            return Err(format!("the Hermes Lite 2 has no gain stage named {stage:?}; its stage is LNA"));
+            return Err(format!(
+                "the Hermes Lite 2 has no gain stage named {stage:?}; its stage is LNA"
+            ));
         }
         match setting {
-            GainSetting::Auto => Err("the Hermes Lite 2 LNA has no automatic setting; give a value in dB".into()),
+            GainSetting::Auto => {
+                Err("the Hermes Lite 2 LNA has no automatic setting; give a value in dB".into())
+            }
             GainSetting::Manual(db) => {
                 if !db.is_finite() {
                     return Err("the LNA gain must be a number of dB".into());
@@ -686,7 +690,9 @@ mod tests {
             let mut buf = [0u8; 1500];
             let mut sent = false;
             while !done_t.load(Ordering::SeqCst) {
-                let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
+                let Ok((n, from)) = sock.recv_from(&mut buf) else {
+                    continue;
+                };
                 let pkt = buf[..n].to_vec();
                 if n == DISCOVERY_LEN && pkt[2] == 0x02 {
                     let _ = sock.send_to(&discovery_reply(BOARD_HL2, false), from);
@@ -700,7 +706,12 @@ mod tests {
                 let _ = tx.send(pkt);
             }
         });
-        Peer { addr, rx, done, handle: Some(handle) }
+        Peer {
+            addr,
+            rx,
+            done,
+            handle: Some(handle),
+        }
     }
 
     fn driver_for(peer: &Peer) -> Hl2 {
@@ -724,7 +735,13 @@ mod tests {
         let r = parse_discovery_reply(&discovery_reply(6, true)).unwrap();
         assert_eq!(
             r,
-            DiscoveryReply { busy: true, gateware_major: 7, gateware_minor: Some(3), board_id: 6, receivers: 4 }
+            DiscoveryReply {
+                busy: true,
+                gateware_major: 7,
+                gateware_minor: Some(3),
+                board_id: 6,
+                receivers: 4
+            }
         );
         let short_reply = parse_discovery_reply(&[0xEF, 0xFE, 0x02, 0, 0]);
         assert!(short_reply.is_err());
@@ -810,7 +827,11 @@ mod tests {
     fn sample_packet_decodes_in_order_q_then_i() {
         let p = sample_packet(0);
         let mut out = Vec::new();
-        decode_slots(&p[HEADER..HEADER + FRAME_LEN], &p[HEADER + FRAME_LEN..PACKET_LEN], &mut out);
+        decode_slots(
+            &p[HEADER..HEADER + FRAME_LEN],
+            &p[HEADER + FRAME_LEN..PACKET_LEN],
+            &mut out,
+        );
         assert_eq!(out.len(), 2 * SLOTS);
         let (i0, q0) = out[0];
         assert!((i0 - 1000.0 * SCALE).abs() < 1e-9);
@@ -881,7 +902,10 @@ mod tests {
         let r = open(Some("127.0.0.1:5555")).unwrap();
         assert_eq!(r.label(), "Hermes Lite 2 at 127.0.0.1:5555");
         assert_eq!(parse_address("10.0.0.2").unwrap().port(), PORT);
-        assert_eq!(parse_address("10.0.0.2").unwrap().ip(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            parse_address("10.0.0.2").unwrap().ip(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
     }
 
     #[test]
@@ -931,7 +955,10 @@ mod tests {
         let err = loop {
             match r.read_iq(&mut [(0.0, 0.0); 64]) {
                 Ok(0) => {
-                    assert!(t.elapsed() < Duration::from_secs(3), "the stall was not reported in time");
+                    assert!(
+                        t.elapsed() < Duration::from_secs(3),
+                        "the stall was not reported in time"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => break e,
@@ -952,7 +979,11 @@ mod tests {
     #[test]
     fn closed_port_is_a_clear_error() {
         // take a free port, then close it: nothing listens there
-        let port = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let mut r = open(Some(&format!("127.0.0.1:{port}"))).unwrap();
         let err = r.start().unwrap_err();
         assert!(err.contains("Hermes Lite 2"), "{err}");

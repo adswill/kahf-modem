@@ -101,7 +101,10 @@ pub fn parse_address(text: &str) -> Result<Address, String> {
             _ => return Err(format!("the port {p:?} is not a number from 1 to 65535")),
         },
     };
-    Ok(Address { host: host.trim().to_string(), port })
+    Ok(Address {
+        host: host.trim().to_string(),
+        port,
+    })
 }
 
 // ---- text commands -------------------------------------------------------------------------------
@@ -166,7 +169,9 @@ fn url_decode(text: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             if let Some(v) = hex {
                 out.push(v);
                 i += 3;
@@ -183,7 +188,11 @@ fn url_decode(text: &str) -> String {
 /// Values are URL-encoded. A token with no '=' is a flag and gets an empty value.
 pub fn parse_msg(body: &[u8]) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for token in body.get(4..).unwrap_or(&[]).split(|b| *b == b' ' || *b == b'\n' || *b == 0) {
+    for token in body
+        .get(4..)
+        .unwrap_or(&[])
+        .split(|b| *b == b' ' || *b == b'\n' || *b == 0)
+    {
         if token.is_empty() {
             continue;
         }
@@ -199,17 +208,23 @@ pub fn parse_msg(body: &[u8]) -> Vec<(String, String)> {
 /// The error text for a MSG name=value that ends the session, or None for an ordinary one.
 pub fn msg_error(name: &str, value: &str) -> Option<String> {
     match name {
-        "too_busy" => Some(format!("all user slots of the KiwiSDR are in use ({value} users); try again later")),
+        "too_busy" => Some(format!(
+            "all user slots of the KiwiSDR are in use ({value} users); try again later"
+        )),
         "badp" => match value {
             "0" => None, // the password was accepted
             "1" => Some("the KiwiSDR refused the connection: wrong password, or no free channel".into()),
             "2" => Some("the KiwiSDR is still starting up; try again in a moment".into()),
-            "5" => Some("this KiwiSDR allows only one connection from this address; close the other one first".into()),
+            "5" => Some(
+                "this KiwiSDR allows only one connection from this address; close the other one first".into(),
+            ),
             "6" => Some("the KiwiSDR is updating its database; try again in about a minute".into()),
             other => Some(format!("the KiwiSDR refused the connection (code {other})")),
         },
         "down" => Some("the KiwiSDR is down (maintenance or restart)".into()),
-        "redirect" => Some("the KiwiSDR asks to use another address; this driver does not follow redirects".into()),
+        "redirect" => {
+            Some("the KiwiSDR asks to use another address; this driver does not follow redirects".into())
+        }
         "inactivity_timeout" | "ip_limit_exceeded" | "tlimit" | "time_limit" => {
             Some("the KiwiSDR's time limit for one listener ran out".into())
         }
@@ -247,10 +262,16 @@ pub fn parse_snd(msg: &[u8]) -> Result<Option<Snd>, String> {
     let seq = u32::from_le_bytes([msg[4], msg[5], msg[6], msg[7]]);
     let little = flags & SND_LITTLE_ENDIAN != 0;
     let samples = msg[20..]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| {
             let read = |b: &[u8]| {
-                let v = if little { i16::from_le_bytes([b[0], b[1]]) } else { i16::from_be_bytes([b[0], b[1]]) };
+                let v = if little {
+                    i16::from_le_bytes([b[0], b[1]])
+                } else {
+                    i16::from_be_bytes([b[0], b[1]])
+                };
                 v as f32 / 32768.0
             };
             (read(&c[0..2]), read(&c[2..4]))
@@ -318,7 +339,9 @@ pub fn parse_server_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, String> 
         n => (n as u64, 2),
     };
     if len > MAX_MESSAGE as u64 {
-        return Err(format!("a frame of {len} bytes is over the {MAX_MESSAGE} byte limit"));
+        return Err(format!(
+            "a frame of {len} bytes is over the {MAX_MESSAGE} byte limit"
+        ));
     }
     let len = len as usize;
     if buf.len() < head + len {
@@ -337,8 +360,16 @@ pub fn base64(bytes: &[u8]) -> String {
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
         out.push(ALPHA[(n >> 18) as usize & 63] as char);
         out.push(ALPHA[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHA[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHA[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHA[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHA[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -370,7 +401,10 @@ pub struct KiwiSdr {
 
 impl KiwiSdr {
     fn new(addr: Address) -> Self {
-        let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
         KiwiSdr {
             label: format!("KiwiSDR at {}", addr.display()),
             addr,
@@ -403,7 +437,10 @@ impl KiwiSdr {
         let mask = self.next_mask();
         let bytes = encode_client_frame(opcode, payload, mask);
         let addr = self.addr.display();
-        let stream = self.stream.as_mut().ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
         stream
             .write_all(&bytes)
             .map_err(|e| format!("could not send to the KiwiSDR at {addr}: {e}"))
@@ -421,7 +458,10 @@ impl KiwiSdr {
         }
         let addr = self.addr.display();
         let mut chunk = [0u8; 8192];
-        let stream = self.stream.as_mut().ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
         stream
             .set_read_timeout(Some(deadline - now))
             .map_err(|e| format!("could not set the read wait for the KiwiSDR at {addr}: {e}"))?;
@@ -431,7 +471,14 @@ impl KiwiSdr {
                 self.inbuf.extend_from_slice(&chunk[..n]);
                 Ok(true)
             }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 Ok(false)
             }
             Err(e) => Err(format!("lost the connection to the KiwiSDR at {addr}: {e}")),
@@ -445,23 +492,29 @@ impl KiwiSdr {
             if let Some((frame, used)) = parse_server_frame(&self.inbuf)? {
                 self.inbuf.drain(..used);
                 match frame.opcode {
-                    0x8 => return Err(format!("the KiwiSDR at {} closed the connection", self.addr.display())),
+                    0x8 => {
+                        return Err(format!(
+                            "the KiwiSDR at {} closed the connection",
+                            self.addr.display()
+                        ))
+                    }
                     0x9 => self.send_frame(0xA, &frame.payload)?,
                     0xA => {}
-                    0x0 | 0x1 | 0x2 => {
+                    0x0..=0x2 => {
                         if frame.opcode != 0 {
                             if self.fragments.is_some() {
                                 return Err("the KiwiSDR started a message before the last one ended".into());
                             }
                             self.fragments = Some(Vec::new());
                         }
-                        let buf = self
-                            .fragments
-                            .as_mut()
-                            .ok_or_else(|| "the KiwiSDR sent a continuation frame with no message to continue".to_string())?;
+                        let buf = self.fragments.as_mut().ok_or_else(|| {
+                            "the KiwiSDR sent a continuation frame with no message to continue".to_string()
+                        })?;
                         buf.extend_from_slice(&frame.payload);
                         if buf.len() > MAX_MESSAGE {
-                            return Err(format!("a message from the KiwiSDR is over the {MAX_MESSAGE} byte limit"));
+                            return Err(format!(
+                                "a message from the KiwiSDR is over the {MAX_MESSAGE} byte limit"
+                            ));
                         }
                         if frame.fin {
                             return Ok(self.fragments.take());
@@ -494,10 +547,16 @@ impl KiwiSdr {
                 ));
             }
             if self.inbuf.len() > MAX_HEADER {
-                return Err(format!("the KiwiSDR at {} sent a reply header that is too long", self.addr.display()));
+                return Err(format!(
+                    "the KiwiSDR at {} sent a reply header that is too long",
+                    self.addr.display()
+                ));
             }
             if !self.read_some(deadline)? {
-                return Err(format!("the KiwiSDR at {} did not answer the WebSocket request in time", self.addr.display()));
+                return Err(format!(
+                    "the KiwiSDR at {} did not answer the WebSocket request in time",
+                    self.addr.display()
+                ));
             }
         }
     }
@@ -548,7 +607,10 @@ impl KiwiSdr {
             chunk.copy_from_slice(&self.next_mask());
         }
         let key = base64(&raw);
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let path = format!("/kiwi/{secs}/SND");
         let request = handshake_request(&self.addr, &path, &key);
         self.send_raw_text(request.as_bytes())?;
@@ -557,7 +619,10 @@ impl KiwiSdr {
 
     fn send_raw_text(&mut self, bytes: &[u8]) -> Result<(), String> {
         let addr = self.addr.display();
-        let stream = self.stream.as_mut().ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| format!("the KiwiSDR at {addr} is not connected"))?;
         stream
             .write_all(bytes)
             .map_err(|e| format!("could not send to the KiwiSDR at {addr}: {e}"))
@@ -669,7 +734,9 @@ impl RxRadio for KiwiSdr {
 
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         if !(MIN_FREQ_HZ..=MAX_FREQ_HZ).contains(&hz) {
-            return Err(format!("{hz} Hz is outside the KiwiSDR range of 10 kHz to 30 MHz"));
+            return Err(format!(
+                "{hz} Hz is outside the KiwiSDR range of 10 kHz to 30 MHz"
+            ));
         }
         self.freq_hz = hz;
         if self.stream.is_some() {
@@ -699,7 +766,9 @@ impl RxRadio for KiwiSdr {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != GAIN_STAGE {
-            return Err(format!("this radio has no gain stage named {stage:?}; its stage is {GAIN_STAGE:?}"));
+            return Err(format!(
+                "this radio has no gain stage named {stage:?}; its stage is {GAIN_STAGE:?}"
+            ));
         }
         self.gain = match setting {
             GainSetting::Manual(db) => GainSetting::Manual(db.clamp(0.0, GAIN_MAX_DB)),
@@ -768,22 +837,46 @@ mod tests {
     use super::*;
 
     fn kiwi(host: &str, port: u16) -> KiwiSdr {
-        KiwiSdr::new(Address { host: host.into(), port })
+        KiwiSdr::new(Address {
+            host: host.into(),
+            port,
+        })
     }
 
     #[test]
     fn tune_command_text() {
-        assert_eq!(cmd_tune(7_074_000), "SET mod=iq low_cut=-5000 high_cut=5000 freq=7074.000");
-        assert_eq!(cmd_tune(10_000), "SET mod=iq low_cut=-5000 high_cut=5000 freq=10.000");
-        assert_eq!(cmd_tune(14_200_500), "SET mod=iq low_cut=-5000 high_cut=5000 freq=14200.500");
+        assert_eq!(
+            cmd_tune(7_074_000),
+            "SET mod=iq low_cut=-5000 high_cut=5000 freq=7074.000"
+        );
+        assert_eq!(
+            cmd_tune(10_000),
+            "SET mod=iq low_cut=-5000 high_cut=5000 freq=10.000"
+        );
+        assert_eq!(
+            cmd_tune(14_200_500),
+            "SET mod=iq low_cut=-5000 high_cut=5000 freq=14200.500"
+        );
     }
 
     #[test]
     fn gain_command_text() {
-        assert_eq!(cmd_agc(GainSetting::Auto), "SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=0");
-        assert_eq!(cmd_agc(GainSetting::Manual(45.4)), "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=45");
-        assert_eq!(cmd_agc(GainSetting::Manual(200.0)), "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=120");
-        assert_eq!(cmd_agc(GainSetting::Manual(-3.0)), "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=0");
+        assert_eq!(
+            cmd_agc(GainSetting::Auto),
+            "SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=0"
+        );
+        assert_eq!(
+            cmd_agc(GainSetting::Manual(45.4)),
+            "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=45"
+        );
+        assert_eq!(
+            cmd_agc(GainSetting::Manual(200.0)),
+            "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=120"
+        );
+        assert_eq!(
+            cmd_agc(GainSetting::Manual(-3.0)),
+            "SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=0"
+        );
     }
 
     #[test]
@@ -797,7 +890,10 @@ mod tests {
 
     #[test]
     fn upgrade_request_text() {
-        let addr = Address { host: "192.168.1.20".into(), port: 8073 };
+        let addr = Address {
+            host: "192.168.1.20".into(),
+            port: 8073,
+        };
         let text = handshake_request(&addr, "/kiwi/1700000000/SND", "dGhlIHNhbXBsZSBub25jZQ==");
         assert!(text.starts_with("GET /kiwi/1700000000/SND HTTP/1.1\r\n"));
         assert!(text.contains("\r\nHost: 192.168.1.20:8073\r\n"));
@@ -808,10 +904,28 @@ mod tests {
 
     #[test]
     fn address_parsing() {
-        assert_eq!(parse_address("192.168.1.20:8073").unwrap(), Address { host: "192.168.1.20".into(), port: 8073 });
-        assert_eq!(parse_address("kiwi.example").unwrap(), Address { host: "kiwi.example".into(), port: 8073 });
+        assert_eq!(
+            parse_address("192.168.1.20:8073").unwrap(),
+            Address {
+                host: "192.168.1.20".into(),
+                port: 8073
+            }
+        );
+        assert_eq!(
+            parse_address("kiwi.example").unwrap(),
+            Address {
+                host: "kiwi.example".into(),
+                port: 8073
+            }
+        );
         let v6 = parse_address("[::1]:8074").unwrap();
-        assert_eq!(v6, Address { host: "::1".into(), port: 8074 });
+        assert_eq!(
+            v6,
+            Address {
+                host: "::1".into(),
+                port: 8074
+            }
+        );
         assert_eq!(v6.display(), "[::1]:8074");
         assert!(parse_address("").unwrap_err().contains("host:port"));
         assert!(parse_address("::1").unwrap_err().contains("brackets"));
@@ -860,10 +974,24 @@ mod tests {
         let frame = [0x82u8, 3, b'x', b'y', b'z', 0x81, 0x01, b'q'];
         let (f, used) = parse_server_frame(&frame).unwrap().unwrap();
         assert_eq!(used, 5);
-        assert_eq!(f, Frame { fin: true, opcode: 2, payload: b"xyz".to_vec() });
+        assert_eq!(
+            f,
+            Frame {
+                fin: true,
+                opcode: 2,
+                payload: b"xyz".to_vec()
+            }
+        );
         let (g, used2) = parse_server_frame(&frame[5..]).unwrap().unwrap();
         assert_eq!(used2, 3);
-        assert_eq!(g, Frame { fin: true, opcode: 1, payload: b"q".to_vec() });
+        assert_eq!(
+            g,
+            Frame {
+                fin: true,
+                opcode: 1,
+                payload: b"q".to_vec()
+            }
+        );
     }
 
     #[test]
@@ -879,8 +1007,12 @@ mod tests {
 
     #[test]
     fn server_frame_errors() {
-        assert!(parse_server_frame(&[0x82, 0x81, 0, 0, 0, 0, 1]).unwrap_err().contains("masked"));
-        assert!(parse_server_frame(&[0xC2, 0x00]).unwrap_err().contains("reserved"));
+        assert!(parse_server_frame(&[0x82, 0x81, 0, 0, 0, 0, 1])
+            .unwrap_err()
+            .contains("masked"));
+        assert!(parse_server_frame(&[0xC2, 0x00])
+            .unwrap_err()
+            .contains("reserved"));
         let big = [0x82u8, 127, 0, 0, 0, 1, 0, 0, 0, 0]; // 4 GiB
         assert!(parse_server_frame(&big).unwrap_err().contains("byte limit"));
     }
@@ -909,7 +1041,9 @@ mod tests {
         assert!(msg_error("badp", "0").is_none());
         assert!(msg_error("badp", "9").unwrap().contains("code 9"));
         assert!(msg_error("down", "1").unwrap().contains("down"));
-        assert!(msg_error("inactivity_timeout", "1").unwrap().contains("time limit"));
+        assert!(msg_error("inactivity_timeout", "1")
+            .unwrap()
+            .contains("time limit"));
         assert!(msg_error("kick_by_admin", "1").unwrap().contains("disconnected"));
         assert!(msg_error("sample_rate", "12000").is_none());
     }
@@ -954,10 +1088,16 @@ mod tests {
         assert_eq!(radio.freq_range_hz(), (10_000, 30_000_000));
         assert_eq!(radio.sample_rates(), vec![12_000]);
         assert_eq!(radio.set_sample_rate(48_000), Ok(12_000));
-        assert!(radio.set_frequency_hz(5_000).unwrap_err().contains("outside the KiwiSDR range"));
+        assert!(radio
+            .set_frequency_hz(5_000)
+            .unwrap_err()
+            .contains("outside the KiwiSDR range"));
         assert!(radio.set_frequency_hz(14_074_000).is_ok());
         assert_eq!(radio.gain_stages().len(), 1);
-        assert!(radio.set_gain("LNA", GainSetting::Auto).unwrap_err().contains("no gain stage named"));
+        assert!(radio
+            .set_gain("LNA", GainSetting::Auto)
+            .unwrap_err()
+            .contains("no gain stage named"));
         assert!(radio.set_gain(GAIN_STAGE, GainSetting::Manual(500.0)).is_ok());
         assert_eq!(radio.gain, GainSetting::Manual(120.0));
         let mut out = [(0.0f32, 0.0f32); 4];

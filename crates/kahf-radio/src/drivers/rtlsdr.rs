@@ -27,14 +27,21 @@ const READ_WAIT: Duration = Duration::from_millis(200);
 const QUEUED_BLOCKS: usize = 32;
 const DEFAULT_RATE: u32 = 2_048_000;
 /// Rates the dongle offers. 0.3 to 0.9 Msps is refused by librtlsdr, so 900001 Hz is the lowest.
-const RATES: [u32; 8] = [900_001, 1_024_000, 1_200_000, 1_536_000, 1_800_000, 2_048_000, 2_400_000, 2_560_000];
+const RATES: [u32; 8] = [
+    900_001, 1_024_000, 1_200_000, 1_536_000, 1_800_000, 2_048_000, 2_400_000, 2_560_000,
+];
 const MAX_DEVICES: u32 = 16;
 /// Gain set when the radio opens, in dB. The operator can change it with set_gain.
 const OPEN_GAIN_DB: f32 = 30.0;
-const LOST: &str = "the RTL-SDR stopped sending samples. It may have been unplugged: plug it in and start again.";
+const LOST: &str =
+    "the RTL-SDR stopped sending samples. It may have been unplugged: plug it in and start again.";
 
 #[cfg(target_os = "macos")]
-const LIB_NAMES: &[&str] = &["librtlsdr.dylib", "/opt/homebrew/lib/librtlsdr.dylib", "/usr/local/lib/librtlsdr.dylib"];
+const LIB_NAMES: &[&str] = &[
+    "librtlsdr.dylib",
+    "/opt/homebrew/lib/librtlsdr.dylib",
+    "/usr/local/lib/librtlsdr.dylib",
+];
 #[cfg(windows)]
 const LIB_NAMES: &[&str] = &["rtlsdr.dll", "librtlsdr.dll"];
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -96,7 +103,10 @@ unsafe impl Sync for Handle {}
 unsafe fn sym<T: Copy>(lib: &Library, name: &'static [u8]) -> Result<T, String> {
     match lib.get::<T>(name) {
         Ok(s) => Ok(*s),
-        Err(e) => Err(format!("the RTL-SDR library has no {}: {e}", String::from_utf8_lossy(&name[..name.len() - 1]))),
+        Err(e) => Err(format!(
+            "the RTL-SDR library has no {}: {e}",
+            String::from_utf8_lossy(&name[..name.len() - 1])
+        )),
     }
 }
 
@@ -145,7 +155,12 @@ fn usb_strings(api: &Api, index: u32) -> Option<(String, String, String)> {
     let mut serial = [0u8; 256];
     // SAFETY: each buffer is 256 bytes, which is more than the library writes.
     let rc = unsafe {
-        (api.strings)(index, manufacturer.as_mut_ptr().cast(), product.as_mut_ptr().cast(), serial.as_mut_ptr().cast())
+        (api.strings)(
+            index,
+            manufacturer.as_mut_ptr().cast(),
+            product.as_mut_ptr().cast(),
+            serial.as_mut_ptr().cast(),
+        )
     };
     if rc != 0 {
         return None;
@@ -163,8 +178,16 @@ fn list(api: &Api) -> Vec<DeviceInfo> {
                 Some((_, product, serial)) => (product, serial),
                 None => (String::new(), String::new()),
             };
-            let label = if product.is_empty() { fallback_name(api, index) } else { product };
-            DeviceInfo { driver: DRIVER, label, id: serial }
+            let label = if product.is_empty() {
+                fallback_name(api, index)
+            } else {
+                product
+            };
+            DeviceInfo {
+                driver: DRIVER,
+                label,
+                id: serial,
+            }
         })
         .collect()
 }
@@ -177,7 +200,11 @@ fn fallback_name(api: &Api, index: u32) -> String {
     }
     // SAFETY: checked for null above; the library's name is a C string.
     let name = unsafe { CStr::from_ptr(p) }.to_string_lossy().trim().to_string();
-    if name.is_empty() { "RTL-SDR".into() } else { name }
+    if name.is_empty() {
+        "RTL-SDR".into()
+    } else {
+        name
+    }
 }
 
 /// Finds the radios this computer can use. Returns quickly; an absent library gives an empty list.
@@ -195,7 +222,11 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let plugged = if devices.is_empty() {
         "none".to_string()
     } else {
-        devices.iter().map(|d| d.id.clone()).collect::<Vec<_>>().join(", ")
+        devices
+            .iter()
+            .map(|d| d.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let index = match id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(serial) => devices.iter().position(|d| d.id == serial).ok_or_else(|| {
@@ -222,8 +253,8 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let handle = Handle(dev);
     // SAFETY: the handle is open; control calls only.
     let tuner = unsafe {
-        (api.set_agc)(dev, 0);          // the chip's own AGC stays off: the operator sets the gain
-        (api.set_gain_mode)(dev, 1);    // manual tuner gain
+        (api.set_agc)(dev, 0); // the chip's own AGC stays off: the operator sets the gain
+        (api.set_gain_mode)(dev, 1); // manual tuner gain
         if let Some(ppm) = api.set_ppm {
             ppm(dev, 0);
         }
@@ -263,22 +294,30 @@ fn read_gains(api: &Api, dev: *mut c_void) -> Vec<i32> {
 /// Tuning range in Hz for a tuner type (librtlsdr's enum rtlsdr_tuner). Unknown tuners get the R820T range.
 fn tuner_range(tuner: i32) -> (u64, u64) {
     match tuner {
-        1 => (52_000_000, 2_200_000_000),  // E4000
-        2 => (22_000_000, 948_600_000),    // FC0012
-        3 => (22_000_000, 1_100_000_000),  // FC0013
-        4 => (146_000_000, 924_000_000),   // FC2580
-        _ => (24_000_000, 1_766_000_000),  // R820T / R828D (below 24 MHz needs direct sampling, not written)
+        1 => (52_000_000, 2_200_000_000), // E4000
+        2 => (22_000_000, 948_600_000),   // FC0012
+        3 => (22_000_000, 1_100_000_000), // FC0013
+        4 => (146_000_000, 924_000_000),  // FC2580
+        _ => (24_000_000, 1_766_000_000), // R820T / R828D (below 24 MHz needs direct sampling, not written)
     }
 }
 
 fn nearest_rate(hz: u32) -> u32 {
-    RATES.iter().copied().min_by_key(|r| r.abs_diff(hz)).unwrap_or(DEFAULT_RATE)
+    RATES
+        .iter()
+        .copied()
+        .min_by_key(|r| r.abs_diff(hz))
+        .unwrap_or(DEFAULT_RATE)
 }
 
 /// Gain in tenths of a dB, the closest the tuner offers to `db`. `gains` must not be empty.
 fn nearest_gain(gains: &[i32], db: f32) -> i32 {
     let want = (db * 10.0).round() as i32;
-    gains.iter().copied().min_by_key(|g| (g - want).abs()).unwrap_or(0)
+    gains
+        .iter()
+        .copied()
+        .min_by_key(|g| (g - want).abs())
+        .unwrap_or(0)
 }
 
 /// Bytes per read in the macOS block mode: about 0.1 s of samples, in whole 16 KiB units.
@@ -504,7 +543,10 @@ impl RxRadio for RtlRadio {
         // SAFETY: hz is within the tuner range, so it fits the library's 32-bit frequency.
         let rc = unsafe { (self.api.set_freq)(self.dev.0, hz as u32) };
         if rc != 0 {
-            return Err(format!("the RTL-SDR refused {} MHz (error {rc}). Check the frequency and try again.", mhz(hz)));
+            return Err(format!(
+                "the RTL-SDR refused {} MHz (error {rc}). Check the frequency and try again.",
+                mhz(hz)
+            ));
         }
         Ok(())
     }
@@ -518,7 +560,9 @@ impl RxRadio for RtlRadio {
         // SAFETY: control call on the open handle.
         let rc = unsafe { (self.api.set_rate)(self.dev.0, want) };
         if rc != 0 {
-            return Err(format!("the RTL-SDR refused the sample rate {want} Hz (error {rc}). Use one of the offered rates."));
+            return Err(format!(
+                "the RTL-SDR refused the sample rate {want} Hz (error {rc}). Use one of the offered rates."
+            ));
         }
         // SAFETY: plain query on the open handle.
         let got = unsafe { (self.api.get_rate)(self.dev.0) };
@@ -545,7 +589,9 @@ impl RxRadio for RtlRadio {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != STAGE {
-            return Err(format!("this radio has no gain stage named {stage:?}; it has: {STAGE}"));
+            return Err(format!(
+                "this radio has no gain stage named {stage:?}; it has: {STAGE}"
+            ));
         }
         let (mode, tenths) = match setting {
             GainSetting::Auto => (0, None),
@@ -564,7 +610,10 @@ impl RxRadio for RtlRadio {
         if let Some(t) = tenths {
             let rc = unsafe { (self.api.set_gain)(self.dev.0, t) };
             if rc != 0 {
-                return Err(format!("the RTL-SDR refused the gain of {:.1} dB (error {rc}).", t as f32 / 10.0));
+                return Err(format!(
+                    "the RTL-SDR refused the gain of {:.1} dB (error {rc}).",
+                    t as f32 / 10.0
+                ));
             }
         }
         Ok(())
@@ -577,7 +626,9 @@ impl RxRadio for RtlRadio {
         // SAFETY: control call on the open handle; the reader starts after it.
         let rc = unsafe { (self.api.reset_buffer)(self.dev.0) };
         if rc != 0 {
-            return Err(format!("the RTL-SDR would not reset its buffer (error {rc}). Unplug it and plug it in again."));
+            return Err(format!(
+                "the RTL-SDR would not reset its buffer (error {rc}). Unplug it and plug it in again."
+            ));
         }
         let (tx, rx) = mpsc::sync_channel(QUEUED_BLOCKS);
         let running = Arc::new(AtomicBool::new(true));

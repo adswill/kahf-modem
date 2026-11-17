@@ -2,7 +2,7 @@
 //! Accents mark state only: green receiving, amber selected or waiting, red record or error, blue info.
 
 use iced::widget::{button, container, pick_list, progress_bar, text_editor, text_input, toggler};
-use iced::{Background, Border, Color, Font, Shadow, Theme, font, theme::Palette};
+use iced::{font, theme::Palette, Background, Border, Color, Font, Shadow, Theme};
 
 pub const RADIUS: f32 = 0.0;
 pub const HAIRLINE_WIDTH: f32 = 1.0;
@@ -132,7 +132,11 @@ pub fn header_row(_theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(MUTED),
         background: Some(Background::Color(HEADER)),
-        border: Border { color: HAIRLINE, width: 1.0, radius: 0.0.into() },
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
         ..Default::default()
     }
 }
@@ -185,7 +189,11 @@ pub fn chip(_color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
         text_color: Some(TEXT),
         background: Some(Background::Color(RAISED)),
-        border: Border { color: HAIRLINE, width: 1.0, radius: 0.0.into() },
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
         ..Default::default()
     }
 }
@@ -214,7 +222,11 @@ pub fn nav_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
         button::Style {
             background: background.map(Background::Color),
             text_color,
-            border: Border { color: Color::TRANSPARENT, width: 0.0, radius: RADIUS.into() },
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: RADIUS.into(),
+            },
             ..Default::default()
         }
     }
@@ -240,7 +252,12 @@ pub fn btn(kind: Kind) -> impl Fn(&Theme, button::Status) -> button::Style {
             Kind::Danger => DANGER,
             _ => RAISED,
         };
-        let shade = |c: Color, f: f32| Color { r: c.r * f, g: c.g * f, b: c.b * f, a: c.a };
+        let shade = |c: Color, f: f32| Color {
+            r: c.r * f,
+            g: c.g * f,
+            b: c.b * f,
+            a: c.a,
+        };
         let lift = |c: Color, f: f32| Color {
             r: c.r + (1.0 - c.r) * f,
             g: c.g + (1.0 - c.g) * f,
@@ -249,16 +266,34 @@ pub fn btn(kind: Kind) -> impl Fn(&Theme, button::Status) -> button::Style {
         };
         let (fg, bg, line) = match kind {
             Kind::Primary | Kind::Danger => {
-                let bg = if pressed { shade(base, 0.82) } else if hovered { lift(base, 0.14) } else { base };
+                let bg = if pressed {
+                    shade(base, 0.82)
+                } else if hovered {
+                    lift(base, 0.14)
+                } else {
+                    base
+                };
                 (BACKGROUND, bg, shade(base, 0.7))
             }
             Kind::Secondary => {
-                let bg = if pressed { shade(RAISED, 0.8) } else if hovered { lift(RAISED, 0.06) } else { RAISED };
+                let bg = if pressed {
+                    shade(RAISED, 0.8)
+                } else if hovered {
+                    lift(RAISED, 0.06)
+                } else {
+                    RAISED
+                };
                 (TEXT, bg, if hovered { HAIRLINE_STRONG } else { HAIRLINE })
             }
             Kind::Ghost => (
                 if hovered || pressed { TEXT } else { MUTED },
-                if pressed { RAISED } else if hovered { with_alpha(RAISED, 0.7) } else { Color::TRANSPARENT },
+                if pressed {
+                    RAISED
+                } else if hovered {
+                    with_alpha(RAISED, 0.7)
+                } else {
+                    Color::TRANSPARENT
+                },
                 Color::TRANSPARENT,
             ),
         };
@@ -273,7 +308,14 @@ pub fn btn(kind: Kind) -> impl Fn(&Theme, button::Status) -> button::Style {
                 ..Default::default()
             };
         }
-        let ring = pressed.then_some(with_alpha(if matches!(kind, Kind::Danger) { DANGER } else { ACCENT }, 0.85));
+        let ring = pressed.then_some(with_alpha(
+            if matches!(kind, Kind::Danger) {
+                DANGER
+            } else {
+                ACCENT
+            },
+            0.85,
+        ));
         button::Style {
             background: Some(Background::Color(bg)),
             text_color: fg,
@@ -306,9 +348,19 @@ pub fn segment(selected: bool, first: bool, last: bool) -> impl Fn(&Theme, butto
             } else {
                 BACKGROUND
             })),
-            text_color: if selected { AMBER } else if hovered { TEXT } else { MUTED },
+            text_color: if selected {
+                AMBER
+            } else if hovered {
+                TEXT
+            } else {
+                MUTED
+            },
             border: Border {
-                color: if selected { with_alpha(AMBER, 0.7) } else { HAIRLINE },
+                color: if selected {
+                    with_alpha(AMBER, 0.7)
+                } else {
+                    HAIRLINE
+                },
                 width: 1.0,
                 radius,
             },
@@ -342,7 +394,13 @@ pub fn switch(_theme: &Theme, status: toggler::Status) -> toggler::Style {
     toggler::Style {
         background: Background::Color(track),
         background_border_width: 1.0,
-        background_border_color: if on { ACCENT } else if hovered { HAIRLINE_STRONG } else { HAIRLINE },
+        background_border_color: if on {
+            ACCENT
+        } else if hovered {
+            HAIRLINE_STRONG
+        } else {
+            HAIRLINE
+        },
         foreground: Background::Color(if on { BACKGROUND } else { MUTED }),
         foreground_border_width: 0.0,
         foreground_border_color: Color::TRANSPARENT,
@@ -357,7 +415,11 @@ pub fn progress(_theme: &Theme) -> progress_bar::Style {
     progress_bar::Style {
         background: Background::Color(BACKGROUND),
         bar: Background::Color(ACCENT),
-        border: Border { color: HAIRLINE, width: 1.0, radius: 0.0.into() },
+        border: Border {
+            color: HAIRLINE,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
     }
 }
 
@@ -369,7 +431,11 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     };
     text_input::Style {
         background: Background::Color(BACKGROUND),
-        border: Border { color: line, width, radius: RADIUS.into() },
+        border: Border {
+            color: line,
+            width,
+            radius: RADIUS.into(),
+        },
         icon: MUTED,
         placeholder: FAINT,
         value: TEXT,
@@ -385,7 +451,11 @@ pub fn editor(_theme: &Theme, status: text_editor::Status) -> text_editor::Style
     };
     text_editor::Style {
         background: Background::Color(BACKGROUND),
-        border: Border { color: line, width, radius: RADIUS.into() },
+        border: Border {
+            color: line,
+            width,
+            radius: RADIUS.into(),
+        },
         placeholder: FAINT,
         value: TEXT,
         selection: with_alpha(ACCENT, 0.35),

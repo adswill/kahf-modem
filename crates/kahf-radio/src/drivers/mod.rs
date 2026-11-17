@@ -18,8 +18,8 @@ pub mod rfnm;
 pub mod rtlsdr;
 pub mod rtltcp;
 pub mod rx888;
-pub mod sdrpp;
 pub mod sdrplay;
+pub mod sdrpp;
 pub mod soapy;
 pub mod spyserver;
 pub mod tci;
@@ -28,9 +28,27 @@ pub mod usrp;
 use crate::{DeviceInfo, RxRadio};
 
 pub const NAMES: &[&str] = &[
-    "airspy", "airspyhf", "bladerf", "fobos", "hackrf", "hermeslite2", "icom", "kiwisdr",
-    "limesdr", "nrspst", "plutosdr", "rfnm", "rtlsdr", "rtltcp", "rx888", "sdrpp", "sdrplay",
-    "soapy", "spyserver", "tci", "usrp",
+    "airspy",
+    "airspyhf",
+    "bladerf",
+    "fobos",
+    "hackrf",
+    "hermeslite2",
+    "icom",
+    "kiwisdr",
+    "limesdr",
+    "nrspst",
+    "plutosdr",
+    "rfnm",
+    "rtlsdr",
+    "rtltcp",
+    "rx888",
+    "sdrpp",
+    "sdrplay",
+    "soapy",
+    "spyserver",
+    "tci",
+    "usrp",
 ];
 
 pub fn probe_all() -> Vec<DeviceInfo> {

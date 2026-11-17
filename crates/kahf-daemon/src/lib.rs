@@ -18,15 +18,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
-use kahf_core::frame;
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
-use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
+use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::{self, Modulation};
+use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
 use kahf_core::select::{self, Refusal};
 use kahf_core::sense::Sense;
 use kahf_core::session::{self, Message};
@@ -444,7 +444,10 @@ impl Engine {
         let names = files.iter().map(|(n, _)| n.clone()).collect();
         let to = to.trim().to_string();
         let from = self.config.callsign.clone();
-        let body = match (&self.shared.station_key, self.shared.flags.sign_mail.load(Ordering::SeqCst)) {
+        let body = match (
+            &self.shared.station_key,
+            self.shared.flags.sign_mail.load(Ordering::SeqCst),
+        ) {
             (Some(key), true) => sign_body(key, &from, body),
             _ => body.to_string(),
         };
@@ -501,7 +504,10 @@ impl Engine {
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
         let (station_key, key_error) = match auth::load_or_create(&config.data_dir) {
             Ok(k) => (Some(k), None),
-            Err(e) => (None, Some(format!("station key not loaded, mail will not be signed: {e}"))),
+            Err(e) => (
+                None,
+                Some(format!("station key not loaded, mail will not be signed: {e}")),
+            ),
         };
         let shared = Arc::new(Shared {
             events: Mutex::new(EventQueue::default()),
@@ -931,7 +937,13 @@ fn hilbert_taps() -> &'static [f32] {
 
 /// Hilbert transform of audio at index idx (zero outside the buffer).
 fn hilbert_at(x: &[f32], idx: isize) -> f32 {
-    let at = |i: isize| usize::try_from(i).ok().and_then(|u| x.get(u)).copied().unwrap_or(0.0);
+    let at = |i: isize| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|u| x.get(u))
+            .copied()
+            .unwrap_or(0.0)
+    };
     let taps = hilbert_taps();
     let mut acc = 0f32;
     for k in (1..=SDR_HILBERT_HALF).step_by(2) {
@@ -1446,7 +1458,7 @@ fn split_signature(body: &str, sender: &str) -> (String, String) {
     };
     let text = &body[..at];
     let hex = body[at + SIG_MARK.len()..].trim();
-    let block: Option<Vec<u8>> = (hex.len() % 2 == 0 && hex.is_ascii())
+    let block: Option<Vec<u8>> = (hex.len().is_multiple_of(2) && hex.is_ascii())
         .then(|| {
             (0..hex.len())
                 .step_by(2)
@@ -1862,14 +1874,8 @@ impl Worker {
             if lo > hi || bins_db.is_empty() {
                 continue;
             }
-            let power: f32 = bins_db[lo..=hi]
-                .iter()
-                .map(|db| 10f32.powf(db / 10.0))
-                .sum();
-            self.carrier
-                .entry(carrier_key(ch))
-                .or_default()
-                .push(power);
+            let power: f32 = bins_db[lo..=hi].iter().map(|db| 10f32.powf(db / 10.0)).sum();
+            self.carrier.entry(carrier_key(ch)).or_default().push(power);
         }
     }
 
@@ -2401,9 +2407,8 @@ impl Worker {
                 let id = self.next_id();
                 let (body, label) = split_signature(&body, &from);
                 self.log(format!("mail {id} from {from}: {label}"));
-                let mut text = format!(
-                    "From: {from}\nTo: {to}\nSubject: {subject}\nSignature: {label}\n\n{body}\n"
-                );
+                let mut text =
+                    format!("From: {from}\nTo: {to}\nSubject: {subject}\nSignature: {label}\n\n{body}\n");
                 if !attachments.is_empty() {
                     text.push_str("\nAttachments:\n");
                     for a in &attachments {
@@ -2860,7 +2865,11 @@ mod tests {
         let wanted = level(1000.0);
         let image = level(-1000.0);
         assert!(wanted > 0.0);
-        assert!(image / wanted < 0.01, "image is {:.1} dB down", 20.0 * (image / wanted).log10());
+        assert!(
+            image / wanted < 0.01,
+            "image is {:.1} dB down",
+            20.0 * (image / wanted).log10()
+        );
     }
 
     #[test]
@@ -3086,16 +3095,19 @@ mod tests {
     fn listen_only_never_keys_ptt() {
         let keyed = Arc::new(AtomicU64::new(0));
         let k = keyed.clone();
-        let factory: Factory = Box::new(move || {
-            Ok(Box::new(PttCountingRadio { keyed: k.clone() }) as Box<dyn Backend>)
-        });
+        let factory: Factory =
+            Box::new(move || Ok(Box::new(PttCountingRadio { keyed: k.clone() }) as Box<dyn Backend>));
         let mut a = Engine::spawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
         a.listen().unwrap();
         a.set_listen_only(true);
         assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
         a.test_burst(vec![0.5; 4000]).unwrap();
         thread::sleep(Duration::from_millis(300));
-        assert_eq!(keyed.load(Ordering::SeqCst), 0, "PTT keyed while Listen only was on");
+        assert_eq!(
+            keyed.load(Ordering::SeqCst),
+            0,
+            "PTT keyed while Listen only was on"
+        );
         // Control: the same burst keys PTT once Listen only is off.
         a.set_listen_only(false);
         a.test_burst(vec![0.5; 4000]).unwrap();
@@ -3142,7 +3154,10 @@ mod tests {
     fn internet_relay_and_third_party_settings_default_on() {
         let dir = temp_dir("owner-defaults");
         let e = Engine::new(config("AA1AAA", dir)).unwrap();
-        assert!(e.shared.flags.internet_relay.load(Ordering::SeqCst), "setting D should default on");
+        assert!(
+            e.shared.flags.internet_relay.load(Ordering::SeqCst),
+            "setting D should default on"
+        );
         assert!(e.third_party_relay(), "setting B should default on");
         e.set_third_party_relay(false);
         assert!(!e.third_party_relay());
@@ -3406,7 +3421,10 @@ mod tests {
         load_channel(&mut w, 14_000_000);
         assert!(w.channel_busy(14_000_000.0), "loud channel should read busy");
         // A channel with no energy history is free unless the start marker is seen.
-        assert!(!w.channel_busy(14_000_000.0 + 2_700.0), "unmeasured channel read busy");
+        assert!(
+            !w.channel_busy(14_000_000.0 + 2_700.0),
+            "unmeasured channel read busy"
+        );
     }
 
     #[test]
@@ -3429,7 +3447,10 @@ mod tests {
         w.feed_carrier(&bins);
         assert!(w.carrier.contains_key(&key), "audible channel not fed");
         // A channel 5 kHz up is outside the audio and is not fed.
-        assert!(!w.carrier.contains_key(&carrier_key(ch + 5_000.0)), "channel 5 kHz up is audible");
+        assert!(
+            !w.carrier.contains_key(&carrier_key(ch + 5_000.0)),
+            "channel 5 kHz up is audible"
+        );
         let before = w.carrier[&key].level();
         // A second call inside the frame period adds nothing.
         w.feed_carrier(&bins);
@@ -3491,16 +3512,31 @@ mod tests {
         // A role with no schedule is held: no slot, no send.
         assert!(!w.relay_slot_open(), "relay with no schedule was allowed");
         // Receive slot only: held.
-        lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![receive]).unwrap();
+        lock(&w.shared.relay)
+            .as_mut()
+            .unwrap()
+            .accept_schedule(vec![receive])
+            .unwrap();
         assert!(!w.relay_slot_open(), "relay sent in a receive slot");
         // A transmit slot covering now: open, but only with relay mode running.
-        lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![transmit(now - 10)]).unwrap();
+        lock(&w.shared.relay)
+            .as_mut()
+            .unwrap()
+            .accept_schedule(vec![transmit(now - 10)])
+            .unwrap();
         assert!(!w.relay_slot_open(), "slot open while relay mode is off");
         w.shared.flags.relay_running.store(true, Ordering::SeqCst);
         assert!(w.relay_slot_open());
         // Wrong channel is refused and the old schedule stays.
-        let bad = Slot { channel_khz: 7_000.0, ..transmit(now - 10) };
-        assert!(lock(&w.shared.relay).as_mut().unwrap().accept_schedule(vec![bad]).is_err());
+        let bad = Slot {
+            channel_khz: 7_000.0,
+            ..transmit(now - 10)
+        };
+        assert!(lock(&w.shared.relay)
+            .as_mut()
+            .unwrap()
+            .accept_schedule(vec![bad])
+            .is_err());
         assert!(w.relay_slot_open());
         w.record_forward(9);
     }
@@ -3529,12 +3565,22 @@ mod tests {
         let dir = temp_dir("relay-ack");
         let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
         // No role yet: refused with a plain message.
-        let both = RelayAck { licence_held: true, terms_accepted: true };
+        let both = RelayAck {
+            licence_held: true,
+            terms_accepted: true,
+        };
         assert!(e.start_relay(both).unwrap_err().contains("relay role"));
-        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+            .unwrap();
         // Either flag missing: refused, and relay stays off.
-        let no_licence = RelayAck { licence_held: false, terms_accepted: true };
-        let no_terms = RelayAck { licence_held: true, terms_accepted: false };
+        let no_licence = RelayAck {
+            licence_held: false,
+            terms_accepted: true,
+        };
+        let no_terms = RelayAck {
+            licence_held: true,
+            terms_accepted: false,
+        };
         let neither = RelayAck::default();
         for ack in [no_licence, no_terms, neither] {
             let err = e.start_relay(ack).unwrap_err();
@@ -3554,13 +3600,20 @@ mod tests {
         let dir = temp_dir("relay-per-run");
         {
             let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
-            e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
-            e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+            e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+                .unwrap();
+            e.start_relay(RelayAck {
+                licence_held: true,
+                terms_accepted: true,
+            })
+            .unwrap();
         }
         // A new run starts with relay mode off, whatever the old run had.
         let mut again = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(!again.relay_running());
-        again.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        again
+            .configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+            .unwrap();
         assert!(!again.relay_running());
     }
 
@@ -3574,7 +3627,9 @@ mod tests {
         assert!(!w.relay_slot_open(), "relay with no schedule was allowed");
         // Queued items stay queued too.
         w.enqueue(vec![chat("AA1AAA", "BB1BBB", "held")], vec![3], false);
-        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        w.link_state = LinkState::Connected {
+            peer: "BB1BBB".into(),
+        };
         assert!(w.next_due().is_none(), "relay with no schedule sent an item");
     }
 
@@ -3588,7 +3643,9 @@ mod tests {
     fn unattended_sends_need_relay_mode_or_an_operator_connection() {
         let mut w = bare_worker("unattended", "AA1AAA");
         w.enqueue(vec![chat("AA1AAA", "BB1BBB", "queued")], vec![5], false);
-        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        w.link_state = LinkState::Connected {
+            peer: "BB1BBB".into(),
+        };
         // Neither relay mode nor an operator connection: no send, no retry.
         assert!(!w.transmit_allowed());
         assert!(w.next_due().is_none(), "outbox sent without an operator or relay");
@@ -3605,7 +3662,9 @@ mod tests {
     fn listen_only_blocks_every_send_even_in_relay_mode() {
         let mut w = bare_worker("listen-blocks", "AA1AAA");
         w.enqueue(vec![chat("AA1AAA", "BB1BBB", "blocked")], vec![9], false);
-        w.link_state = LinkState::Connected { peer: "BB1BBB".into() };
+        w.link_state = LinkState::Connected {
+            peer: "BB1BBB".into(),
+        };
         w.shared.flags.operator_link.store(true, Ordering::SeqCst);
         w.shared.flags.relay_running.store(true, Ordering::SeqCst);
         *lock(&w.shared.relay) =
@@ -3632,8 +3691,13 @@ mod tests {
     fn listen_only_refuses_engine_send_in_relay_mode() {
         let dir = temp_dir("listen-relay-engine");
         let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
-        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
-        e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+            .unwrap();
+        e.start_relay(RelayAck {
+            licence_held: true,
+            terms_accepted: true,
+        })
+        .unwrap();
         e.set_listen_only(true);
         assert_eq!(e.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
         assert_eq!(e.connect("BB1BBB").unwrap_err(), LISTEN_ONLY_TEXT);

@@ -36,8 +36,8 @@ const DEVICE_STRUCT_SIZE: usize = 96;
 
 /// Sample rates the driver offers, in hertz, ascending.
 const RATES: &[u32] = &[
-    62_500, 125_000, 250_000, 500_000, 1_000_000, 2_000_000, 2_048_000, 2_500_000, 3_000_000, 4_000_000, 5_000_000,
-    6_000_000, 8_000_000, 10_000_000,
+    62_500, 125_000, 250_000, 500_000, 1_000_000, 2_000_000, 2_048_000, 2_500_000, 3_000_000, 4_000_000,
+    5_000_000, 6_000_000, 8_000_000, 10_000_000,
 ];
 
 // Return codes and values from the vendor interface.
@@ -75,44 +75,114 @@ struct LnaBand {
 }
 
 const LNA_RSP1: &[LnaBand] = &[
-    LnaBand { up_to_hz: 420e6, gr: &[0, 24, 19, 43] },
-    LnaBand { up_to_hz: 1000e6, gr: &[0, 7, 19, 26] },
-    LnaBand { up_to_hz: 1e12, gr: &[0, 5, 19, 24] },
-];
-const LNA_RSP1A: &[LnaBand] = &[
-    LnaBand { up_to_hz: 60e6, gr: &[0, 6, 12, 18, 37, 42, 61] },
-    LnaBand { up_to_hz: 420e6, gr: &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62] },
-    LnaBand { up_to_hz: 1000e6, gr: &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64] },
-    LnaBand { up_to_hz: 1e12, gr: &[0, 6, 12, 20, 26, 32, 38, 43, 62] },
-];
-const LNA_RSP1B: &[LnaBand] = &[
-    LnaBand { up_to_hz: 50e6, gr: &[0, 6, 12, 18, 37, 42, 61] },
-    LnaBand { up_to_hz: 420e6, gr: &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62] },
-    LnaBand { up_to_hz: 1000e6, gr: &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64] },
-    LnaBand { up_to_hz: 1e12, gr: &[0, 6, 12, 20, 26, 32, 38, 43, 62] },
-];
-const LNA_RSP2: &[LnaBand] = &[
-    LnaBand { up_to_hz: 420e6, gr: &[0, 10, 15, 21, 24, 34, 39, 45, 64] },
-    LnaBand { up_to_hz: 1000e6, gr: &[0, 7, 10, 17, 22, 41] },
-    LnaBand { up_to_hz: 1e12, gr: &[0, 5, 21, 15, 15, 34] },
-];
-const LNA_RSPDX: &[LnaBand] = &[
-    LnaBand { up_to_hz: 12e6, gr: &[0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60] },
-    LnaBand { up_to_hz: 50e6, gr: &[0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60] },
     LnaBand {
-        up_to_hz: 60e6,
-        gr: &[0, 3, 6, 9, 12, 20, 23, 26, 29, 32, 35, 38, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80],
+        up_to_hz: 420e6,
+        gr: &[0, 24, 19, 43],
     },
     LnaBand {
-        up_to_hz: 250e6,
-        gr: &[0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84],
+        up_to_hz: 1000e6,
+        gr: &[0, 7, 19, 26],
+    },
+    LnaBand {
+        up_to_hz: 1e12,
+        gr: &[0, 5, 19, 24],
+    },
+];
+const LNA_RSP1A: &[LnaBand] = &[
+    LnaBand {
+        up_to_hz: 60e6,
+        gr: &[0, 6, 12, 18, 37, 42, 61],
     },
     LnaBand {
         up_to_hz: 420e6,
-        gr: &[0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84],
+        gr: &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62],
     },
-    LnaBand { up_to_hz: 1000e6, gr: &[0, 7, 10, 13, 16, 19, 22, 25, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67] },
-    LnaBand { up_to_hz: 1e12, gr: &[0, 5, 8, 11, 14, 17, 20, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65] },
+    LnaBand {
+        up_to_hz: 1000e6,
+        gr: &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64],
+    },
+    LnaBand {
+        up_to_hz: 1e12,
+        gr: &[0, 6, 12, 20, 26, 32, 38, 43, 62],
+    },
+];
+const LNA_RSP1B: &[LnaBand] = &[
+    LnaBand {
+        up_to_hz: 50e6,
+        gr: &[0, 6, 12, 18, 37, 42, 61],
+    },
+    LnaBand {
+        up_to_hz: 420e6,
+        gr: &[0, 6, 12, 18, 20, 26, 32, 38, 57, 62],
+    },
+    LnaBand {
+        up_to_hz: 1000e6,
+        gr: &[0, 7, 13, 19, 20, 27, 33, 39, 45, 64],
+    },
+    LnaBand {
+        up_to_hz: 1e12,
+        gr: &[0, 6, 12, 20, 26, 32, 38, 43, 62],
+    },
+];
+const LNA_RSP2: &[LnaBand] = &[
+    LnaBand {
+        up_to_hz: 420e6,
+        gr: &[0, 10, 15, 21, 24, 34, 39, 45, 64],
+    },
+    LnaBand {
+        up_to_hz: 1000e6,
+        gr: &[0, 7, 10, 17, 22, 41],
+    },
+    LnaBand {
+        up_to_hz: 1e12,
+        gr: &[0, 5, 21, 15, 15, 34],
+    },
+];
+const LNA_RSPDX: &[LnaBand] = &[
+    LnaBand {
+        up_to_hz: 12e6,
+        gr: &[
+            0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 50e6,
+        gr: &[
+            0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 60e6,
+        gr: &[
+            0, 3, 6, 9, 12, 20, 23, 26, 29, 32, 35, 38, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 250e6,
+        gr: &[
+            0, 3, 6, 9, 12, 15, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78,
+            81, 84,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 420e6,
+        gr: &[
+            0, 3, 6, 9, 12, 15, 18, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75,
+            78, 81, 84,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 1000e6,
+        gr: &[
+            0, 7, 10, 13, 16, 19, 22, 25, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67,
+        ],
+    },
+    LnaBand {
+        up_to_hz: 1e12,
+        gr: &[
+            0, 5, 8, 11, 14, 17, 20, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65,
+        ],
+    },
 ];
 
 /// The IF gain reduction runs from 20 to 59 dB.
@@ -134,12 +204,19 @@ fn lna_bands(hw: u8) -> &'static [LnaBand] {
 
 fn lna_band(hw: u8, hz: f64) -> &'static LnaBand {
     let bands = lna_bands(hw);
-    bands.iter().find(|b| hz < b.up_to_hz).unwrap_or(&bands[bands.len() - 1])
+    bands
+        .iter()
+        .find(|b| hz < b.up_to_hz)
+        .unwrap_or(&bands[bands.len() - 1])
 }
 
 /// Most gain in dB the single gain stage offers: no reduction at all.
 fn max_gain(hw: u8) -> i32 {
-    let top = lna_bands(hw).iter().flat_map(|b| b.gr.iter().copied()).max().unwrap_or(0);
+    let top = lna_bands(hw)
+        .iter()
+        .flat_map(|b| b.gr.iter().copied())
+        .max()
+        .unwrap_or(0);
     top + (GR_IF_MAX - GR_IF_MIN)
 }
 
@@ -152,7 +229,7 @@ fn gain_split(hw: u8, hz: f64, gain_db: f64) -> (u8, i32) {
     let band = lna_band(hw, hz);
     let mut pick: Option<usize> = None;
     for (k, &gr) in band.gr.iter().enumerate() {
-        if gr >= reduce - GR_IF_SOFT && pick.map_or(true, |p| gr < band.gr[p]) {
+        if gr >= reduce - GR_IF_SOFT && pick.is_none_or(|p| gr < band.gr[p]) {
             pick = Some(k);
         }
     }
@@ -174,7 +251,11 @@ fn gain_split(hw: u8, hz: f64, gain_db: f64) -> (u8, i32) {
 
 /// Nearest rate in the table to `hz`.
 fn closest_rate(hz: u32) -> u32 {
-    RATES.iter().copied().min_by_key(|r| r.abs_diff(hz)).unwrap_or(DEFAULT_RATE)
+    RATES
+        .iter()
+        .copied()
+        .min_by_key(|r| r.abs_diff(hz))
+        .unwrap_or(DEFAULT_RATE)
 }
 
 /// The analogue ADC rate and decimation factor (1, 2, ... 32) that give `rate`.
@@ -211,7 +292,12 @@ const SAMPLE_SCALE: f32 = 1.0 / 32768.0;
 fn push_iq(buf: &mut VecDeque<(f32, f32)>, xi: &[i16], xq: &[i16], cap: usize) -> u64 {
     let n = xi.len().min(xq.len());
     let take = n.min(cap.saturating_sub(buf.len()));
-    buf.extend(xi.iter().zip(xq.iter()).take(take).map(|(&i, &q)| (i as f32 * SAMPLE_SCALE, q as f32 * SAMPLE_SCALE)));
+    buf.extend(
+        xi.iter()
+            .zip(xq.iter())
+            .take(take)
+            .map(|(&i, &q)| (i as f32 * SAMPLE_SCALE, q as f32 * SAMPLE_SCALE)),
+    );
     (n - take) as u64
 }
 
@@ -430,7 +516,10 @@ type UpdateFn = unsafe extern "C" fn(*mut c_void, c_int, c_uint, c_uint) -> c_in
 /// because the vendor's Unix installer may place the library under those.
 fn library_names() -> &'static [&'static str] {
     if cfg!(target_os = "windows") {
-        &[r"C:\Program Files\SDRplay\API\x64\sdrplay_api.dll", "sdrplay_api.dll"]
+        &[
+            r"C:\Program Files\SDRplay\API\x64\sdrplay_api.dll",
+            "sdrplay_api.dll",
+        ]
     } else if cfg!(target_os = "macos") {
         &["libsdrplay_api.dylib", "libsdrplay_api.so.3", "libsdrplay_api.so"]
     } else {
@@ -439,7 +528,9 @@ fn library_names() -> &'static [&'static str] {
 }
 
 fn missing_library_message(detail: &str) -> String {
-    format!("SDRplay API is not installed ({detail}). Install the SDRplay API from sdrplay.com, then try again")
+    format!(
+        "SDRplay API is not installed ({detail}). Install the SDRplay API from sdrplay.com, then try again"
+    )
 }
 
 /// Reads one function from the library.
@@ -450,7 +541,9 @@ fn symbol<T: Copy>(lib: &Library, name: &str) -> Result<T, String> {
     // while the library stays loaded (the library lives as long as the process).
     match unsafe { lib.get::<T>(with_nul.as_bytes()) } {
         Ok(sym) => Ok(*sym),
-        Err(_) => Err(format!("the SDRplay API library has no function {name}; it may be too old")),
+        Err(_) => Err(format!(
+            "the SDRplay API library has no function {name}; it may be too old"
+        )),
     }
 }
 
@@ -536,7 +629,9 @@ impl Api {
         if !(3.07..4.0).contains(&v) {
             // SAFETY: the service was opened above.
             unsafe { (self.close)() };
-            return Err(format!("SDRplay API {v:.2} is not supported: this driver needs API 3.07 or a newer 3.x"));
+            return Err(format!(
+                "SDRplay API {v:.2} is not supported: this driver needs API 3.07 or a newer 3.x"
+            ));
         }
         *slot = Some(v);
         Ok(v)
@@ -555,7 +650,10 @@ impl Api {
             code
         };
         if code != SUCCESS {
-            return Err(format!("SDRplay API: cannot list the radios: {}", self.err_text(code)));
+            return Err(format!(
+                "SDRplay API: cannot list the radios: {}",
+                self.err_text(code)
+            ));
         }
         Ok(devs[..(n as usize).min(MAX_DEVICES)].to_vec())
     }
@@ -568,7 +666,12 @@ fn api() -> Result<&'static Api, String> {
 }
 
 fn serial_of(d: &DeviceT) -> String {
-    let bytes: Vec<u8> = d.ser_no.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    let bytes: Vec<u8> = d
+        .ser_no
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -602,7 +705,14 @@ struct Shared {
     tuner: AtomicI32,
 }
 
-unsafe extern "C" fn on_stream(xi: *mut i16, xq: *mut i16, _params: *mut c_void, count: c_uint, _reset: c_uint, ctx: *mut c_void) {
+unsafe extern "C" fn on_stream(
+    xi: *mut i16,
+    xq: *mut i16,
+    _params: *mut c_void,
+    count: c_uint,
+    _reset: c_uint,
+    ctx: *mut c_void,
+) {
     if ctx.is_null() || xi.is_null() || xq.is_null() || count == 0 {
         return;
     }
@@ -610,7 +720,10 @@ unsafe extern "C" fn on_stream(xi: *mut i16, xq: *mut i16, _params: *mut c_void,
     let shared = unsafe { &*(ctx as *const Shared) };
     // SAFETY: the API gives `count` valid samples in each array for this call only.
     let (i, q) = unsafe {
-        (std::slice::from_raw_parts(xi, count as usize), std::slice::from_raw_parts(xq, count as usize))
+        (
+            std::slice::from_raw_parts(xi, count as usize),
+            std::slice::from_raw_parts(xq, count as usize),
+        )
     };
     let mut buf = lock(&shared.samples);
     let dropped = push_iq(&mut buf, i, q, SAMPLE_CAP);
@@ -632,7 +745,14 @@ unsafe extern "C" fn on_event(id: c_int, tuner: c_int, _params: *mut c_void, ctx
             // The vendor reports the next overload change only after an acknowledgement.
             if let Ok(a) = api() {
                 // SAFETY: the device handle was stored before Init and is still selected.
-                unsafe { (a.update)(shared.device.load(Ordering::Acquire), tuner, UPDATE_CTRL_OVERLOAD_ACK, 0) };
+                unsafe {
+                    (a.update)(
+                        shared.device.load(Ordering::Acquire),
+                        tuner,
+                        UPDATE_CTRL_OVERLOAD_ACK,
+                        0,
+                    )
+                };
             }
         }
         EVENT_DEVICE_REMOVED | EVENT_DEVICE_FAILURE => shared.removed.store(true, Ordering::Release),
@@ -672,7 +792,11 @@ impl SdrplayRadio {
     }
 
     fn freq_range(&self) -> (u64, u64) {
-        let lo = if self.hw == HW_RSP1 { TUNE_MIN_RSP1_HZ } else { TUNE_MIN_HZ };
+        let lo = if self.hw == HW_RSP1 {
+            TUNE_MIN_RSP1_HZ
+        } else {
+            TUNE_MIN_HZ
+        };
         (lo, TUNE_MAX_HZ)
     }
 
@@ -717,7 +841,10 @@ impl SdrplayRadio {
             }
         }
         if code != SUCCESS {
-            return Err(format!("SDRplay: the radio did not take the new settings: {}", self.api.err_text(code)));
+            return Err(format!(
+                "SDRplay: the radio did not take the new settings: {}",
+                self.api.err_text(code)
+            ));
         }
         Ok(())
     }
@@ -727,7 +854,10 @@ impl SdrplayRadio {
         // SAFETY: the device handle comes from SelectDevice; the vendor fills `params`.
         let code = unsafe { (self.api.get_device_params)(self.dev.dev, &mut params) };
         if code != SUCCESS || params.is_null() {
-            return Err(format!("SDRplay: cannot read the radio's settings: {}", self.api.err_text(code)));
+            return Err(format!(
+                "SDRplay: cannot read the radio's settings: {}",
+                self.api.err_text(code)
+            ));
         }
         // SAFETY: params was just returned by the vendor and is valid while the device is selected.
         let p = unsafe { &*params };
@@ -793,10 +923,14 @@ impl RxRadio for SdrplayRadio {
 
     fn set_gain(&mut self, stage: &str, setting: GainSetting) -> Result<(), String> {
         if stage != GAIN_STAGE {
-            return Err(format!("SDRplay has no gain stage named {stage:?}; the only one is {GAIN_STAGE:?}"));
+            return Err(format!(
+                "SDRplay has no gain stage named {stage:?}; the only one is {GAIN_STAGE:?}"
+            ));
         }
         let db = match setting {
-            GainSetting::Auto => return Err("the SDRplay gain stage has no automatic setting; give a value in dB".into()),
+            GainSetting::Auto => {
+                return Err("the SDRplay gain stage has no automatic setting; give a value in dB".into())
+            }
             GainSetting::Manual(v) => v as f64,
         };
         self.gain_db = db.clamp(0.0, max_gain(self.hw) as f64);
@@ -814,12 +948,19 @@ impl RxRadio for SdrplayRadio {
         self.shared.removed.store(false, Ordering::Release);
         self.shared.device.store(self.dev.dev, Ordering::Release);
         self.shared.tuner.store(self.dev.tuner, Ordering::Release);
-        let mut cb = CallbackFnsT { stream_a: on_stream, stream_b: on_stream, event: on_event };
+        let mut cb = CallbackFnsT {
+            stream_a: on_stream,
+            stream_b: on_stream,
+            event: on_event,
+        };
         let ctx = Arc::as_ptr(&self.shared) as *const c_void as *mut c_void;
         // SAFETY: the callbacks and the context stay valid until Uninit returns (see stop).
         let code = unsafe { (self.api.init)(self.dev.dev, &mut cb, ctx) };
         if code != SUCCESS {
-            return Err(format!("SDRplay: the radio did not start: {}", self.api.err_text(code)));
+            return Err(format!(
+                "SDRplay: the radio did not start: {}",
+                self.api.err_text(code)
+            ));
         }
         self.running = true;
         Ok(())
@@ -829,7 +970,10 @@ impl RxRadio for SdrplayRadio {
         let shared = Arc::clone(&self.shared);
         let mut buf = lock(&shared.samples);
         if buf.is_empty() && !shared.removed.load(Ordering::Acquire) {
-            let (guard, _) = shared.ready.wait_timeout(buf, READ_WAIT).unwrap_or_else(|p| p.into_inner());
+            let (guard, _) = shared
+                .ready
+                .wait_timeout(buf, READ_WAIT)
+                .unwrap_or_else(|p| p.into_inner());
             buf = guard;
         }
         if buf.is_empty() {
@@ -872,13 +1016,21 @@ impl Drop for SdrplayRadio {
 /// Lists the radios that the service reports as usable. Returns nothing when the library is missing.
 pub fn probe() -> Vec<DeviceInfo> {
     let Ok(api) = api() else { return Vec::new() };
-    let Ok(version) = api.ensure_service() else { return Vec::new() };
-    let Ok(devs) = api.list_devices() else { return Vec::new() };
+    let Ok(version) = api.ensure_service() else {
+        return Vec::new();
+    };
+    let Ok(devs) = api.list_devices() else {
+        return Vec::new();
+    };
     devs.iter()
         .filter(|d| is_usable(version, d))
         .map(|d| {
             let serial = serial_of(d);
-            DeviceInfo { driver: DRIVER, label: format!("SDRplay {} {}", model_name(d.hw_ver), serial), id: serial }
+            DeviceInfo {
+                driver: DRIVER,
+                label: format!("SDRplay {} {}", model_name(d.hw_ver), serial),
+                id: serial,
+            }
         })
         .collect()
 }
@@ -892,10 +1044,14 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let mut dev = devs
         .into_iter()
         .filter(|d| is_usable(version, d))
-        .find(|d| wanted.map_or(true, |w| serial_of(d) == w))
+        .find(|d| wanted.is_none_or(|w| serial_of(d) == w))
         .ok_or_else(|| match wanted {
-            Some(w) => format!("SDRplay: no radio with serial {w} is connected, or it is in use by another program"),
-            None => "SDRplay: no radio found; plug it in and check that the SDRplay API service is running".into(),
+            Some(w) => {
+                format!("SDRplay: no radio with serial {w} is connected, or it is in use by another program")
+            }
+            None => {
+                "SDRplay: no radio found; plug it in and check that the SDRplay API service is running".into()
+            }
         })?;
     if dev.hw_ver == HW_RSPDUO {
         // use tuner 1 on its own, the way a single-tuner RSP works
@@ -912,7 +1068,10 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
         code
     };
     if code != SUCCESS {
-        return Err(format!("SDRplay: cannot open the radio {serial} (in use by another program?): {}", api.err_text(code)));
+        return Err(format!(
+            "SDRplay: cannot open the radio {serial} (in use by another program?): {}",
+            api.err_text(code)
+        ));
     }
     if dev.tuner != TUNER_A && dev.tuner != TUNER_B {
         dev.tuner = TUNER_A;
@@ -992,8 +1151,14 @@ mod tests {
         // 40 dB at 100 MHz: LNA state 7 (38 dB reduction), IF stage 45 dB
         assert_eq!(gain_split(HW_RSP1A, 100e6, 40.0), (7, 45));
         // out-of-range values are clamped
-        assert_eq!(gain_split(HW_RSP1A, 100e6, 500.0), gain_split(HW_RSP1A, 100e6, 103.0));
-        assert_eq!(gain_split(HW_RSP1A, 100e6, -5.0), gain_split(HW_RSP1A, 100e6, 0.0));
+        assert_eq!(
+            gain_split(HW_RSP1A, 100e6, 500.0),
+            gain_split(HW_RSP1A, 100e6, 103.0)
+        );
+        assert_eq!(
+            gain_split(HW_RSP1A, 100e6, -5.0),
+            gain_split(HW_RSP1A, 100e6, 0.0)
+        );
     }
 
     #[test]

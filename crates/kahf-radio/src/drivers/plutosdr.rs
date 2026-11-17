@@ -24,8 +24,20 @@ const LIB_NAMES: &[&str] = if cfg!(target_os = "macos") {
 const RATE_MIN_HZ: u32 = 2_100_000;
 const RATE_MAX_HZ: u32 = 61_440_000;
 const RATE_STEPS_HZ: &[u32] = &[
-    2_100_000, 2_400_000, 3_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 12_000_000, 16_000_000, 20_000_000, 30_000_000,
-    40_000_000, 50_000_000, RATE_MAX_HZ,
+    2_100_000,
+    2_400_000,
+    3_000_000,
+    4_000_000,
+    5_000_000,
+    8_000_000,
+    10_000_000,
+    12_000_000,
+    16_000_000,
+    20_000_000,
+    30_000_000,
+    40_000_000,
+    50_000_000,
+    RATE_MAX_HZ,
 ];
 const DEFAULT_RATE_HZ: u32 = 10_000_000;
 /// A radio on USB 2 keeps up with about 4 Msps without losing samples.
@@ -77,7 +89,10 @@ fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
     // SAFETY: the type T is the C signature of the named libiio function.
     match unsafe { lib.get::<T>(name) } {
         Ok(s) => Ok(*s),
-        Err(e) => Err(format!("PlutoSDR: libiio lacks {} ({e})", String::from_utf8_lossy(name))),
+        Err(e) => Err(format!(
+            "PlutoSDR: libiio lacks {} ({e})",
+            String::from_utf8_lossy(name)
+        )),
     }
 }
 
@@ -85,9 +100,11 @@ impl Iio {
     fn bind(lib: Library) -> Result<Iio, String> {
         // SAFETY: the signature matches libiio's iio_library_get_version.
         let version = unsafe {
-            lib.get::<unsafe extern "C" fn(*mut c_uint, *mut c_uint, *mut c_char) -> c_int>(b"iio_library_get_version")
-                .ok()
-                .map(|s| *s)
+            lib.get::<unsafe extern "C" fn(*mut c_uint, *mut c_uint, *mut c_char) -> c_int>(
+                b"iio_library_get_version",
+            )
+            .ok()
+            .map(|s| *s)
         };
         if let Some(get_version) = version {
             let (mut major, mut minor) = (0u32, 0u32);
@@ -187,7 +204,10 @@ fn clamp_gain_db(db: f32, freq_hz: u64) -> f32 {
 /// "[70000000 1 6000000000]" (first, step, last) -> (first, last).
 fn parse_range(text: &str) -> Option<(u64, u64)> {
     let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
-    let parts = inner.split_whitespace().map(|p| p.parse::<u64>().ok()).collect::<Option<Vec<u64>>>()?;
+    let parts = inner
+        .split_whitespace()
+        .map(|p| p.parse::<u64>().ok())
+        .collect::<Option<Vec<u64>>>()?;
     if parts.len() != 3 || parts[2] <= parts[0] {
         return None;
     }
@@ -202,8 +222,11 @@ fn sample_f32(raw: i16) -> f32 {
 /// Interleaved 16-bit little-endian I and Q pairs (4 bytes per sample) to complex samples.
 /// A partial sample at the end is left out.
 fn convert_bytes(bytes: &[u8], out: &mut Vec<(f32, f32)>) {
-    out.extend(bytes.chunks_exact(4).map(|c| {
-        (sample_f32(i16::from_le_bytes([c[0], c[1]])), sample_f32(i16::from_le_bytes([c[2], c[3]])))
+    out.extend(bytes.as_chunks::<4>().0.iter().map(|c| {
+        (
+            sample_f32(i16::from_le_bytes([c[0], c[1]])),
+            sample_f32(i16::from_le_bytes([c[2], c[3]])),
+        )
     }));
 }
 
@@ -212,18 +235,24 @@ fn serial_from_description(desc: &str) -> String {
     let Some(pos) = desc.find("serial=") else {
         return String::new();
     };
-    desc[pos + 7..].chars().take_while(|c| !matches!(c, ' ' | ',' | ')')).collect()
+    desc[pos + 7..]
+        .chars()
+        .take_while(|c| !matches!(c, ' ' | ',' | ')'))
+        .collect()
 }
 
 fn is_pluto_description(desc: &str) -> bool {
-    ["PlutoSDR", "ADALM-PLUTO", "AD9361"].iter().any(|k| desc.contains(k))
+    ["PlutoSDR", "ADALM-PLUTO", "AD9361"]
+        .iter()
+        .any(|k| desc.contains(k))
 }
 
 /// The address to open. `found` is (address, serial) of the USB radios present.
 fn pick_uri(id: Option<&str>, found: &[(String, String)]) -> Result<String, String> {
     match id {
         None => found.first().map(|(uri, _)| uri.clone()).ok_or_else(|| {
-            "PlutoSDR: no radio found on USB. Connect it, or name its address (plutosdr:ip:ADDRESS)".to_string()
+            "PlutoSDR: no radio found on USB. Connect it, or name its address (plutosdr:ip:ADDRESS)"
+                .to_string()
         }),
         Some(s) if s.starts_with("usb:") || s.starts_with("ip:") => Ok(s.to_string()),
         Some(serial) => found
@@ -270,7 +299,7 @@ fn scan_usb(iio: &Iio) -> Vec<Found> {
     let mut out = Vec::new();
     // SAFETY: each pointer comes from the library and is used only while the scan exists.
     unsafe {
-        let sc = (iio.create_scan_context)(b"usb\0".as_ptr().cast(), 0);
+        let sc = (iio.create_scan_context)(c"usb".as_ptr(), 0);
         if sc.is_null() {
             return out;
         }
@@ -285,7 +314,10 @@ fn scan_usb(iio: &Iio) -> Vec<Found> {
                 let desc = c_text((iio.context_info_get_description)(info));
                 let uri = c_text((iio.context_info_get_uri)(info));
                 if !uri.is_empty() && is_pluto_description(&desc) {
-                    out.push(Found { uri, serial: serial_from_description(&desc) });
+                    out.push(Found {
+                        uri,
+                        serial: serial_from_description(&desc),
+                    });
                 }
             }
         }
@@ -307,7 +339,11 @@ pub fn probe() -> Vec<DeviceInfo> {
         .map(|f| DeviceInfo {
             driver: "plutosdr",
             label: label_for(&f.uri, &f.serial),
-            id: if f.serial.is_empty() { f.uri.clone() } else { f.serial.clone() },
+            id: if f.serial.is_empty() {
+                f.uri.clone()
+            } else {
+                f.serial.clone()
+            },
         })
         .collect()
 }
@@ -317,7 +353,11 @@ pub fn open(id: Option<&str>) -> Result<Box<dyn RxRadio>, String> {
     let iio = load_iio()?;
     let found: Vec<(String, String)> = scan_usb(&iio).into_iter().map(|f| (f.uri, f.serial)).collect();
     let uri = pick_uri(id, &found)?;
-    let serial = found.iter().find(|(u, _)| *u == uri).map(|(_, s)| s.clone()).unwrap_or_default();
+    let serial = found
+        .iter()
+        .find(|(u, _)| *u == uri)
+        .map(|(_, s)| s.clone())
+        .unwrap_or_default();
     let radio = Pluto::connect(iio, &uri, &serial)?;
     Ok(Box::new(radio))
 }
@@ -351,7 +391,9 @@ fn find_device(iio: &Iio, ctx: Ptr, name: &str) -> Result<Ptr, String> {
     // SAFETY: ctx is a live context; the name is a valid C string.
     let dev = unsafe { (iio.context_find_device)(ctx, c.as_ptr()) };
     if dev.is_null() {
-        Err(format!("PlutoSDR: device {name} not found; check the radio's firmware"))
+        Err(format!(
+            "PlutoSDR: device {name} not found; check the radio's firmware"
+        ))
     } else {
         Ok(dev)
     }
@@ -362,7 +404,9 @@ fn find_channel(iio: &Iio, dev: Ptr, name: &str, output: bool) -> Result<Ptr, St
     // SAFETY: dev is a live device; the name is a valid C string.
     let ch = unsafe { (iio.device_find_channel)(dev, c.as_ptr(), output) };
     if ch.is_null() {
-        Err(format!("PlutoSDR: channel {name} not found; check the radio's firmware"))
+        Err(format!(
+            "PlutoSDR: channel {name} not found; check the radio's firmware"
+        ))
     } else {
         Ok(ch)
     }
@@ -407,10 +451,16 @@ impl Pluto {
         radio.i_ch = find_channel(&radio.iio, radio.rx_dev, "voltage0", false)?;
         radio.q_ch = find_channel(&radio.iio, radio.rx_dev, "voltage1", false)?;
 
-        if let Some(range) = radio.read_attr(radio.lo, "frequency_available").and_then(|t| parse_range(&t)) {
+        if let Some(range) = radio
+            .read_attr(radio.lo, "frequency_available")
+            .and_then(|t| parse_range(&t))
+        {
             radio.freq_range = range;
         }
-        if let Some(f) = radio.read_attr(radio.lo, "frequency").and_then(|t| t.parse::<u64>().ok()) {
+        if let Some(f) = radio
+            .read_attr(radio.lo, "frequency")
+            .and_then(|t| t.parse::<u64>().ok())
+        {
             radio.freq_hz = f;
         }
         radio.write_str(radio.rf, "gain_control_mode", "manual")?;
@@ -428,7 +478,11 @@ impl Pluto {
             return None;
         }
         let n = (n as usize).min(buf.len());
-        Some(String::from_utf8_lossy(&buf[..n]).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string())
+        Some(
+            String::from_utf8_lossy(&buf[..n])
+                .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+                .to_string(),
+        )
     }
 
     fn write_i64(&self, chn: Ptr, attr: &str, value: i64) -> Result<(), String> {
@@ -436,7 +490,10 @@ impl Pluto {
         // SAFETY: the channel is live and the attribute name is a valid C string.
         let r = unsafe { (self.iio.channel_attr_write_longlong)(chn, c.as_ptr(), value) };
         if r < 0 {
-            return Err(format!("PlutoSDR: the radio refused {attr} = {value} ({})", os_text(i64::from(r))));
+            return Err(format!(
+                "PlutoSDR: the radio refused {attr} = {value} ({})",
+                os_text(i64::from(r))
+            ));
         }
         Ok(())
     }
@@ -447,7 +504,10 @@ impl Pluto {
         // SAFETY: the channel is live and both strings are valid C strings.
         let r = unsafe { (self.iio.channel_attr_write)(chn, c.as_ptr(), v.as_ptr()) };
         if r < 0 {
-            return Err(format!("PlutoSDR: the radio refused {attr} = {value} ({})", os_text(r as i64)));
+            return Err(format!(
+                "PlutoSDR: the radio refused {attr} = {value} ({})",
+                os_text(r as i64)
+            ));
         }
         Ok(())
     }
@@ -471,10 +531,15 @@ impl Pluto {
             if matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
                 return Ok(());
             }
-            return Err(format!("PlutoSDR: the stream stopped ({})", os_text(i64::from(r as i64))));
+            return Err(format!("PlutoSDR: the stream stopped ({})", os_text(r as i64)));
         }
         // SAFETY: start and end bound the buffer; only the first r bytes (at most the buffer size) are read.
-        let (start, end) = unsafe { ((self.iio.buffer_start)(self.buf) as *const u8, (self.iio.buffer_end)(self.buf) as *const u8) };
+        let (start, end) = unsafe {
+            (
+                (self.iio.buffer_start)(self.buf) as *const u8,
+                (self.iio.buffer_end)(self.buf) as *const u8,
+            )
+        };
         let size = (end as usize).saturating_sub(start as usize);
         let n = (r as usize).min(size);
         // SAFETY: the n bytes lie inside the buffer, which libiio keeps alive until the next refill.
@@ -560,7 +625,9 @@ impl RxRadio for Pluto {
             if self.buf.is_null() {
                 (self.iio.channel_disable)(self.i_ch);
                 (self.iio.channel_disable)(self.q_ch);
-                return Err("PlutoSDR: cannot create the sample buffer (is another program using the radio?)".into());
+                return Err(
+                    "PlutoSDR: cannot create the sample buffer (is another program using the radio?)".into(),
+                );
             }
         }
         self.pending.clear();
@@ -689,7 +756,10 @@ mod tests {
 
     #[test]
     fn frequency_range_text_is_read() {
-        assert_eq!(parse_range("[70000000 1 6000000000]"), Some((70_000_000, 6_000_000_000)));
+        assert_eq!(
+            parse_range("[70000000 1 6000000000]"),
+            Some((70_000_000, 6_000_000_000))
+        );
         assert_eq!(parse_range("[3 1 5]"), Some((3, 5)));
         assert_eq!(parse_range("[5 1 3]"), None);
         assert_eq!(parse_range("[1 1 1]"), None);
@@ -699,7 +769,9 @@ mod tests {
     #[test]
     fn serial_is_taken_from_the_description() {
         assert_eq!(
-            serial_from_description("0456:b673 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial=104473abc"),
+            serial_from_description(
+                "0456:b673 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial=104473abc"
+            ),
             "104473abc"
         );
         assert_eq!(serial_from_description("PlutoSDR"), "");

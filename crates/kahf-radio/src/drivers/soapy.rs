@@ -24,10 +24,10 @@ const OVERALL: &str = "overall";
 const REMOTE_TIMEOUT_US: &str = "5000000";
 /// Rates offered when the radio's ranges allow them.
 const COMMON_RATES: &[u32] = &[
-    250_000, 1_000_000, 1_024_000, 1_200_000, 1_536_000, 1_800_000, 1_920_000, 2_000_000, 2_048_000, 2_400_000,
-    2_500_000, 2_800_000, 3_000_000, 3_200_000, 4_000_000, 5_000_000, 6_000_000, 8_000_000, 10_000_000, 12_000_000,
-    16_000_000, 20_000_000, 24_000_000, 25_000_000, 32_000_000, 40_000_000, 48_000_000, 50_000_000, 56_000_000,
-    61_440_000,
+    250_000, 1_000_000, 1_024_000, 1_200_000, 1_536_000, 1_800_000, 1_920_000, 2_000_000, 2_048_000,
+    2_400_000, 2_500_000, 2_800_000, 3_000_000, 3_200_000, 4_000_000, 5_000_000, 6_000_000, 8_000_000,
+    10_000_000, 12_000_000, 16_000_000, 20_000_000, 24_000_000, 25_000_000, 32_000_000, 40_000_000,
+    48_000_000, 50_000_000, 56_000_000, 61_440_000,
 ];
 
 // ---- C library types and functions (SoapySDR C API, version 0.8) ----
@@ -67,11 +67,20 @@ type GainElemRangeFn = unsafe extern "C" fn(*mut Dev, c_int, usize, *const c_cha
 type SetGainElemFn = unsafe extern "C" fn(*mut Dev, c_int, usize, *const c_char, f64) -> c_int;
 type HasGainModeFn = unsafe extern "C" fn(*mut Dev, c_int, usize) -> bool;
 type SetGainModeFn = unsafe extern "C" fn(*mut Dev, c_int, usize, bool) -> c_int;
-type SetupStreamFn = unsafe extern "C" fn(*mut Dev, c_int, *const c_char, *const usize, usize, *const Kwargs) -> *mut Stream;
+type SetupStreamFn =
+    unsafe extern "C" fn(*mut Dev, c_int, *const c_char, *const usize, usize, *const Kwargs) -> *mut Stream;
 type ActivateFn = unsafe extern "C" fn(*mut Dev, *mut Stream, c_int, i64, usize) -> c_int;
 type DeactivateFn = unsafe extern "C" fn(*mut Dev, *mut Stream, c_int, i64) -> c_int;
 type CloseStreamFn = unsafe extern "C" fn(*mut Dev, *mut Stream) -> c_int;
-type ReadStreamFn = unsafe extern "C" fn(*mut Dev, *mut Stream, *const *mut c_void, usize, *mut c_int, *mut i64, c_long) -> c_int;
+type ReadStreamFn = unsafe extern "C" fn(
+    *mut Dev,
+    *mut Stream,
+    *const *mut c_void,
+    usize,
+    *mut c_int,
+    *mut i64,
+    c_long,
+) -> c_int;
 type ErrToStrFn = unsafe extern "C" fn(c_int) -> *const c_char;
 type HardwareKeyFn = unsafe extern "C" fn(*mut Dev) -> *mut c_char;
 type LastErrorFn = unsafe extern "C" fn() -> *const c_char;
@@ -86,7 +95,12 @@ macro_rules! sym {
         // SAFETY: the name and type match the SoapySDR C header this driver was written against.
         match unsafe { $lib.get::<$ty>(concat!($name, "\0").as_bytes()) } {
             Ok(s) => *s,
-            Err(_) => return Err(format!("the SoapySDR library has no function {}; its version is too old or the file is damaged", $name)),
+            Err(_) => {
+                return Err(format!(
+                    "the SoapySDR library has no function {}; its version is too old or the file is damaged",
+                    $name
+                ))
+            }
         }
     }};
 }
@@ -279,7 +293,11 @@ fn rate_at_least(ranges: &[SRange], want: f64) -> f64 {
             above = c;
         }
     }
-    if above > 0.0 { above } else { fastest }
+    if above > 0.0 {
+        above
+    } else {
+        fastest
+    }
 }
 
 /// The offered value nearest `want`, over all ranges (used for the analogue bandwidth).
@@ -302,7 +320,10 @@ fn offered_rates(ranges: &[SRange]) -> Vec<u32> {
     for r in ranges {
         for &hz in COMMON_RATES {
             let v = hz as f64;
-            if v >= r.minimum - 1.0 && v <= r.maximum + 1.0 && (r.step <= 0.0 || (snap(r, v, false) - v).abs() <= 1.0) {
+            if v >= r.minimum - 1.0
+                && v <= r.maximum + 1.0
+                && (r.step <= 0.0 || (snap(r, v, false) - v).abs() <= 1.0)
+            {
                 out.push(hz);
             }
         }
@@ -375,7 +396,14 @@ fn classify_read(rc: c_int) -> ReadOutcome {
 /// A plain sentence for errors that mean another program holds the radio. None otherwise.
 fn busy_hint(text: &str) -> Option<&'static str> {
     let l = text.to_ascii_lowercase();
-    const KEYS: &[&str] = &["busy", "in use", "claim", "resource temporarily", "already open", "access denied"];
+    const KEYS: &[&str] = &[
+        "busy",
+        "in use",
+        "claim",
+        "resource temporarily",
+        "already open",
+        "access denied",
+    ];
     if KEYS.iter().any(|k| l.contains(k)) {
         Some("the radio is in use by another program: close it and try again")
     } else {
@@ -404,9 +432,23 @@ fn device_info(m: &BTreeMap<String, String>) -> DeviceInfo {
         .get("label")
         .cloned()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| if driver.is_empty() { "SoapySDR radio".to_string() } else { format!("SoapySDR {driver}") });
-    let id = m.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
-    DeviceInfo { driver: "soapy", label, id }
+        .unwrap_or_else(|| {
+            if driver.is_empty() {
+                "SoapySDR radio".to_string()
+            } else {
+                format!("SoapySDR {driver}")
+            }
+        });
+    let id = m
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    DeviceInfo {
+        driver: "soapy",
+        label,
+        id,
+    }
 }
 
 // ---- C memory handling ----
@@ -449,12 +491,20 @@ fn with_kwargs<R>(pairs: &BTreeMap<String, String>, f: impl FnOnce(*const Kwargs
     let mut keys = Vec::with_capacity(pairs.len());
     let mut vals = Vec::with_capacity(pairs.len());
     for (k, v) in pairs {
-        keys.push(CString::new(k.as_str()).map_err(|_| format!("the argument name {k:?} holds a zero byte"))?);
-        vals.push(CString::new(v.as_str()).map_err(|_| format!("the argument value for {k} holds a zero byte"))?);
+        keys.push(
+            CString::new(k.as_str()).map_err(|_| format!("the argument name {k:?} holds a zero byte"))?,
+        );
+        vals.push(
+            CString::new(v.as_str()).map_err(|_| format!("the argument value for {k} holds a zero byte"))?,
+        );
     }
     let mut kp: Vec<*mut c_char> = keys.iter().map(|k| k.as_ptr() as *mut c_char).collect();
     let mut vp: Vec<*mut c_char> = vals.iter().map(|v| v.as_ptr() as *mut c_char).collect();
-    let kw = Kwargs { keys: kp.as_mut_ptr(), vals: vp.as_mut_ptr(), size: kp.len() };
+    let kw = Kwargs {
+        keys: kp.as_mut_ptr(),
+        vals: vp.as_mut_ptr(),
+        size: kp.len(),
+    };
     Ok(f(&kw))
 }
 
@@ -468,7 +518,10 @@ unsafe fn read_kwargs(kw: &Kwargs) -> BTreeMap<String, String> {
         let k = *kw.keys.add(i);
         let v = *kw.vals.add(i);
         if !k.is_null() && !v.is_null() {
-            m.insert(CStr::from_ptr(k).to_string_lossy().into_owned(), CStr::from_ptr(v).to_string_lossy().into_owned());
+            m.insert(
+                CStr::from_ptr(k).to_string_lossy().into_owned(),
+                CStr::from_ptr(v).to_string_lossy().into_owned(),
+            );
         }
     }
     m
@@ -563,7 +616,10 @@ impl SoapyRadio {
             }
         }
         if label.is_empty() {
-            label = parse_args(args).get("driver").map(|d| format!("SoapySDR {d}")).unwrap_or_else(|| "SoapySDR radio".into());
+            label = parse_args(args)
+                .get("driver")
+                .map(|d| format!("SoapySDR {d}"))
+                .unwrap_or_else(|| "SoapySDR radio".into());
         }
         label
     }
@@ -574,7 +630,11 @@ impl SoapyRadio {
     }
 
     fn check(&self, rc: c_int, what: &str) -> Result<(), String> {
-        if rc == 0 { Ok(()) } else { Err(format!("{what}: {}", self.api.detail(rc))) }
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!("{what}: {}", self.api.detail(rc)))
+        }
     }
 
     fn gain_names(&self) -> Vec<String> {
@@ -615,7 +675,9 @@ impl RxRadio for SoapyRadio {
     fn set_frequency_hz(&mut self, hz: u64) -> Result<(), String> {
         let api = &self.api;
         let dev = self.dev;
-        let rc = with_kwargs(&BTreeMap::new(), |kw| unsafe { (api.set_freq)(dev, DIR_RX, 0, hz as f64, kw) })?;
+        let rc = with_kwargs(&BTreeMap::new(), |kw| unsafe {
+            (api.set_freq)(dev, DIR_RX, 0, hz as f64, kw)
+        })?;
         self.check(rc, "could not tune the radio")
     }
 
@@ -626,7 +688,11 @@ impl RxRadio for SoapyRadio {
     fn set_sample_rate(&mut self, hz: u32) -> Result<u32, String> {
         let ranges = self.rates();
         let want = hz as f64;
-        let target = if ranges.is_empty() { want } else { rate_at_least(&ranges, want) };
+        let target = if ranges.is_empty() {
+            want
+        } else {
+            rate_at_least(&ranges, want)
+        };
         // SAFETY: live device.
         let rc = unsafe { (self.api.set_rate)(self.dev, DIR_RX, 0, target) };
         self.check(rc, "could not set the sample rate")?;
@@ -683,7 +749,11 @@ impl RxRadio for SoapyRadio {
                         let rc = unsafe { (self.api.set_gain_mode)(self.dev, DIR_RX, 0, false) };
                         self.check(rc, "could not turn off automatic gain")?;
                     }
-                    let v = if is_gain_reduction(&self.gain_names()) { turned_around(g, &r) } else { g };
+                    let v = if is_gain_reduction(&self.gain_names()) {
+                        turned_around(g, &r)
+                    } else {
+                        g
+                    };
                     // SAFETY: live device.
                     let rc = unsafe { (self.api.set_gain)(self.dev, DIR_RX, 0, v) };
                     self.check(rc, "could not set the gain")
@@ -697,7 +767,8 @@ impl RxRadio for SoapyRadio {
             match gain_value(setting, &r, false)? {
                 None => Err("this gain stage has no automatic setting".into()),
                 Some(v) => {
-                    let c = CString::new(stage).map_err(|_| "the gain stage name holds a zero byte".to_string())?;
+                    let c = CString::new(stage)
+                        .map_err(|_| "the gain stage name holds a zero byte".to_string())?;
                     // SAFETY: the name is a valid C string for the call; live device.
                     let rc = unsafe { (self.api.set_gain_elem)(self.dev, DIR_RX, 0, c.as_ptr(), v) };
                     self.check(rc, &format!("could not set the {stage} gain"))
@@ -714,9 +785,14 @@ impl RxRadio for SoapyRadio {
         let fmt = CString::new(FORMAT_CF32).map_err(|_| "bad format name".to_string())?;
         let api = &self.api;
         let dev = self.dev;
-        let stream = with_kwargs(&BTreeMap::new(), |kw| unsafe { (api.setup_stream)(dev, DIR_RX, fmt.as_ptr(), chan.as_ptr(), 1, kw) })?;
+        let stream = with_kwargs(&BTreeMap::new(), |kw| unsafe {
+            (api.setup_stream)(dev, DIR_RX, fmt.as_ptr(), chan.as_ptr(), 1, kw)
+        })?;
         if stream.is_null() {
-            return Err(format!("could not start the sample stream: {}", self.api.detail(0)));
+            return Err(format!(
+                "could not start the sample stream: {}",
+                self.api.detail(0)
+            ));
         }
         // SAFETY: live device and stream.
         let rc = unsafe { (self.api.activate)(self.dev, stream, 0, 0, 0) };
@@ -744,7 +820,17 @@ impl RxRadio for SoapyRadio {
         let mut flags: c_int = 0;
         let mut ts: i64 = 0;
         // SAFETY: the buffer holds out.len() complex CF32 samples, and the stream is live.
-        let rc = unsafe { (self.api.read_stream)(self.dev, self.stream, bufs.as_ptr(), out.len(), &mut flags, &mut ts, READ_TIMEOUT_US) };
+        let rc = unsafe {
+            (self.api.read_stream)(
+                self.dev,
+                self.stream,
+                bufs.as_ptr(),
+                out.len(),
+                &mut flags,
+                &mut ts,
+                READ_TIMEOUT_US,
+            )
+        };
         match classify_read(rc) {
             ReadOutcome::Samples(n) => {
                 for (i, s) in out.iter_mut().enumerate().take(n) {
@@ -764,7 +850,10 @@ impl RxRadio for SoapyRadio {
             ReadOutcome::Failed(code) => {
                 self.failures += 1;
                 if self.failures > MAX_STREAM_FAILURES {
-                    Err(format!("the radio stopped delivering samples: {}", self.api.detail(code)))
+                    Err(format!(
+                        "the radio stopped delivering samples: {}",
+                        self.api.detail(code)
+                    ))
                 } else {
                     Ok(0)
                 }
@@ -806,7 +895,11 @@ mod tests {
     use super::*;
 
     fn r(lo: f64, hi: f64, step: f64) -> SRange {
-        SRange { minimum: lo, maximum: hi, step }
+        SRange {
+            minimum: lo,
+            maximum: hi,
+            step,
+        }
     }
 
     #[test]
@@ -834,7 +927,10 @@ mod tests {
 
     #[test]
     fn rate_is_slowest_offered_at_or_above() {
-        let ranges = [r(2_500_000.0, 2_500_000.0, 0.0), r(10_000_000.0, 10_000_000.0, 0.0)];
+        let ranges = [
+            r(2_500_000.0, 2_500_000.0, 0.0),
+            r(10_000_000.0, 10_000_000.0, 0.0),
+        ];
         assert_eq!(rate_at_least(&ranges, 4_000_000.0), 10_000_000.0);
         assert_eq!(rate_at_least(&ranges, 2_000_000.0), 2_500_000.0);
         let cont = [r(250_000.0, 61_440_000.0, 0.0)];
@@ -864,9 +960,18 @@ mod tests {
     #[test]
     fn gain_is_clamped_and_snapped() {
         let stage = r(0.0, 49.6, 1.0);
-        assert_eq!(gain_value(GainSetting::Manual(60.0), &stage, false), Ok(Some(49.0)));
-        assert_eq!(gain_value(GainSetting::Manual(-3.0), &stage, false), Ok(Some(0.0)));
-        assert_eq!(gain_value(GainSetting::Manual(12.4), &stage, false), Ok(Some(12.0)));
+        assert_eq!(
+            gain_value(GainSetting::Manual(60.0), &stage, false),
+            Ok(Some(49.0))
+        );
+        assert_eq!(
+            gain_value(GainSetting::Manual(-3.0), &stage, false),
+            Ok(Some(0.0))
+        );
+        assert_eq!(
+            gain_value(GainSetting::Manual(12.4), &stage, false),
+            Ok(Some(12.0))
+        );
         assert_eq!(gain_value(GainSetting::Auto, &stage, true), Ok(None));
         assert!(gain_value(GainSetting::Auto, &stage, false).is_err());
         assert!(gain_value(GainSetting::Manual(f32::NAN), &stage, false).is_err());
@@ -894,7 +999,9 @@ mod tests {
 
     #[test]
     fn missing_library_says_what_to_do() {
-        let err = Api::load_from(&["kahf-no-such-soapysdr-library.so"]).err().expect("must fail");
+        let err = Api::load_from(&["kahf-no-such-soapysdr-library.so"])
+            .err()
+            .expect("must fail");
         assert!(err.contains("SoapySDR is not available"), "{err}");
         assert!(err.contains("kahf-no-such-soapysdr-library.so"), "{err}");
         assert!(err.contains("Install the SoapySDR library"), "{err}");
@@ -909,7 +1016,10 @@ mod tests {
 
     #[test]
     fn union_and_labels() {
-        assert_eq!(union_range(&[r(24e6, 1.7e9, 0.0), r(2e9, 3e9, 0.0)]), (24_000_000, 3_000_000_000));
+        assert_eq!(
+            union_range(&[r(24e6, 1.7e9, 0.0), r(2e9, 3e9, 0.0)]),
+            (24_000_000, 3_000_000_000)
+        );
         assert_eq!(union_range(&[]), (0, u64::MAX));
         let mut m = BTreeMap::new();
         m.insert("driver".to_string(), "rtlsdr".to_string());

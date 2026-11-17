@@ -3,18 +3,16 @@
 use iced::keyboard::{key::Named, Key};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    button, center, checkbox, column, container, pick_list, progress_bar, radio, row, slider,
-    space, text_editor as editor, text_input, toggler, Column,
+    button, center, checkbox, column, container, pick_list, progress_bar, radio, row, slider, space,
+    text_editor as editor, text_input, toggler, Column,
 };
 use iced::{Fill, Length};
 
-use crate::app::{
-    App, FileCmd, Location, Message, Role, TxAction, KINDS, PROFILES,
-};
+use crate::app::{App, FileCmd, Location, Message, Role, TxAction, KINDS, PROFILES};
 use crate::icons::{self, Icon};
 use crate::sample::{self, Chat, FileState};
-use crate::tech::grid;
 use crate::strings as s;
+use crate::tech::grid;
 use crate::theme::{self, Kind};
 use crate::view::*;
 
@@ -38,13 +36,25 @@ fn kind_tip(kind: sample::Kind) -> &'static str {
 
 fn chat_cells<'a>(c: &Chat) -> Vec<El<'a>> {
     let who = if c.mine { theme::ACCENT } else { theme::INFO };
-    let kind_color = if c.kind == sample::Kind::Urgent { theme::DANGER } else { theme::MUTED };
+    let kind_color = if c.kind == sample::Kind::Urgent {
+        theme::DANGER
+    } else {
+        theme::MUTED
+    };
     vec![
         grid::cell(c.time.clone(), Length::Fixed(52.0), Some(theme::MUTED)),
         grid::cell(c.from.clone(), Length::Fixed(64.0), Some(who)),
         t(c.text.clone()).size(13).width(Fill).into(),
         tip(
-            grid::cell(if c.kind == sample::Kind::Chat { String::new() } else { c.kind.label().to_string() }, Length::Fixed(64.0), Some(kind_color)),
+            grid::cell(
+                if c.kind == sample::Kind::Chat {
+                    String::new()
+                } else {
+                    c.kind.label().to_string()
+                },
+                Length::Fixed(64.0),
+                Some(kind_color),
+            ),
             kind_tip(c.kind),
         ),
     ]
@@ -52,18 +62,33 @@ fn chat_cells<'a>(c: &Chat) -> Vec<El<'a>> {
 
 /// Messages as table rows. With `selectable` they can be picked to show their route.
 fn chat_list<'a>(chats: &[Chat], selectable: Option<usize>) -> El<'a> {
-    let cols = [("Time", Length::Fixed(52.0)), ("From", Length::Fixed(64.0)), ("Message", Fill), ("Kind", Length::Fixed(64.0))];
+    let cols = [
+        ("Time", Length::Fixed(52.0)),
+        ("From", Length::Fixed(64.0)),
+        ("Message", Fill),
+        ("Kind", Length::Fixed(64.0)),
+    ];
     let mut col = Column::new();
     for (i, c) in chats.iter().enumerate() {
         let msg = selectable.map(|_| Message::SelectMsg(i));
         let row = table_row(chat_cells(c), selectable == Some(i), msg);
-        col = col.push(if selectable.is_some() { tip(row, s::TIP_PICK_MESSAGE) } else { row });
+        col = col.push(if selectable.is_some() {
+            tip(row, s::TIP_PICK_MESSAGE)
+        } else {
+            row
+        });
     }
     column![table_header(&cols), scroll(col)].width(Fill).into()
 }
 
 fn setting<'a>(title: &'static str, desc: &'static str, control: impl Into<El<'a>>) -> El<'a> {
-    column![t(title).font(theme::SEMIBOLD), muted(desc).size(12), control.into()].spacing(4).into()
+    column![
+        t(title).font(theme::SEMIBOLD),
+        muted(desc).size(12),
+        control.into()
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn file_state_label(state: FileState) -> &'static str {
@@ -106,7 +131,13 @@ impl App {
         if self.sample {
             for (i, st) in sample::STATIONS.iter().enumerate() {
                 let snr = 8 + st.call.bytes().map(|b| b as u32).sum::<u32>() % 24;
-                let color = if snr >= 20 { theme::ACCENT } else if snr >= 12 { theme::AMBER } else { theme::MUTED };
+                let color = if snr >= 20 {
+                    theme::ACCENT
+                } else if snr >= 12 {
+                    theme::AMBER
+                } else {
+                    theme::MUTED
+                };
                 rows = rows.push(table_row(
                     vec![
                         mono(st.call).size(12).color(theme::INFO).width(cols[0].1).into(),
@@ -121,9 +152,16 @@ impl App {
         } else {
             rows = rows.push(container(muted(s::STATIONS_EMPTY_HINT)).padding(6));
         }
-        container(column![strip(s::STATIONS_HEARD_HEADING), table_header(&cols), scroll(rows)].width(Fill))
-            .height(150)
-            .into()
+        container(
+            column![
+                strip(s::STATIONS_HEARD_HEADING),
+                table_header(&cols),
+                scroll(rows)
+            ]
+            .width(Fill),
+        )
+        .height(150)
+        .into()
     }
 
     fn conversation_panel(&self) -> El<'_> {
@@ -135,25 +173,35 @@ impl App {
         let send = tip(
             btn(format!("{}  {}", s::SEND, s::SEND_HINT), Kind::Primary)
                 .on_press_maybe((!self.listen_only).then_some(Message::RequestTx(TxAction::Send))),
-            if self.listen_only { s::TIP_SEND_BLOCKED } else { s::TIP_SEND },
+            if self.listen_only {
+                s::TIP_SEND_BLOCKED
+            } else {
+                s::TIP_SEND
+            },
         );
-        let attach = tip(btn(s::ATTACH, Kind::Secondary).on_press(Message::AttachOpen(true)), s::TIP_ATTACH);
+        let attach = tip(
+            btn(s::ATTACH, Kind::Secondary).on_press(Message::AttachOpen(true)),
+            s::TIP_ATTACH,
+        );
         let kinds: Vec<(sample::Kind, &'static str)> = KINDS.iter().map(|k| (*k, k.label())).collect();
-        let mut composer = column![
-            row![
-                tip(
-                    row![label_caps(s::KIND_LABEL), segmented(&kinds, self.kind, Message::KindPicked)]
-                        .spacing(8)
-                        .align_y(iced::Center),
-                    s::TIP_KIND
-                ),
-                attach,
-                space().width(Fill),
-                num(s::char_count(self.composer_len())).size(11).color(theme::MUTED),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
+        let mut composer = column![row![
+            tip(
+                row![
+                    label_caps(s::KIND_LABEL),
+                    segmented(&kinds, self.kind, Message::KindPicked)
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                s::TIP_KIND
+            ),
+            attach,
+            space().width(Fill),
+            num(s::char_count(self.composer_len()))
+                .size(11)
+                .color(theme::MUTED),
         ]
+        .spacing(8)
+        .align_y(iced::Center),]
         .spacing(4);
         if self.attach_open {
             composer = composer.push(self.attach_panel());
@@ -175,8 +223,15 @@ impl App {
                 heading(s::CONVERSATION_HEADING),
                 space().width(Fill),
                 tip(
-                    btn(if self.panel_shown { s::PANEL_HIDE } else { s::PANEL_SHOW }, Kind::Secondary)
-                        .on_press(Message::TogglePanel),
+                    btn(
+                        if self.panel_shown {
+                            s::PANEL_HIDE
+                        } else {
+                            s::PANEL_SHOW
+                        },
+                        Kind::Secondary
+                    )
+                    .on_press(Message::TogglePanel),
                     s::TIP_PANEL
                 ),
             ]
@@ -185,7 +240,10 @@ impl App {
         .padding([2, 8])
         .width(Fill)
         .style(theme::header_row);
-        column![head, thread, container(composer).padding(6)].width(Fill).height(Fill).into()
+        column![head, thread, container(composer).padding(6)]
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     /// Link readout: state line, mode line, SNR bar, key-value grid, then connect and transmit.
@@ -199,20 +257,35 @@ impl App {
         };
         let snr = self.snr_now();
         let mut link = column![
-            iced::widget::text(state_text).size(12).font(iced::Font::MONOSPACE).color(state_color),
-            iced::widget::text(format!("{} {}", s::MODE_VALUE, self.profile)).size(22).font(iced::Font::MONOSPACE),
+            iced::widget::text(state_text)
+                .size(12)
+                .font(iced::Font::MONOSPACE)
+                .color(state_color),
+            iced::widget::text(format!("{} {}", s::MODE_VALUE, self.profile))
+                .size(22)
+                .font(iced::Font::MONOSPACE),
             row![
                 label_caps(s::SNR_LABEL),
-                iced::widget::canvas(crate::icons::LevelBar { level: snr / 60.0, peak: snr / 60.0 })
-                    .width(Fill)
-                    .height(10),
+                iced::widget::canvas(crate::icons::LevelBar {
+                    level: snr / 60.0,
+                    peak: snr / 60.0
+                })
+                .width(Fill)
+                .height(10),
                 num(format!("{snr:.0} dB")).size(12),
             ]
             .spacing(6)
             .align_y(iced::Center),
             key_value(s::STATE_LABEL, if linked { s::LINK_UP } else { s::NO_LINK_TEXT }),
             key_value(s::CONNECTION_LABEL, self.rig.to_string()),
-            key_value(s::DEVICE_LABEL, if self.audio_in.is_empty() { s::DEVICE_SYSTEM.to_string() } else { self.audio_in.clone() }),
+            key_value(
+                s::DEVICE_LABEL,
+                if self.audio_in.is_empty() {
+                    s::DEVICE_SYSTEM.to_string()
+                } else {
+                    self.audio_in.clone()
+                }
+            ),
             tip(key_value(s::SPEED_LABEL, s::NOT_REPORTED), s::TIP_SPEED),
         ]
         .spacing(5);
@@ -235,15 +308,26 @@ impl App {
         link = link.push(
             row![
                 if linked {
-                    tip(btn(s::DISCONNECT, Kind::Secondary).on_press(Message::RequestDisconnect), s::TIP_DISCONNECT)
+                    tip(
+                        btn(s::DISCONNECT, Kind::Secondary).on_press(Message::RequestDisconnect),
+                        s::TIP_DISCONNECT,
+                    )
                 } else {
                     tip(
-                        btn(s::CONNECT_ELLIPSIS, Kind::Primary)
-                            .on_press_maybe((!self.listen_only).then_some(Message::RequestTx(TxAction::Connect))),
-                        if self.listen_only { s::TIP_CONNECT_BLOCKED } else { s::TIP_CONNECT },
+                        btn(s::CONNECT_ELLIPSIS, Kind::Primary).on_press_maybe(
+                            (!self.listen_only).then_some(Message::RequestTx(TxAction::Connect)),
+                        ),
+                        if self.listen_only {
+                            s::TIP_CONNECT_BLOCKED
+                        } else {
+                            s::TIP_CONNECT
+                        },
                     )
                 },
-                tip(btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)), s::TIP_ATTACH),
+                tip(
+                    btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)),
+                    s::TIP_ATTACH
+                ),
             ]
             .spacing(6),
         );
@@ -273,7 +357,9 @@ impl App {
                     field(
                         s::LEVEL_LABEL,
                         row![
-                            slider(0.0..=100.0, self.level, Message::Level).step(1.0f32).width(Fill),
+                            slider(0.0..=100.0, self.level, Message::Level)
+                                .step(1.0f32)
+                                .width(Fill),
                             small(s::level_pct(self.level)).width(40),
                         ]
                         .spacing(8)
@@ -298,7 +384,14 @@ impl App {
                     s::RIG_HEADING,
                     column![
                         key_value(s::SET_RIG_CONTROL, self.rig.to_string()),
-                        key_value(s::RIG_ADDR_LABEL, if self.rig_addr.is_empty() { "-".to_string() } else { self.rig_addr.clone() }),
+                        key_value(
+                            s::RIG_ADDR_LABEL,
+                            if self.rig_addr.is_empty() {
+                                "-".to_string()
+                            } else {
+                                self.rig_addr.clone()
+                            }
+                        ),
                     ]
                     .spacing(5),
                 ),
@@ -378,7 +471,12 @@ impl App {
                 empty_state(Icon::Wave, s::MESSAGES_EMPTY_TITLE, s::MESSAGES_EMPTY_HINT),
             );
         }
-        let cols = [("Call", Length::Fixed(64.0)), ("Last message", Fill), ("When", Length::Fixed(72.0)), ("New", Length::Fixed(28.0))];
+        let cols = [
+            ("Call", Length::Fixed(64.0)),
+            ("Last message", Fill),
+            ("When", Length::Fixed(72.0)),
+            ("New", Length::Fixed(28.0)),
+        ];
         let mut list = Column::new();
         for (i, c) in sample::CONVERSATIONS.iter().enumerate() {
             let unread = self.conv_unread.get(i).copied().unwrap_or(0);
@@ -387,7 +485,15 @@ impl App {
                     grid::cell(c.call, cols[0].1, Some(theme::INFO)),
                     t(c.preview).size(13).width(cols[1].1).into(),
                     grid::cell(c.when, cols[2].1, Some(theme::MUTED)),
-                    grid::cell(if unread > 0 { unread.to_string() } else { String::new() }, cols[3].1, Some(theme::ACCENT)),
+                    grid::cell(
+                        if unread > 0 {
+                            unread.to_string()
+                        } else {
+                            String::new()
+                        },
+                        cols[3].1,
+                        Some(theme::ACCENT),
+                    ),
                 ],
                 self.conv_sel == i,
                 Some(Message::SelectConversation(i)),
@@ -396,20 +502,34 @@ impl App {
         let chats = self.conv_chats();
         let selected = self.msg_sel.unwrap_or(chats.len().saturating_sub(1));
         let left = column![table_header(&cols), scroll(list)].width(400);
-        let body = row![left, vline(), chat_list(&chats, Some(selected)), self.messages_tech()]
-            .spacing(0)
-            .height(Fill);
+        let body = row![
+            left,
+            vline(),
+            chat_list(&chats, Some(selected)),
+            self.messages_tech()
+        ]
+        .spacing(0)
+        .height(Fill);
         page(s::SECTION_MESSAGES, None, true, body)
     }
 
     // ------------------------------------------------------------------- Mail
 
     pub fn screen_mail(&self) -> El<'_> {
-        let cols = [("From", Length::Fixed(64.0)), ("Subject", Fill), ("Sig", Length::Fixed(30.0)), ("When", Length::Fixed(90.0))];
+        let cols = [
+            ("From", Length::Fixed(64.0)),
+            ("Subject", Fill),
+            ("Sig", Length::Fixed(30.0)),
+            ("When", Length::Fixed(90.0)),
+        ];
         let mut list = Column::new();
         for (i, m) in sample::MAILS.iter().enumerate().filter(|_| self.sample) {
             let unread = self.mail_unread.get(i).copied().unwrap_or(false);
-            let subject = if unread { t(m.subject).size(13).color(theme::ACCENT) } else { t(m.subject).size(13) };
+            let subject = if unread {
+                t(m.subject).size(13).color(theme::ACCENT)
+            } else {
+                t(m.subject).size(13)
+            };
             list = list.push(table_row(
                 vec![
                     grid::cell(m.from, cols[0].1, Some(theme::INFO)),
@@ -453,7 +573,10 @@ impl App {
         .height(Fill);
         page(
             s::MAIL_TITLE,
-            Some(tip(btn(s::MAIL_COMPOSE, Kind::Primary).on_press(Message::MailCompose), s::TIP_COMPOSE)),
+            Some(tip(
+                btn(s::MAIL_COMPOSE, Kind::Primary).on_press(Message::MailCompose),
+                s::TIP_COMPOSE,
+            )),
             self.sample,
             body,
         )
@@ -461,7 +584,10 @@ impl App {
 
     fn mail_form(&self) -> El<'_> {
         column![
-            tip(btn(s::MAIL_BACK, Kind::Ghost).on_press(Message::MailBack), s::TIP_MAIL_BACK),
+            tip(
+                btn(s::MAIL_BACK, Kind::Ghost).on_press(Message::MailBack),
+                s::TIP_MAIL_BACK
+            ),
             field(
                 s::MAIL_TO,
                 text_input(s::TARGET_PLACEHOLDER, &self.mail_to)
@@ -482,14 +608,22 @@ impl App {
                 .height(Fill)
                 .style(theme::editor),
             tip(
-                checkbox(self.mail_signed).label(s::MAIL_SIGNED).on_toggle(Message::MailSigned),
+                checkbox(self.mail_signed)
+                    .label(s::MAIL_SIGNED)
+                    .on_toggle(Message::MailSigned),
                 s::TIP_KIND_SIGNED
             ),
             row![
-                tip(btn_icon(Icon::Paperclip, s::MAIL_ATTACH, Kind::Secondary), s::TIP_ATTACH),
+                tip(
+                    btn_icon(Icon::Paperclip, s::MAIL_ATTACH, Kind::Secondary),
+                    s::TIP_ATTACH
+                ),
                 muted(s::MAIL_ATTACH_NONE).size(12),
                 space().width(Fill),
-                tip(btn_icon(Icon::Send, s::MAIL_QUEUE, Kind::Primary).on_press(Message::MailQueue), s::TIP_QUEUE),
+                tip(
+                    btn_icon(Icon::Send, s::MAIL_QUEUE, Kind::Primary).on_press(Message::MailQueue),
+                    s::TIP_QUEUE
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -502,7 +636,15 @@ impl App {
 
     pub fn screen_files(&self) -> El<'_> {
         if self.files.is_empty() {
-            return page(s::FILES_TITLE, Some(tip(btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)), s::TIP_ATTACH)), false, empty_state(Icon::Files, s::FILES_EMPTY_TITLE, s::FILES_EMPTY_HINT));
+            return page(
+                s::FILES_TITLE,
+                Some(tip(
+                    btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)),
+                    s::TIP_ATTACH,
+                )),
+                false,
+                empty_state(Icon::Files, s::FILES_EMPTY_TITLE, s::FILES_EMPTY_HINT),
+            );
         }
         let cols = [
             (s::COL_FILE, Fill),
@@ -526,7 +668,11 @@ impl App {
                 actions = actions.push(tip(
                     btn(s::FILE_START, Kind::Secondary)
                         .on_press_maybe((!blocked).then_some(Message::File(i, FileCmd::Start))),
-                    if blocked { s::TIP_START_BLOCKED } else { s::TIP_START },
+                    if blocked {
+                        s::TIP_START_BLOCKED
+                    } else {
+                        s::TIP_START
+                    },
                 ));
             }
             if f.state == FileState::Active {
@@ -549,15 +695,37 @@ impl App {
             rows = rows.push(table_row(
                 vec![
                     name.into(),
-                    grid::cell(if f.sending { s::FILE_SENDING } else { s::FILE_RECEIVING }, cols[1].1, Some(theme::MUTED)),
+                    grid::cell(
+                        if f.sending {
+                            s::FILE_SENDING
+                        } else {
+                            s::FILE_RECEIVING
+                        },
+                        cols[1].1,
+                        Some(theme::MUTED),
+                    ),
                     grid::cell(format!("{} kB", f.bytes / 1024), cols[2].1, None),
-                    row![progress_bar(0.0..=1.0, f.progress).girth(5).length(80).style(theme::progress), num(s::percent(f.progress)).size(12).color(theme::MUTED)]
-                        .spacing(8)
-                        .align_y(iced::Center)
-                        .width(cols[3].1)
-                        .into(),
+                    row![
+                        progress_bar(0.0..=1.0, f.progress)
+                            .girth(5)
+                            .length(80)
+                            .style(theme::progress),
+                        num(s::percent(f.progress)).size(12).color(theme::MUTED)
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .width(cols[3].1)
+                    .into(),
                     grid::cell(file_state_label(f.state), cols[4].1, None),
-                    grid::cell(f.retries.to_string(), cols[5].1, if f.retries > 0 { Some(theme::AMBER) } else { Some(theme::MUTED) }),
+                    grid::cell(
+                        f.retries.to_string(),
+                        cols[5].1,
+                        if f.retries > 0 {
+                            Some(theme::AMBER)
+                        } else {
+                            Some(theme::MUTED)
+                        },
+                    ),
                     actions.width(cols[6].1).into(),
                 ],
                 shown == i,
@@ -566,9 +734,16 @@ impl App {
         }
         page(
             s::FILES_TITLE,
-            Some(tip(btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)), s::TIP_ATTACH)),
+            Some(tip(
+                btn(s::FILES_SEND_BUTTON, Kind::Secondary).on_press(Message::AttachOpen(true)),
+                s::TIP_ATTACH,
+            )),
             self.sample,
-            row![column![table_header(&cols), scroll(rows)].width(Fill), self.files_tech()].height(Fill),
+            row![
+                column![table_header(&cols), scroll(rows)].width(Fill),
+                self.files_tech()
+            ]
+            .height(Fill),
         )
     }
 
@@ -597,7 +772,12 @@ impl App {
             );
         }
         if !self.sample {
-            return page(s::RELAY_TITLE, None, false, empty_state(Icon::Relay, s::RELAY_EMPTY_TITLE, s::RELAY_EMPTY_HINT));
+            return page(
+                s::RELAY_TITLE,
+                None,
+                false,
+                empty_state(Icon::Relay, s::RELAY_EMPTY_TITLE, s::RELAY_EMPTY_HINT),
+            );
         }
         let sched_cols = [
             (s::COL_CHANNEL, Length::Fixed(160.0)),
@@ -620,12 +800,22 @@ impl App {
         }
         sched = sched.push(
             row![
-                tip(btn(s::RELAY_ACCEPT, Kind::Primary).on_press(Message::RelayAccept), s::TIP_ACCEPT),
-                tip(btn(s::RELAY_DECLINE, Kind::Secondary).on_press(Message::RelayDecline), s::TIP_DECLINE),
+                tip(
+                    btn(s::RELAY_ACCEPT, Kind::Primary).on_press(Message::RelayAccept),
+                    s::TIP_ACCEPT
+                ),
+                tip(
+                    btn(s::RELAY_DECLINE, Kind::Secondary).on_press(Message::RelayDecline),
+                    s::TIP_DECLINE
+                ),
             ]
             .spacing(8),
         );
-        let hop_cols = [(s::COL_TIME, W_TIME), (s::COL_FROM_TO, Fill), (s::COL_STATE, W_ROLE)];
+        let hop_cols = [
+            (s::COL_TIME, W_TIME),
+            (s::COL_FROM_TO, Fill),
+            (s::COL_STATE, W_ROLE),
+        ];
         let mut hops = column![table_header(&hop_cols)];
         for (time, route, state) in sample::HOPS {
             hops = hops.push(table_row(
@@ -639,8 +829,16 @@ impl App {
             ));
         }
         let stats = row![
-            column![label_caps(s::RELAY_SENT_TODAY), heading(sample::RELAY_TODAY.to_string()).font(iced::Font::MONOSPACE)].spacing(4),
-            column![label_caps(s::RELAY_SENT_TOTAL), heading(sample::RELAY_TOTAL.to_string()).font(iced::Font::MONOSPACE)].spacing(4),
+            column![
+                label_caps(s::RELAY_SENT_TODAY),
+                heading(sample::RELAY_TODAY.to_string()).font(iced::Font::MONOSPACE)
+            ]
+            .spacing(4),
+            column![
+                label_caps(s::RELAY_SENT_TOTAL),
+                heading(sample::RELAY_TOTAL.to_string()).font(iced::Font::MONOSPACE)
+            ]
+            .spacing(4),
         ]
         .spacing(40);
         page(
@@ -661,9 +859,17 @@ impl App {
     // ---------------------------------------------------------------- Logbook
 
     pub fn screen_logbook(&self) -> El<'_> {
-        let export = Some(tip(btn(s::LOG_EXPORT, Kind::Secondary).on_press(Message::LogExport), s::TIP_EXPORT));
+        let export = Some(tip(
+            btn(s::LOG_EXPORT, Kind::Secondary).on_press(Message::LogExport),
+            s::TIP_EXPORT,
+        ));
         if !self.sample {
-            return page(s::LOG_TITLE, export, false, empty_state(Icon::Logbook, s::LOG_EMPTY_TITLE, s::LOG_EMPTY_HINT));
+            return page(
+                s::LOG_TITLE,
+                export,
+                false,
+                empty_state(Icon::Logbook, s::LOG_EMPTY_TITLE, s::LOG_EMPTY_HINT),
+            );
         }
         let cols = [
             (s::COL_DATE, W_WHEN),
@@ -678,7 +884,8 @@ impl App {
         let mut rows = Column::new();
         let mut shown = 0;
         for qso in sample::QSOS {
-            if !q.is_empty() && !qso.call.to_lowercase().contains(&q) && !qso.note.to_lowercase().contains(&q) {
+            if !q.is_empty() && !qso.call.to_lowercase().contains(&q) && !qso.note.to_lowercase().contains(&q)
+            {
                 continue;
             }
             shown += 1;
@@ -718,15 +925,28 @@ impl App {
             t(s::MAP_HEADLINE).font(theme::SEMIBOLD).size(16),
             t(s::MAP_BODY),
             muted(s::MAP_NO_MAP_HERE),
-            tip(btn(s::MAP_BUTTON, Kind::Primary).on_press(Message::OpenMap), s::TIP_MAP_OPEN),
+            tip(
+                btn(s::MAP_BUTTON, Kind::Primary).on_press(Message::OpenMap),
+                s::TIP_MAP_OPEN
+            ),
             num(s::MAP_URL).color(theme::MUTED),
             muted(s::MAP_PRIVACY).size(12),
             section_box(
                 s::MAP_SUMMARY,
                 column![
                     key_value(s::MAP_LOC_LABEL, self.location.label()),
-                    key_value(s::MAP_HEARD_LABEL, if self.sample { crate::sample::STATIONS.len().to_string() } else { "0".to_string() }),
-                    key_value(s::MAP_LINK_LABEL, self.link.clone().unwrap_or_else(|| s::NO_LINK_TEXT.to_string())),
+                    key_value(
+                        s::MAP_HEARD_LABEL,
+                        if self.sample {
+                            crate::sample::STATIONS.len().to_string()
+                        } else {
+                            "0".to_string()
+                        }
+                    ),
+                    key_value(
+                        s::MAP_LINK_LABEL,
+                        self.link.clone().unwrap_or_else(|| s::NO_LINK_TEXT.to_string())
+                    ),
                 ]
                 .spacing(5),
             ),
@@ -737,7 +957,11 @@ impl App {
             s::MAP_TITLE,
             None,
             false,
-            row![container(left).width(Fill).height(Fill).padding([8, 4]), self.map_tech()].height(Fill),
+            row![
+                container(left).width(Fill).height(Fill).padding([8, 4]),
+                self.map_tech()
+            ]
+            .height(Fill),
         )
     }
 
@@ -755,22 +979,46 @@ impl App {
                     .style(theme::input)
                     .width(220),
             ),
-            setting(s::SET_FINGERPRINT, s::SET_FINGERPRINT_DESC, mono(s::SET_FINGERPRINT_NONE)),
+            setting(
+                s::SET_FINGERPRINT,
+                s::SET_FINGERPRINT_DESC,
+                mono(s::SET_FINGERPRINT_NONE)
+            ),
             setting(
                 s::SET_ROLE,
                 s::SET_ROLE_DESC,
-                segmented(&[(Role::Station, s::ROLE_STATION), (Role::Relay, s::ROLE_RELAY), (Role::Both, s::ROLE_BOTH)], self.role, Message::RoleChosen),
+                segmented(
+                    &[
+                        (Role::Station, s::ROLE_STATION),
+                        (Role::Relay, s::ROLE_RELAY),
+                        (Role::Both, s::ROLE_BOTH)
+                    ],
+                    self.role,
+                    Message::RoleChosen
+                ),
             ),
         ]
         .spacing(12);
 
         let audio = column![muted(s::SET_AUDIO_DESC), self.step_controls(3)].spacing(10);
 
-        let rig = column![muted(s::SET_RIG_DESC), field(s::SET_RIG_CONTROL, self.step_controls(1))].spacing(10);
+        let rig = column![
+            muted(s::SET_RIG_DESC),
+            field(s::SET_RIG_CONTROL, self.step_controls(1))
+        ]
+        .spacing(10);
 
-        let sdr = column![muted(s::SET_SDR_DESC), field(s::SET_SDR_DEVICE, self.step_controls(2))].spacing(10);
+        let sdr = column![
+            muted(s::SET_SDR_DESC),
+            field(s::SET_SDR_DEVICE, self.step_controls(2))
+        ]
+        .spacing(10);
 
-        let data = column![muted(s::SET_DATA_DESC), key_value(s::SET_DATA_PATH, s::DATA_NOT_CHOSEN)].spacing(10);
+        let data = column![
+            muted(s::SET_DATA_DESC),
+            key_value(s::SET_DATA_PATH, s::DATA_NOT_CHOSEN)
+        ]
+        .spacing(10);
 
         let mut location = column![muted(s::SET_LOCATION_DESC)].spacing(8);
         for l in Location::ALL {
@@ -786,7 +1034,9 @@ impl App {
             location = location.push(field(
                 s::LOC_RADIUS,
                 row![
-                    slider(5.0..=100.0, self.radius_km, Message::Radius).step(5.0f32).width(220),
+                    slider(5.0..=100.0, self.radius_km, Message::Radius)
+                        .step(5.0f32)
+                        .width(220),
                     t(s::km(self.radius_km)),
                 ]
                 .spacing(10)
@@ -796,21 +1046,33 @@ impl App {
 
         let relay = column![
             muted(s::SET_RELAY_DESC),
-            toggler(self.internet_relay).label(s::SET_RELAY_TOGGLE).style(theme::switch).on_toggle(Message::InternetRelay),
+            toggler(self.internet_relay)
+                .label(s::SET_RELAY_TOGGLE)
+                .style(theme::switch)
+                .on_toggle(Message::InternetRelay),
         ]
         .spacing(10);
 
         let listen = column![
             muted(s::SET_LISTEN_DESC),
-            toggler(self.listen_only).label(s::SET_LISTEN).style(theme::switch).on_toggle(Message::ToggleListen),
+            toggler(self.listen_only)
+                .label(s::SET_LISTEN)
+                .style(theme::switch)
+                .on_toggle(Message::ToggleListen),
         ]
         .spacing(10);
 
         let appearance = column![
             muted(s::SET_APPEARANCE_DESC),
-            toggler(self.sample).label(s::SET_SAMPLE).style(theme::switch).on_toggle(Message::ShowSample),
+            toggler(self.sample)
+                .label(s::SET_SAMPLE)
+                .style(theme::switch)
+                .on_toggle(Message::ShowSample),
             muted(s::SET_SAMPLE_DESC).size(12),
-            toggler(self.panel_shown).label(s::SET_PANEL).style(theme::switch).on_toggle(|_| Message::TogglePanel),
+            toggler(self.panel_shown)
+                .label(s::SET_PANEL)
+                .style(theme::switch)
+                .on_toggle(|_| Message::TogglePanel),
         ]
         .spacing(10);
 
@@ -818,7 +1080,10 @@ impl App {
             muted(s::SET_UPDATES_DESC),
             key_value(s::SET_VERSION, env!("CARGO_PKG_VERSION")),
             key_value(s::STATUS_UPDATES, s::UPDATE_NOT_CHECKED),
-            tip(btn(s::SET_CHECK, Kind::Secondary).on_press(Message::CheckUpdates), s::TIP_CHECK),
+            tip(
+                btn(s::SET_CHECK, Kind::Secondary).on_press(Message::CheckUpdates),
+                s::TIP_CHECK
+            ),
         ]
         .spacing(10);
 
