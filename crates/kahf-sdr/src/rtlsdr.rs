@@ -30,6 +30,9 @@ unsafe extern "C" {
     fn rtlsdr_set_sample_rate(dev: *mut RtlDev, rate: u32) -> c_int;
     fn rtlsdr_set_tuner_gain_mode(dev: *mut RtlDev, manual: c_int) -> c_int;
     fn rtlsdr_set_tuner_gain(dev: *mut RtlDev, gain: c_int) -> c_int;
+    fn rtlsdr_get_tuner_gains(dev: *mut RtlDev, gains: *mut c_int) -> c_int;
+    fn rtlsdr_set_agc_mode(dev: *mut RtlDev, on: c_int) -> c_int;
+    fn rtlsdr_get_sample_rate(dev: *mut RtlDev) -> u32;
     fn rtlsdr_set_freq_correction(dev: *mut RtlDev, ppm: c_int) -> c_int;
     fn rtlsdr_reset_buffer(dev: *mut RtlDev) -> c_int;
     fn rtlsdr_read_sync(dev: *mut RtlDev, buf: *mut c_void, len: c_int, n_read: *mut c_int) -> c_int;
@@ -37,29 +40,62 @@ unsafe extern "C" {
 
 /// librtlsdr returns -2 from set_freq_correction when the value is already set.
 const ALREADY_SET: c_int = -2;
-/// Bytes per read: 256 kB, about 55 ms at 2.4 Msps (16384 is the block size the driver wants).
-const BLOCK_BYTES: usize = 262_144;
+/// Highest sample rate the dongle delivers (OnAir refuses anything above it).
+const MAX_RATE: u32 = 3_200_000;
+/// Rate ceiling for a stable stream (OnAir caps the request here; above it most dongles drop samples).
+const STABLE_MAX_RATE: u32 = 2_560_000;
+/// Rate used when the caller asks for 0 (OnAir's default).
+const DEFAULT_RATE: u32 = 2_048_000;
 /// Blocks queued between the worker and read_iq before new blocks are dropped.
 const QUEUE_BLOCKS: usize = 64;
 /// How long read_iq waits for samples before it reports a stalled radio.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Converts one RTL-SDR byte to a float in [-1, 1): (value - 127.5) / 127.5.
+/// Converts one RTL-SDR byte to a float: (value - 127.4) / 128, the same mapping as OnAir's
+/// source_rtlsdr.cpp convert() (its (buf - 127.4f) / 128.f). The old (v - 127.5) / 127.5 differed slightly.
 #[inline]
 pub fn u8_to_f32(v: u8) -> f32 {
-    (v as f32 - 127.5) / 127.5
+    (v as f32 - 127.4) / 128.0
 }
 
 /// Inverse of [`u8_to_f32`], rounded and clamped to 0..=255.
 #[inline]
 pub fn f32_to_u8(x: f32) -> u8 {
-    (x * 127.5 + 127.5).round().clamp(0.0, 255.0) as u8
+    (x * 128.0 + 127.4).round().clamp(0.0, 255.0) as u8
+}
+
+/// Sample rate actually requested from librtlsdr, from the caller's rate. Mirrors OnAir's source_rtlsdr.cpp configure():
+/// refuse above 3.2 Msps, cap at 2.56 Msps, 0 means 2.048 Msps. Rates at or below 225 kHz, and those from 300 kHz up to 900 kHz,
+/// are raised to 900001 Hz (librtlsdr refuses the first; the second is not a stable rate). 225-300 kHz is kept.
+pub fn stream_rate(requested: u32) -> Result<u32, String> {
+    if requested > MAX_RATE {
+        return Err(format!(
+            "RTL-SDR gives at most 3.2 Msps; {:.0} Msps needs a faster radio",
+            requested as f64 / 1e6
+        ));
+    }
+    let base = if requested > 0 { requested } else { DEFAULT_RATE };
+    let want = base.min(STABLE_MAX_RATE);
+    Ok(if want < 900_001 && (want > 300_000 || want <= 225_000) {
+        900_001
+    } else {
+        want
+    })
+}
+
+/// Bytes per read_sync call, from the rate: about 100 ms of samples, a multiple of 16 kB, from 16 kB to 256 kB (OnAir's macOS
+/// read size; it bounds how long stop() waits for a read). At 2.4 Msps this is 256 kB, about 55 ms.
+pub fn read_bytes(rate: u32) -> usize {
+    let blocks = ((rate as f64 * 2.0 * 0.1) / 16384.0).round() as usize;
+    (blocks.max(1) * 16_384).clamp(16_384, 262_144)
 }
 
 /// Converts interleaved uint8 I/Q bytes to complex samples. A trailing odd byte is ignored.
 pub fn convert_iq(bytes: &[u8]) -> Vec<(f32, f32)> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| (u8_to_f32(p[0]), u8_to_f32(p[1])))
         .collect()
 }
@@ -98,8 +134,9 @@ pub struct RtlsdrRx {
 impl RtlsdrRx {
     /// Opens device `index` and tunes it.
     ///
-    /// `gain_tenths_db` = `None` leaves the tuner in automatic gain; `Some(g)` sets manual
-    /// gain in tenths of a dB (e.g. 496 = 49.6 dB). `ppm` is the frequency correction.
+    /// `gain_tenths_db` = `Some(g)` sets manual gain in tenths of a dB (e.g. 496 = 49.6 dB), snapped to the
+    /// nearest gain the tuner offers, as OnAir does. The tuner is always in manual gain mode (OnAir runs its own
+    /// AGC, with the RTL2832U's AGC off); `None` keeps the library's current gain. `ppm` is the frequency correction.
     /// Streaming starts immediately; samples arrive through [`IqSource::read_iq`].
     pub fn open(
         index: u32,
@@ -114,22 +151,22 @@ impl RtlsdrRx {
         }
         let handle = Handle(dev);
 
-        let configure = || -> Result<(), String> {
-            if unsafe { rtlsdr_set_sample_rate(dev, sample_rate) } < 0 {
-                return Err(format!("RTL-SDR: sample rate {sample_rate} Hz refused"));
+        // Same order as OnAir's openDevice + configure: AGC off, manual gain mode, rate, ppm, frequency, gain.
+        // The buffer reset is done by the worker before its first read (OnAir's streamLoop), not here.
+        let configure = || -> Result<u32, String> {
+            unsafe { rtlsdr_set_agc_mode(dev, 0) };
+            if unsafe { rtlsdr_set_tuner_gain_mode(dev, 1) } < 0 {
+                return Err("RTL-SDR: manual gain mode refused".to_string());
             }
-            match gain_tenths_db {
-                None => {
-                    unsafe { rtlsdr_set_tuner_gain_mode(dev, 0) };
-                }
-                Some(g) => {
-                    if unsafe { rtlsdr_set_tuner_gain_mode(dev, 1) } < 0
-                        || unsafe { rtlsdr_set_tuner_gain(dev, g) } < 0
-                    {
-                        return Err(format!("RTL-SDR: manual gain {g} refused"));
-                    }
-                }
+            let want = stream_rate(sample_rate)?;
+            if unsafe { rtlsdr_set_sample_rate(dev, want) } < 0 {
+                return Err(format!("RTL-SDR: sample rate {want} Hz refused"));
             }
+            // the rate the dongle actually runs at (OnAir keeps this, not the request)
+            let actual = match unsafe { rtlsdr_get_sample_rate(dev) } {
+                0 => want,
+                r => r,
+            };
             let r = unsafe { rtlsdr_set_freq_correction(dev, ppm) };
             if r < 0 && r != ALREADY_SET {
                 return Err(format!("RTL-SDR: frequency correction {ppm} ppm refused ({r})"));
@@ -137,25 +174,29 @@ impl RtlsdrRx {
             if unsafe { rtlsdr_set_center_freq(dev, freq_hz) } < 0 {
                 return Err(format!("RTL-SDR: driver refused {freq_hz} Hz"));
             }
-            if unsafe { rtlsdr_reset_buffer(dev) } < 0 {
-                return Err("RTL-SDR: reset buffer failed".to_string());
+            if let Some(g) = gain_tenths_db {
+                set_nearest_gain(dev, g)?;
             }
-            Ok(())
+            Ok(actual)
         };
-        if let Err(e) = configure() {
-            unsafe { rtlsdr_close(dev) };
-            return Err(e);
-        }
+        let rate = match configure() {
+            Ok(rate) => rate,
+            Err(e) => {
+                unsafe { rtlsdr_close(dev) };
+                return Err(e);
+            }
+        };
 
         let (tx, rx) = mpsc::sync_channel(QUEUE_BLOCKS);
         let running = Arc::new(AtomicBool::new(true));
+        let block_bytes = read_bytes(rate);
         let worker = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("rtlsdr-rx".into())
                 .spawn(move || {
                     let handle = handle;
-                    worker_loop(handle.0, tx, running);
+                    worker_loop(handle.0, tx, running, block_bytes);
                 })
                 .map_err(|e| {
                     unsafe { rtlsdr_close(dev) };
@@ -165,7 +206,7 @@ impl RtlsdrRx {
 
         Ok(Self {
             dev: handle,
-            rate: sample_rate as f64,
+            rate: rate as f64,
             rx,
             running,
             worker: Some(worker),
@@ -175,16 +216,43 @@ impl RtlsdrRx {
     }
 }
 
-fn worker_loop(dev: *mut RtlDev, tx: SyncSender<Vec<(f32, f32)>>, running: Arc<AtomicBool>) {
+/// Sets the tuner gain to the one the tuner offers closest to `want_tenths_db` (OnAir's configure() does the same).
+fn set_nearest_gain(dev: *mut RtlDev, want_tenths_db: i32) -> Result<(), String> {
+    let n = unsafe { rtlsdr_get_tuner_gains(dev, std::ptr::null_mut()) };
+    if n <= 0 {
+        return Ok(()); // no list: nothing to snap to
+    }
+    let mut gains = vec![0 as c_int; n as usize];
+    let got = unsafe { rtlsdr_get_tuner_gains(dev, gains.as_mut_ptr()) };
+    if got <= 0 {
+        return Ok(());
+    }
+    let best = gains[..got as usize]
+        .iter()
+        .copied()
+        .min_by_key(|g| (g - want_tenths_db).abs())
+        .unwrap_or(want_tenths_db);
+    if unsafe { rtlsdr_set_tuner_gain(dev, best) } < 0 {
+        return Err(format!("RTL-SDR: manual gain {best} refused"));
+    }
+    Ok(())
+}
+
+fn worker_loop(
+    dev: *mut RtlDev,
+    tx: SyncSender<Vec<(f32, f32)>>,
+    running: Arc<AtomicBool>,
+    block_bytes: usize,
+) {
+    // OnAir's streamLoop: reset the buffer before the first read
     if unsafe { rtlsdr_reset_buffer(dev) } < 0 {
         return;
     }
-    let mut raw = vec![0u8; BLOCK_BYTES];
+    let mut raw = vec![0u8; block_bytes];
     while running.load(Ordering::Relaxed) {
         let mut got: c_int = 0;
-        let rc = unsafe {
-            rtlsdr_read_sync(dev, raw.as_mut_ptr() as *mut c_void, raw.len() as c_int, &mut got)
-        };
+        let rc =
+            unsafe { rtlsdr_read_sync(dev, raw.as_mut_ptr() as *mut c_void, raw.len() as c_int, &mut got) };
         if rc < 0 {
             break; // unplugged or the stream died
         }
@@ -254,15 +322,33 @@ mod tests {
 
     #[test]
     fn rtlsdr_u8_extremes_map_to_unit_range() {
-        assert_eq!(u8_to_f32(0), -1.0);
-        assert_eq!(u8_to_f32(255), 255.0 / 127.5 - 1.0);
-        assert!((u8_to_f32(255) - 1.0).abs() < 0.01);
+        assert!((u8_to_f32(0) - (-127.4 / 128.0)).abs() < 1e-6);
+        assert!((u8_to_f32(255) - (127.6 / 128.0)).abs() < 1e-6);
+        assert!(u8_to_f32(0) >= -1.0 && u8_to_f32(255) < 1.0);
     }
 
     #[test]
     fn rtlsdr_u8_midpoint_is_near_zero() {
-        assert_eq!(u8_to_f32(127), -0.5 / 127.5);
-        assert_eq!(u8_to_f32(128), 0.5 / 127.5);
+        assert!((u8_to_f32(127) - (-0.4 / 128.0)).abs() < 1e-6);
+        assert!((u8_to_f32(128) - (0.6 / 128.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rtlsdr_stream_rate_follows_onair_rules() {
+        assert_eq!(stream_rate(2_400_000), Ok(2_400_000));
+        assert_eq!(stream_rate(0), Ok(2_048_000));
+        assert_eq!(stream_rate(3_000_000), Ok(2_560_000));
+        assert_eq!(stream_rate(250_000), Ok(250_000));
+        assert_eq!(stream_rate(200_000), Ok(900_001));
+        assert_eq!(stream_rate(500_000), Ok(900_001));
+        assert!(stream_rate(3_200_001).is_err());
+    }
+
+    #[test]
+    fn rtlsdr_read_size_follows_rate() {
+        assert_eq!(read_bytes(2_400_000), 262_144);
+        assert_eq!(read_bytes(900_001), 180_224);
+        assert_eq!(read_bytes(1), 16_384);
     }
 
     #[test]

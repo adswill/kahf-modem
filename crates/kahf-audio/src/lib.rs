@@ -113,6 +113,20 @@ impl Resampler {
 // Device discovery and selection
 // ---------------------------------------------------------------------------
 
+/// RMS level of `samples` in dBFS (a full-scale sine is about -3 dB).
+/// Silence and empty input return -120, which is also the floor.
+pub fn level_db(samples: &[f32]) -> f32 {
+    const FLOOR: f32 = -120.0;
+    if samples.is_empty() {
+        return FLOOR;
+    }
+    let mean_sq = samples.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / samples.len() as f64;
+    if mean_sq <= 0.0 {
+        return FLOOR;
+    }
+    ((10.0 * mean_sq.log10()) as f32).max(FLOOR)
+}
+
 /// Names of all sound devices that offer input or output, in host order.
 /// Never panics; returns an empty list if the host cannot enumerate devices.
 pub fn list_devices() -> Vec<String> {
@@ -171,6 +185,7 @@ pub struct AudioIn {
     _stream: cpal::Stream,
     ring: Ring,
     err: ErrSlot,
+    name: String,
 }
 
 impl AudioIn {
@@ -178,6 +193,10 @@ impl AudioIn {
     /// falls back to the device's default format and resamples internally.
     pub fn open(device: Option<&str>) -> Result<Self, String> {
         let dev = find_device(device, true)?;
+        let name = dev
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| device.unwrap_or("unknown").to_string());
         let ring: Ring = Arc::new(Mutex::new(VecDeque::new()));
         let err: ErrSlot = Arc::new(Mutex::new(None));
 
@@ -212,7 +231,13 @@ impl AudioIn {
             _stream: stream,
             ring,
             err,
+            name,
         })
+    }
+
+    /// Name of the device this stream was opened on.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Copy up to `out.len()` samples from the ring buffer. Non-blocking:
@@ -465,6 +490,15 @@ mod tests {
     #[test]
     fn list_devices_does_not_panic() {
         let _ = list_devices();
+    }
+
+    #[test]
+    fn level_db_silence_and_full_scale_sine() {
+        assert_eq!(level_db(&vec![0.0f32; 8000]), -120.0);
+        assert_eq!(level_db(&[]), -120.0);
+        // 1000 cycles of a unit sine over exactly 1 s: RMS = 1/sqrt(2), about -3.01 dB.
+        let db = level_db(&tone(1000.0, RATE as f64, 8000));
+        assert!((db + 3.01).abs() < 0.05, "sine level {db}");
     }
 
     #[test]
