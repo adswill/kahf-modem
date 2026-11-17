@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-gui"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license-file = "LICENSE"

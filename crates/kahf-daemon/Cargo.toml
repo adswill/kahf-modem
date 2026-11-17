@@ -1,0 +1,9 @@
+[package]
+name = "kahf-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }
+kahf-audio = { path = "../kahf-audio" }
+kahf-sdr = { path = "../kahf-sdr" }

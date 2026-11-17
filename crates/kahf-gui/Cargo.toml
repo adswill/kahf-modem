@@ -1,0 +1,9 @@
+[package]
+name = "kahf-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = "0.37.0"
+egui_plot = "0.38.0"
+kahf-daemon = { path = "../kahf-daemon" }

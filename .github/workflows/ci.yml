@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # kahf-sdr links the system SDR libraries (libhackrf, librtlsdr).
+          # Only macOS installs them below, so kahf-sdr is excluded on
+          # Linux and Windows through sdr_args. Empty means the whole workspace.
+          - os: ubuntu-latest
+            sdr_args: "--exclude kahf-sdr"
+          - os: windows-latest
+            sdr_args: "--exclude kahf-sdr"
+          - os: macos-latest
+            sdr_args: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust (rustfmt, clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install SDR libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libhackrf librtlsdr
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace ${{ matrix.sdr_args }} -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace ${{ matrix.sdr_args }}
+
+      - name: Test
+        run: cargo test --workspace ${{ matrix.sdr_args }}

@@ -1,0 +1,9 @@
+[package]
+name = "kahf-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }
+kahf-sim = { path = "../kahf-sim" }
+hound = "3.5"

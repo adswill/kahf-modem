@@ -1,0 +1,8 @@
+[package]
+name = "kahf-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }
+rayon = "1"

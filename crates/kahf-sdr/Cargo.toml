@@ -1,0 +1,8 @@
+[package]
+name = "kahf-sdr"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }

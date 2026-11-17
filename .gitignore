@@ -1,0 +1,16 @@
+# build output
+target/
+
+# generated audio and captures
+*.wav
+*.bin
+*.log
+
+# local tooling and private notes
+.claude/
+CLAUDE*.md
+scratchpad/
+.env
+*.key
+*.pem
+.DS_Store
