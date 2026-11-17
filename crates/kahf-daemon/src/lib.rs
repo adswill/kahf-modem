@@ -1024,10 +1024,6 @@ fn frame_len() -> usize {
     frame_len_for(MODULATION)
 }
 
-fn frame_samples(payload: &[u8]) -> Result<Vec<f32>, String> {
-    frame_samples_as(payload, MODULATION)
-}
-
 /// One frame, sent with the given modulation. The frame carries the modulation id.
 fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     if payload.len() > MAX_CHUNK {
