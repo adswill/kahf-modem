@@ -6,4 +6,6 @@ edition.workspace = true
 [dependencies]
 kahf-core = { path = "../kahf-core" }
 kahf-sim = { path = "../kahf-sim" }
+kahf-audio = { path = "../kahf-audio" }
+kahf-sdr = { path = "../kahf-sdr" }
 hound = "3.5"

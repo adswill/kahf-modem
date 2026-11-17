@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 eframe = "0.37.0"
 egui_plot = "0.38.0"
+kahf-core = { path = "../kahf-core" }
 kahf-daemon = { path = "../kahf-daemon" }

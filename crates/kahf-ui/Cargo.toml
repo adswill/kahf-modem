@@ -1,0 +1,14 @@
+[package]
+name = "kahf-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kahf-daemon = { path = "../kahf-daemon" }
+kahf-core = { path = "../kahf-core" }
+kahf-audio = { path = "../kahf-audio" }
+kahf-sdr = { path = "../kahf-sdr" }
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
+
+[dev-dependencies]
+iced_test = "0.14"

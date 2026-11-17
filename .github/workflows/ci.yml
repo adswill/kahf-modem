@@ -1,35 +1,84 @@
 name: ci
 
 on:
+  # Everyday pushes run one quick Linux check. The full platform matrix only runs
+  # when started by hand (workflow_dispatch), to save runner minutes on the private repo.
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: "Run every platform"
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-test:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # kahf-sdr links the system SDR libraries (libhackrf, librtlsdr).
-          # Only macOS installs them below, so kahf-sdr is excluded on
-          # Linux and Windows through sdr_args. Empty means the whole workspace.
-          - os: ubuntu-latest
+          # Quick check: runs on every push and pull request.
+          - name: Linux x64 (quick)
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
             sdr_args: "--exclude kahf-sdr"
-          - os: windows-latest
-            sdr_args: "--exclude kahf-sdr"
-          - os: macos-latest
+            deploy_target: ""
+            full_only: false
+          # macOS: the app needs macOS 14 or later. Both builds target 14.0.
+          - name: macOS 14+ arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
             sdr_args: ""
+            deploy_target: "14.0"
+            full_only: true
+          - name: macOS 14+ Intel
+            runner: macos-14
+            target: x86_64-apple-darwin
+            sdr_args: ""
+            deploy_target: "14.0"
+            full_only: true
+          # Windows: 10 and 11, both architectures.
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            sdr_args: "--exclude kahf-sdr"
+            deploy_target: ""
+            full_only: true
+          - name: Windows ARM64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            sdr_args: "--exclude kahf-sdr"
+            deploy_target: ""
+            full_only: true
+          # Linux: x86_64 and ARM64 (Raspberry Pi 64-bit).
+          - name: Linux x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            sdr_args: "--exclude kahf-sdr"
+            deploy_target: ""
+            full_only: true
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            sdr_args: "--exclude kahf-sdr"
+            deploy_target: ""
+            full_only: true
+    if: ${{ !matrix.full_only || github.event_name == 'workflow_dispatch' && inputs.full_matrix }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deploy_target }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install stable Rust (rustfmt, clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
+          targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Install SDR libraries (macOS)
@@ -37,15 +86,17 @@ jobs:
         run: brew install libhackrf librtlsdr
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace ${{ matrix.sdr_args }} -- -D warnings
+        run: cargo clippy --workspace --target ${{ matrix.target }} ${{ matrix.sdr_args }} -- -D warnings
 
       - name: Build
-        run: cargo build --workspace ${{ matrix.sdr_args }}
+        run: cargo build --workspace --target ${{ matrix.target }} ${{ matrix.sdr_args }}
 
       - name: Test
-        run: cargo test --workspace ${{ matrix.sdr_args }}
+        run: cargo test --workspace --target ${{ matrix.target }} ${{ matrix.sdr_args }}

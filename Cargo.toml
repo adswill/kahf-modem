@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-gui"]
+members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-gui", "crates/kahf-log", "crates/kahf-prop", "crates/kahf-ui"]
 
 [workspace.package]
 version = "0.0.1"

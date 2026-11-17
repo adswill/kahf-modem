@@ -14,3 +14,20 @@ scratchpad/
 *.key
 *.pem
 .DS_Store
+
+# editor, IDE and Qt generated files
+.idea/
+.vscode/
+*.swp
+.cache/
+.qmlls.ini
+compile_commands.json
+
+# Node tooling
+node_modules/
+
+# raw radio captures
+*.iq
+*.cf32
+*.sigmf-data
+*.sigmf-meta

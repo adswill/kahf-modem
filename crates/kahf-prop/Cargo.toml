@@ -1,0 +1,7 @@
+[package]
+name = "kahf-prop"
+version.workspace = true
+edition.workspace = true
+description = "First-pass HF propagation estimate (unvalidated)"
+
+[dependencies]
