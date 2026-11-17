@@ -1,0 +1,136 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, for example 1.0.0"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-14
+            archive: KAHF-${{ inputs.version }}-macos-arm64.zip
+            os: macos
+          - name: Linux x64
+            runner: ubuntu-24.04
+            archive: KAHF-${{ inputs.version }}-linux-x64.tar.gz
+            os: linux
+          - name: Windows x64
+            runner: windows-2022
+            archive: KAHF-${{ inputs.version }}-windows-x64.zip
+            os: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build packages
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb1-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Build the release binaries
+        run: cargo build --release -p kahf-ui -p kahf-cli
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=dist/KAHF.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/kahf-ui "$APP/Contents/MacOS/KAHF"
+          cp target/release/kahf-cli "$APP/Contents/MacOS/kahf-cli"
+          cp LICENSE RELEASE-NOTES.md "$APP/Contents/Resources/"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>KAHF</string>
+            <key>CFBundleDisplayName</key><string>KAHF</string>
+            <key>CFBundleIdentifier</key><string>dev.kahf.app</string>
+            <key>CFBundleExecutable</key><string>KAHF</string>
+            <key>CFBundleVersion</key><string>${{ inputs.version }}</string>
+            <key>CFBundleShortVersionString</key><string>${{ inputs.version }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>14.0</string>
+            <key>NSMicrophoneUsageDescription</key><string>KAHF uses the microphone or a sound card as the radio audio input.</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" "dist/${{ matrix.archive }}"
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          D=dist/KAHF-${{ inputs.version }}-linux-x64
+          mkdir -p "$D"
+          cp target/release/kahf-ui "$D/kahf"
+          cp target/release/kahf-cli "$D/kahf-cli"
+          cp LICENSE RELEASE-NOTES.md "$D/"
+          tar -C dist -czf "dist/${{ matrix.archive }}" "$(basename "$D")"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $d = "dist/KAHF-${{ inputs.version }}-windows-x64"
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          Copy-Item target/release/kahf-ui.exe "$d/KAHF.exe"
+          Copy-Item target/release/kahf-cli.exe "$d/kahf-cli.exe"
+          Copy-Item LICENSE, RELEASE-NOTES.md $d
+          Compress-Archive -Path $d -DestinationPath "dist/${{ matrix.archive }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Create the release with the three archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ inputs.version }}"
+          gh release create "$TAG" assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "KAHF ${{ inputs.version }}" \
+            --notes-file RELEASE-NOTES.md
