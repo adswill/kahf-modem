@@ -56,8 +56,7 @@ impl Fft {
     /// In-place forward transform. `a.len()` must equal the plan size.
     fn forward(&self, a: &mut [Cpx]) {
         let n = self.n;
-        for i in 0..n {
-            let j = self.rev[i];
+        for (i, &j) in self.rev[..n].iter().enumerate() {
             if i < j {
                 a.swap(i, j);
             }
