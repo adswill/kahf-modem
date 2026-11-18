@@ -417,6 +417,20 @@ class AppState {
     }
   }
 
+  async setTxLevel(pct: number) {
+    await this.saveSettings({ txLevel: pct });
+    await this.engine.setTxLevel(pct).catch(() => {});
+  }
+
+  async testTone() {
+    try {
+      await this.engine.testTone();
+      this.toast("Sending a test tone for 5 seconds. Watch the ALC meter on your radio.", "info");
+    } catch (e) {
+      this.toast(String(e), "warn");
+    }
+  }
+
   async setRelayHints(calls: string[]) {
     await this.saveSettings({ relayHints: calls });
     await this.engine.setRelayHints(calls);

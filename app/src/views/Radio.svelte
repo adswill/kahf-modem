@@ -117,6 +117,21 @@
     </section>
 
     <section>
+      <h2>Transmit level <Tip text="How loud KAHF sends into your radio. Too loud and the radio spreads the signal onto the channels next to it, which spoils reception for everyone on a shared band. Lower is always safer." /></h2>
+      <div class="row" style="margin-top: 8px">
+        <input type="range" min="10" max="100" step="5" value={app.settings.txLevel}
+          oninput={(e) => app.setTxLevel(Number((e.currentTarget as HTMLInputElement).value))} aria-label="Transmit level" />
+        <span class="mono">{app.settings.txLevel}%</span>
+      </div>
+      <p class="faint small" style="margin-top: 6px">
+        Press the button, then watch your radio's ALC meter. It should barely move. If it moves a lot, lower the level here (or the
+        sound-card volume) until it does not.
+      </p>
+      <button class="btn sm" style="margin-top: 6px" disabled={app.settings.listenOnly} onclick={() => app.testTone()}>Send a 5 second test tone</button>
+      <p class="faint small" style="margin-top: 4px">This transmits. Use a dummy load or make sure the channel is free.</p>
+    </section>
+
+    <section>
       <h2>How the radio is heard</h2>
       <div style="margin-top: 8px"><AudioPicker bind:kind bind:audioIn bind:audioOut bind:sdr /></div>
     </section>

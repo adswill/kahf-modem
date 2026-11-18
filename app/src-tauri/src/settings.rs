@@ -50,6 +50,8 @@ pub struct EngineSettings {
     rig: String,
     sdr: String,
     pub freq_khz: u64,
+    /// Transmit audio level, percent of full scale.
+    pub tx_level: u8,
     pub listen_only: bool,
     pub auto_link: bool,
     pub auto_mode: bool,
@@ -69,6 +71,7 @@ impl EngineSettings {
             rig: text("rigctld"),
             sdr: text("sdr"),
             freq_khz: v.get("freqKhz").and_then(Value::as_u64).unwrap_or(14_103),
+            tx_level: v.get("txLevel").and_then(Value::as_u64).unwrap_or(50).clamp(5, 100) as u8,
             listen_only: flag("listenOnly", false),
             auto_link: flag("autoLink", true),
             auto_mode: flag("autoMode", true),

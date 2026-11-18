@@ -267,6 +267,13 @@ export class MockEngine implements Engine {
 
   async setRelayHints(_calls: string[]): Promise<void> {}
 
+  async setTxLevel(_pct: number): Promise<void> {}
+
+  async testTone(): Promise<void> {
+    this.emit({ type: "tx", state: "starting" });
+    window.setTimeout(() => this.emit({ type: "tx", state: "done" }), 5000);
+  }
+
   async advertise(): Promise<void> {
     this.emit({ type: "tx", state: "starting" });
     window.setTimeout(() => this.emit({ type: "tx", state: "done" }), 1500);

@@ -270,6 +270,10 @@ struct Flags {
     /// Relay other stations' messages (setting B). On by default; no effect yet.
     third_party_relay: AtomicBool,
     relay_timeout_ms: AtomicU64,
+    /// Transmit audio level, percent of full scale (5 to 100). Kept below full scale on purpose:
+    /// an SSB rig driven too hard splatters across neighbouring channels, which on a few shared
+    /// HF frequencies spoils everyone's reception.
+    tx_level_pct: AtomicU8,
 }
 
 impl Flags {
@@ -281,6 +285,7 @@ impl Flags {
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
             tx_level_shown: AtomicU8::new(0),
+            tx_level_pct: AtomicU8::new(DEFAULT_TX_LEVEL_PCT),
             auto_mode: AtomicBool::new(true),
             auto_link: AtomicBool::new(false),
             fixed_level: AtomicU8::new(mod_level(MODULATION) as u8),
@@ -377,6 +382,21 @@ impl Engine {
     /// not be). `None` turns it off, and the relay works on the radio side only.
     pub fn set_backbone(&self, server: Option<&str>) {
         *lock(&self.shared.backbone_server) = server.map(|s| s.to_string());
+    }
+
+    /// Transmit audio level in percent of full scale, 5 to 100. Lower is safer: set it so the
+    /// radio's ALC only just moves, or lower.
+    pub fn set_tx_level(&self, pct: u8) {
+        self.shared.flags.tx_level_pct.store(pct.clamp(5, 100), Ordering::SeqCst);
+    }
+
+    /// Sends a steady 1 kHz tone for five seconds, so the drive can be set by the radio's ALC
+    /// meter. This transmits.
+    pub fn test_tone(&self) -> Result<(), String> {
+        if let Some(why) = tx_refusal(&self.shared.flags) {
+            return Err(why.into());
+        }
+        self.send_cmd(Cmd::Tone)
     }
 
     /// The position to put in announcements (latitude, longitude), or None to say nothing.
@@ -849,6 +869,8 @@ enum Cmd {
     Listen,
     /// Announce this station to everyone who can hear it, and through relays to those who cannot.
     Advertise,
+    /// A steady test tone for setting the radio's drive.
+    Tone,
     /// `ids[i]` is the public id of `msgs[i]`, allocated by the caller.
     /// `private`: the messages go on air with the session private bit.
     Queue {
@@ -1310,6 +1332,21 @@ fn burst_len_for(m: Modulation, n: usize) -> usize {
 /// come in its top three bits (0 to 7), the mode in its low five.
 const BURST_MAX: usize = 8;
 const ID_MODE_MASK: u8 = 0x1F;
+
+/// Default transmit audio level: half of full scale (minus 6 dB).
+const DEFAULT_TX_LEVEL_PCT: u8 = 50;
+/// The test tone: a steady 1 kHz sine, long enough to set the radio's drive by its ALC meter.
+const TONE_SECONDS: usize = 5;
+
+/// A steady test tone at `level_pct` of full scale.
+fn tone_samples(level_pct: u8) -> Vec<f32> {
+    let level = level_pct as f32 / 100.0;
+    let n = RATE as usize * TONE_SECONDS;
+    let mut v = vec![0f32; LEAD_SILENCE];
+    v.extend((0..n).map(|i| level * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / RATE as f32).sin()));
+    v.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
+    v
+}
 
 /// One transmit burst: lead-in silence, then the frames after a single preamble (several bursts
 /// of up to BURST_MAX frames when there are more), then tail silence. Sharing the preamble is
@@ -1999,6 +2036,11 @@ impl Worker {
                 }
             }
             Cmd::Advertise => self.advertise_now(),
+            Cmd::Tone => {
+                let pct = self.shared.flags.tx_level_pct.load(Ordering::SeqCst);
+                self.log(format!("Sending a test tone at {pct} percent for {TONE_SECONDS} s."));
+                self.bursts.push_back(tone_samples(pct));
+            }
             Cmd::Disconnect => {
                 if let Err(e) = self.disconnect() {
                     self.log(e);
@@ -3053,7 +3095,13 @@ impl Worker {
             self.emit_status();
         }
         match built {
-            Ok(samples) => self.bursts.push_back(samples),
+            Ok(mut samples) => {
+                let gain = self.shared.flags.tx_level_pct.load(Ordering::SeqCst) as f32 / 100.0;
+                for s in samples.iter_mut() {
+                    *s *= gain;
+                }
+                self.bursts.push_back(samples)
+            }
             Err(e) => self.log(format!("cannot build transmission: {e}")),
         }
     }
@@ -5111,6 +5159,21 @@ mod tests {
         // A station nobody here hears goes to the server, not onto the radio.
         r.forward_third_party(&chat("K1ALF", "Z9FAR", "hi"), false);
         assert_eq!(r.outbox.pending().len(), 1, "radio forward used although the server is available");
+    }
+
+    #[test]
+    fn transmit_audio_is_kept_below_full_scale_by_the_level_setting() {
+        let mut w = bare_worker("tx-level", "AA1AAA");
+        w.push_burst(&[vec![1, 2, 3]]);
+        let peak = |v: &Vec<f32>| v.iter().fold(0f32, |m, s| m.max(s.abs()));
+        let p50 = peak(w.bursts.back().unwrap());
+        assert!(p50 > 0.3 && p50 <= 0.5, "default level peak {p50}");
+        w.shared.flags.tx_level_pct.store(20, Ordering::SeqCst);
+        w.push_burst(&[vec![1, 2, 3]]);
+        let p20 = peak(w.bursts.back().unwrap());
+        assert!(p20 <= 0.2 && p20 > 0.1, "20 percent peak {p20}");
+        let tone = tone_samples(30);
+        assert!(peak(&tone) <= 0.3 && peak(&tone) > 0.29);
     }
 
     #[test]

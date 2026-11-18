@@ -96,6 +96,12 @@ pub enum Profile {
     FreqOffset,
     ClockOffset,
     Fade,
+    /// ITU-R F.1487 "good" HF channel: two Rayleigh paths 0.5 ms apart, 0.1 Hz Doppler spread.
+    HfGood,
+    /// ITU-R F.1487 "moderate": 1 ms, 0.5 Hz.
+    HfModerate,
+    /// ITU-R F.1487 "poor": 2 ms, 1 Hz.
+    HfPoor,
 }
 
 /// Apply a named channel profile, then AWGN at `snr_db` (measured against the
@@ -113,6 +119,9 @@ pub fn apply(samples: &[f32], profile: Profile, snr_db: f32, seed: u64) -> Vec<f
         }
         Profile::ClockOffset => clock_offset(samples),
         Profile::Fade => fade(samples),
+        Profile::HfGood => watterson(samples, 0.0005, 0.1, seed),
+        Profile::HfModerate => watterson(samples, 0.001, 0.5, seed),
+        Profile::HfPoor => watterson(samples, 0.002, 1.0, seed),
     };
     awgn(&impaired, snr_db, seed)
 }
@@ -170,6 +179,93 @@ fn fft(buf: &mut [(f64, f64)], inverse: bool) {
 ///
 /// The input is zero-padded to at least twice its length so the circular
 /// Hilbert transform does not wrap around the buffer.
+/// The analytic signal of `x` (the real signal plus i times its Hilbert transform).
+fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let big = (2 * n).next_power_of_two();
+    let mut spec = vec![(0.0f64, 0.0f64); big];
+    for (s, &v) in spec.iter_mut().zip(x) {
+        *s = (v as f64, 0.0);
+    }
+    fft(&mut spec, false);
+    let half = big / 2;
+    for s in spec.iter_mut().take(half).skip(1) {
+        *s = (s.0 * 2.0, s.1 * 2.0);
+    }
+    for s in spec.iter_mut().skip(half + 1) {
+        *s = (0.0, 0.0);
+    }
+    fft(&mut spec, true);
+    let scale = 1.0 / big as f64;
+    spec.into_iter().take(n).map(|(r, i)| (r * scale, i * scale)).collect()
+}
+
+/// A complex fading process of `len` samples at 8 kHz with a Gaussian Doppler spectrum of
+/// total width `spread_hz` (the ITU "Doppler spread") and unit mean power. It is made at a low
+/// rate (white complex noise through a Gaussian filter) and interpolated up.
+fn fading_process(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> {
+    const LOW_HZ: f64 = 50.0;
+    let step = SAMPLE_RATE_HZ / LOW_HZ;
+    let sigma_f = spread_hz / 2.0;
+    // Filter impulse response h(t) ~ exp(-2 pi^2 sigma_f^2 t^2), out to four time constants.
+    let tau = 1.0 / (2.0 * PI * sigma_f);
+    let half = (4.0 * tau * LOW_HZ).ceil() as isize;
+    let taps: Vec<f64> = (-half..=half).map(|k| (-((k as f64 / LOW_HZ) / tau).powi(2) / 2.0).exp()).collect();
+    let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
+    let n_low = (len as f64 / step).ceil() as usize + 2;
+    let noise: Vec<(f64, f64)> = (0..n_low + 2 * half as usize)
+        .map(|_| (rng.gaussian() / 2f64.sqrt(), rng.gaussian() / 2f64.sqrt()))
+        .collect();
+    let low: Vec<(f64, f64)> = (0..n_low)
+        .map(|i| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (j, t) in taps.iter().enumerate() {
+                re += t * noise[i + j].0;
+                im += t * noise[i + j].1;
+            }
+            (re / norm, im / norm)
+        })
+        .collect();
+    (0..len)
+        .map(|n| {
+            let pos = n as f64 / step;
+            let i = pos.floor() as usize;
+            let f = pos - i as f64;
+            (low[i].0 * (1.0 - f) + low[i + 1].0 * f, low[i].1 * (1.0 - f) + low[i + 1].1 * f)
+        })
+        .collect()
+}
+
+/// The Watterson HF channel (ITU-R F.1487): two independent Rayleigh-fading paths of equal
+/// mean power, `delay_s` apart, each with a Gaussian Doppler spectrum of width `spread_hz`.
+fn watterson(x: &[f32], delay_s: f64, spread_hz: f64, seed: u64) -> Vec<f32> {
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let a = analytic(x);
+    let d = (delay_s * SAMPLE_RATE_HZ).round() as usize;
+    let mut rng = Rng::new(seed ^ 0x5741_5454_4552_534F);
+    let g1 = fading_process(n, spread_hz, &mut rng);
+    let g2 = fading_process(n, spread_hz, &mut rng);
+    let s = 1.0 / 2f64.sqrt();
+    (0..n)
+        .map(|i| {
+            let p1 = (g1[i].0 * a[i].0 - g1[i].1 * a[i].1, g1[i].0 * a[i].1 + g1[i].1 * a[i].0);
+            let p2 = if i >= d {
+                let b = a[i - d];
+                (g2[i].0 * b.0 - g2[i].1 * b.1, g2[i].0 * b.1 + g2[i].1 * b.0)
+            } else {
+                (0.0, 0.0)
+            };
+            ((p1.0 + p2.0) * s) as f32
+        })
+        .collect()
+}
+
 fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
     let n = x.len();
     if n == 0 {
@@ -340,6 +436,21 @@ pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hf_channel_keeps_mean_power_and_fades() {
+        let n = 8000 * 120;
+        let tone: Vec<f32> = (0..n).map(|i| (2.0 * std::f64::consts::PI * 1500.0 * i as f64 / 8000.0).sin() as f32).collect();
+        let p_in: f64 = tone.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        let out = watterson(&tone, 0.001, 0.5, 3);
+        let p_out: f64 = out.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        let db = 10.0 * (p_out / p_in).log10();
+        assert!(db.abs() < 3.0, "mean power changed by {db:.1} dB");
+        // Power in one-second blocks must vary: that is the fading.
+        let blocks: Vec<f64> = out.chunks(8000).map(|c| c.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / 8000.0).collect();
+        let (lo, hi) = blocks.iter().fold((f64::MAX, 0.0f64), |(l, h), &b| (l.min(b), h.max(b)));
+        assert!(10.0 * (hi / lo).log10() > 6.0, "no fading: {lo:.3} to {hi:.3}");
+    }
 
     #[test]
     fn noise_power_matches_target_snr() {

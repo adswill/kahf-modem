@@ -168,6 +168,8 @@ export interface Settings {
   micIn: string;
   /** Tuned frequency in kHz. */
   freqKhz: number;
+  /** Transmit audio level, percent of full scale. Lower is safer for everyone on the channel. */
+  txLevel: number;
   setupDone: boolean;
   tourDone: boolean;
   theme: "dark" | "light";
@@ -231,6 +233,9 @@ export interface Engine {
   setRelayHints(calls: string[]): Promise<void>;
   /** Tells everyone in range, and through relays everyone beyond, that this station exists. */
   advertise(): Promise<void>;
+  setTxLevel(pct: number): Promise<void>;
+  /** Sends a steady tone for five seconds so the radio's drive can be set by its ALC meter. */
+  testTone(): Promise<void>;
   rigAvailable(): Promise<boolean>;
   rigModels(): Promise<RigModel[]>;
   rigPorts(): Promise<string[]>;

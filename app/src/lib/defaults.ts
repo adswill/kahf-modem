@@ -17,6 +17,7 @@ export const defaultSettings = (): Settings => ({
   rig: { model: null, name: "", port: "", baud: 19200 },
   micIn: "",
   freqKhz: 14103,
+  txLevel: 50,
   setupDone: false,
   tourDone: false,
   theme: "dark",

@@ -169,3 +169,11 @@ Write here, with a date and your name, when you hit something that needs the oth
 Remove it when solved.
 
 - (none)
+
+## Update 2026-11-18 (read before touching `app/`)
+
+`app/` was rebuilt: five screens (Chats, Mail, Stations, Radio, Relay), a settings sheet, help
+panel and tour, with mail, files, voice notes, announce-myself, relay status, transmit level and a
+test tone. If you have local UI changes, rebase onto `release-0.1` and re-apply them on the new
+structure (`app/README.md` lists the layout). The radio side changed too (docs/NETWORK-STATUS.md).
+

@@ -94,6 +94,12 @@ export class TauriEngine implements Engine {
   relayDirectory(refresh: boolean) {
     return invoke<RelayInfo[]>("relay_directory", { refresh });
   }
+  setTxLevel(pct: number) {
+    return invoke<void>("engine_set_tx_level", { pct });
+  }
+  testTone() {
+    return invoke<void>("engine_test_tone");
+  }
   advertise() {
     return invoke<void>("engine_advertise");
   }

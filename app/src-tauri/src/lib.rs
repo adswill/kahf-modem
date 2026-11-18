@@ -159,6 +159,7 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
         let calls: Vec<String> = hints.iter().filter_map(|x| x.as_str().map(String::from)).collect();
         engine.set_relay_hints(&calls);
     }
+    engine.set_tx_level(s.tx_level);
     engine.set_location(settings::shared_position(&settings));
     engine.set_listen_only(s.listen_only);
     engine.set_auto_link(s.auto_link);
@@ -428,6 +429,20 @@ async fn relay_directory(state: State<'_, Shared>, refresh: bool) -> Res<Vec<Val
 }
 
 #[tauri::command]
+fn engine_set_tx_level(state: State<Shared>, pct: u8) -> Res<()> {
+    with_engine(&state, |e| {
+        e.set_tx_level(pct);
+        Ok(())
+    })
+}
+
+/// A steady tone for five seconds, to set the radio's drive by its ALC meter. This transmits.
+#[tauri::command]
+fn engine_test_tone(state: State<Shared>) -> Res<()> {
+    with_engine(&state, |e| e.test_tone())
+}
+
+#[tauri::command]
 fn engine_advertise(state: State<Shared>) -> Res<()> {
     let pos = settings::shared_position(&settings::load(&state.data_dir));
     with_engine(&state, |e| {
@@ -528,6 +543,8 @@ pub fn run() {
             relay_directory,
             engine_set_relay_hints,
             engine_advertise,
+            engine_set_tx_level,
+            engine_test_tone,
         ])
         .run(tauri::generate_context!())
         .expect("the KAHF window could not start");
