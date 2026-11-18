@@ -121,6 +121,10 @@ pub enum TxState {
 /// Default transmit modulation: KAMI-32, the bottom rung of the ladder (see `MODULATIONS`).
 const MODULATION: Modulation = Modulation::Kami32;
 const LDPC_ITER: usize = 50;
+/// An automatic link with nothing waiting is closed after this long without a frame.
+const AUTO_HANGUP: Duration = Duration::from_secs(20);
+/// First pause after a failed automatic connection, doubled each time up to a quarter hour.
+const AUTO_RETRY_BASE: Duration = Duration::from_secs(30);
 /// Largest payload one link frame carries (see frame::build_payload).
 const MAX_CHUNK: usize = 36;
 /// New samples between KAMI stream searches (0.75 s).
@@ -191,6 +195,8 @@ struct Shared {
     key_error: Mutex<Option<String>>,
     /// Relay role and schedule (plan 4). None until a role is configured.
     relay: Mutex<Option<Relay>>,
+    /// Relay stations to try, in order, when a station is not reached on air.
+    relay_hints: Mutex<Vec<String>>,
     /// Forwards sent by this station as a relay (plan 4).
     relay_stats: Mutex<Stats>,
     /// One entry per forward, keyed by the public message id.
@@ -213,6 +219,9 @@ struct Flags {
     tx_level_shown: AtomicU8,
     /// Choose the KAMI mode automatically (default). Off: always send `fixed_level`.
     auto_mode: AtomicBool,
+    /// The operator lets the station connect and send queued messages by itself, and hang up
+    /// when it is done. Off by default; relay stations always do.
+    auto_link: AtomicBool,
     /// Index into MODULATIONS used when `auto_mode` is off.
     fixed_level: AtomicU8,
     update_locked: AtomicBool,
@@ -232,6 +241,7 @@ impl Flags {
             weak_mode: AtomicBool::new(false),
             tx_level_shown: AtomicU8::new(0),
             auto_mode: AtomicBool::new(true),
+            auto_link: AtomicBool::new(false),
             fixed_level: AtomicU8::new(mod_level(MODULATION) as u8),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
@@ -343,6 +353,21 @@ pub fn transmit_modulation(&self) -> &'static str {
     /// Names of the modes the transmitter can use, slowest and most robust first.
     pub fn mode_names() -> Vec<&'static str> {
         MODULATIONS.iter().map(|&m| mode_name(m)).collect()
+    }
+
+    /// Let the station connect to the destination of queued messages by itself, send them, and
+    /// hang up afterwards. Relay stations do this whenever relay mode runs.
+    pub fn set_auto_link(&self, on: bool) {
+        self.shared.flags.auto_link.store(on, Ordering::SeqCst);
+    }
+
+    pub fn auto_link(&self) -> bool {
+        self.shared.flags.auto_link.load(Ordering::SeqCst)
+    }
+
+    /// Relay stations to try, in order, for a message whose station is not reached on air.
+    pub fn set_relay_hints(&self, calls: &[String]) {
+        *lock(&self.shared.relay_hints) = calls.iter().map(|c| c.to_uppercase()).collect();
     }
 
     /// Automatic mode choice from the peer's SNR report (the default) or a fixed mode.
@@ -584,6 +609,7 @@ pub fn transmit_modulation(&self) -> &'static str {
             station_key,
             key_error: Mutex::new(key_error),
             relay: Mutex::new(None),
+            relay_hints: Mutex::new(Vec::new()),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
         });
@@ -1278,6 +1304,12 @@ fn priority_of(msg: &Message) -> Priority {
     }
 }
 
+fn sender_of(msg: &Message) -> &str {
+    match msg {
+        Message::Chat { from, .. } | Message::Mail { from, .. } | Message::File { from, .. } => from,
+    }
+}
+
 fn dest_of(msg: &Message) -> &str {
     match msg {
         Message::Chat { to, .. } | Message::Mail { to, .. } | Message::File { to, .. } => to,
@@ -1591,6 +1623,18 @@ struct Worker {
     queued: HashMap<u64, (String, u64)>,
     /// Outbox items whose station was not reached in time; each is reported once.
     unreached_noted: HashSet<u64>,
+    /// Outbox items sent through a relay: the relay's callsign, which the link connects to.
+    via: HashMap<u64, String>,
+    /// Relays already tried for each item.
+    via_tried: HashMap<u64, Vec<String>>,
+    /// Handshake failures per station and when it may be tried again.
+    auto_fails: HashMap<String, (u32, Instant)>,
+    /// The current link was opened by the station itself, so it also closes it.
+    auto_initiated: bool,
+    /// Last frame sent or received, for hanging up an idle automatic link.
+    last_activity: Instant,
+    /// Digests of messages already forwarded for others, so one is never forwarded twice.
+    forwarded: VecDeque<u64>,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
 }
@@ -1722,6 +1766,12 @@ impl Worker {
             started: Instant::now(),
             queued,
             unreached_noted: HashSet::new(),
+            via: HashMap::new(),
+            via_tried: HashMap::new(),
+            auto_fails: HashMap::new(),
+            auto_initiated: false,
+            last_activity: Instant::now(),
+            forwarded: VecDeque::new(),
             refusal_logged: None,
         };
         w.publish_pending();
@@ -1750,6 +1800,7 @@ impl Worker {
                 None => self.refusal_logged = None,
             }
             self.check_relays();
+            self.auto_link();
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
                 if !self.tx_step() {
@@ -1888,6 +1939,13 @@ impl Worker {
         }
         due.sort();
         for (oid, dest) in due {
+            if let Some(hint) = self.next_relay_hint(oid, &dest) {
+                self.log(format!("{dest} not reached on air. Trying the relay {hint}."));
+                self.via.insert(oid, hint.clone());
+                self.via_tried.entry(oid).or_default().push(hint);
+                self.queued.insert(oid, (dest, now));
+                continue;
+            }
             self.unreached_noted.insert(oid);
             if !self.shared.flags.internet_relay.load(Ordering::SeqCst) {
                 self.log(unreached_text(&dest));
@@ -1904,6 +1962,120 @@ impl Worker {
                 )),
             }
         }
+    }
+
+    /// The station the link must be connected to for outbox item `id`: its relay when it has
+    /// been routed through one, else the message's own destination.
+    fn route_peer(&self, id: u64, msg: &Message) -> String {
+        self.via.get(&id).cloned().unwrap_or_else(|| dest_of(msg).to_string())
+    }
+
+    /// Same for an item known only by its queue entry.
+    fn route_peer_of(&self, id: u64) -> Option<String> {
+        self.via.get(&id).cloned().or_else(|| self.queued.get(&id).map(|(d, _)| d.clone()))
+    }
+
+    /// The next relay hint not yet tried for this item, other than ourselves and the destination.
+    fn next_relay_hint(&self, id: u64, dest: &str) -> Option<String> {
+        let tried = self.via_tried.get(&id);
+        lock(&self.shared.relay_hints)
+            .iter()
+            .find(|h| {
+                !h.eq_ignore_ascii_case(dest)
+                    && !h.eq_ignore_ascii_case(&self.callsign)
+                    && !tried.is_some_and(|t| t.iter().any(|x| x.eq_ignore_ascii_case(h)))
+            })
+            .cloned()
+    }
+
+    /// Automatic linking: with auto-link on (or relay mode running) a queued message whose
+    /// route is not linked gets a connection, with a growing pause after each failure, and an
+    /// automatic link is closed once nothing is waiting for its peer.
+    fn auto_link(&mut self) {
+        let flags = &self.shared.flags;
+        if !(flags.auto_link.load(Ordering::SeqCst) || flags.relay_running.load(Ordering::SeqCst))
+            || flags.listen_only.load(Ordering::SeqCst)
+            || tx_refusal(flags).is_some()
+            || !self.relay_slot_open()
+        {
+            return;
+        }
+        match self.link_state.clone() {
+            LinkState::Idle => {
+                self.auto_initiated = false;
+                if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+                    return;
+                }
+                let now = self.now_ms();
+                let Some((id, _)) = self.outbox.next(now) else {
+                    return;
+                };
+                let Some(peer) = self.route_peer_of(id) else {
+                    return;
+                };
+                if self
+                    .auto_fails
+                    .get(&peer.to_uppercase())
+                    .is_some_and(|(_, until)| Instant::now() < *until)
+                {
+                    return;
+                }
+                self.auto_initiated = true;
+                self.last_activity = Instant::now();
+                if let Err(e) = self.connect(&peer) {
+                    self.log(e);
+                }
+            }
+            LinkState::Connecting { peer } if self.auto_initiated => {
+                // The route changed (a relay was chosen) while we were calling the old peer: stop.
+                let now = self.now_ms();
+                let want = self.outbox.next(now).and_then(|(id, _)| self.route_peer_of(id));
+                if want.is_some_and(|w| !w.eq_ignore_ascii_case(&peer)) {
+                    if let Err(e) = self.disconnect() {
+                        self.log(e);
+                    }
+                }
+            }
+            LinkState::Connected { peer } if self.auto_initiated => {
+                let waiting = self
+                    .outbox
+                    .pending()
+                    .iter()
+                    .any(|(id, _, _)| self.route_peer_of(*id).is_some_and(|p| p.eq_ignore_ascii_case(&peer)));
+                if !waiting && self.last_activity.elapsed() >= AUTO_HANGUP {
+                    if let Err(e) = self.disconnect() {
+                        self.log(e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A message for another station reached us. A relay with relay mode running keeps it in
+    /// its outbox for that station, once, so the next hop is delivered by the normal send path.
+    fn forward_third_party(&mut self, msg: &Message, private: bool) {
+        let flags = &self.shared.flags;
+        let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station);
+        if !(is_relay && flags.relay_running.load(Ordering::SeqCst) && flags.third_party_relay.load(Ordering::SeqCst)) {
+            return;
+        }
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            encode_message(msg, private).hash(&mut h);
+            h.finish()
+        };
+        if self.forwarded.contains(&digest) {
+            return;
+        }
+        self.forwarded.push_back(digest);
+        if self.forwarded.len() > 512 {
+            self.forwarded.pop_front();
+        }
+        let id = self.next_id();
+        self.log(format!("Forwarding a message from {} to {}.", sender_of(msg), dest_of(msg)));
+        self.enqueue(vec![msg.clone()], vec![id], private);
     }
 
     /// Plan 4: a station with a relay role sends only inside one of its transmit slots.
@@ -1928,6 +2100,7 @@ impl Worker {
     fn transmit_allowed(&self) -> bool {
         self.shared.flags.relay_running.load(Ordering::SeqCst)
             || self.shared.flags.operator_link.load(Ordering::SeqCst)
+            || self.shared.flags.auto_link.load(Ordering::SeqCst)
     }
 
     /// Counts one forward as a relay and records its hop. Only for a station with a relay role.
@@ -1983,7 +2156,7 @@ impl Worker {
         let now = self.now_ms();
         let (id, item) = self.outbox.next(now)?;
         match decode_item(&item.payload) {
-            Some((msg, private)) if dest_of(&msg).eq_ignore_ascii_case(&peer) => Some((id, msg, private)),
+            Some((msg, private)) if self.route_peer(id, &msg).eq_ignore_ascii_case(&peer) => Some((id, msg, private)),
             Some(_) => None,
             None => {
                 self.outbox.cancel(id);
@@ -2193,6 +2366,8 @@ impl Worker {
         self.tags.retain(|oid, _| live.contains(oid));
         self.queued.retain(|oid, _| live.contains(oid));
         self.unreached_noted.retain(|oid| live.contains(oid));
+        self.via.retain(|oid, _| live.contains(oid));
+        self.via_tried.retain(|oid, _| live.contains(oid));
         if let Err(e) = write_atomic(&self.outbox_path, &self.outbox.to_bytes()) {
             self.log(format!("cannot save outbox: {e}"));
         }
@@ -2213,6 +2388,19 @@ impl Worker {
     /// Link state changed. A conversation starts when the link comes up with a station
     /// and is logged when the link leaves Connected.
     fn on_link_state(&mut self, state: &LinkState) {
+        match (&self.link_state, state) {
+            (LinkState::Connecting { peer }, LinkState::Idle) => {
+                let key = peer.to_uppercase();
+                let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
+                let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(900));
+                self.auto_fails.insert(key, (fails, Instant::now() + pause));
+            }
+            (_, LinkState::Connected { peer }) => {
+                self.auto_fails.remove(&peer.to_uppercase());
+                self.last_activity = Instant::now();
+            }
+            _ => {}
+        }
         let current = self.qso.as_ref().map(|q| q.peer.clone());
         let next = match state {
             LinkState::Connected { peer } => Some(peer.clone()),
@@ -2417,6 +2605,7 @@ impl Worker {
 
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
+        self.last_activity = Instant::now();
         let before = self.tx_level;
         self.pick_level();
         let m = MODULATIONS[self.tx_level as usize];
@@ -2718,6 +2907,7 @@ impl Worker {
     }
 
     fn on_frame(&mut self, payload: Vec<u8>) {
+        self.last_activity = Instant::now();
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
@@ -2734,8 +2924,12 @@ impl Worker {
         match guard("session decode", || session::decode_signed(&self.rx_chunks)) {
             Ok(Some(signed)) => {
                 self.rx_chunks.clear();
+                let for_me = dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign);
+                if !for_me {
+                    self.forward_third_party(&signed.message, signed.private);
+                }
                 // A private message is for its addressee's inbox only; other stations drop it.
-                if signed.private && !dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
+                if signed.private && !for_me {
                     return;
                 }
                 self.on_message(signed.message);
@@ -3443,8 +3637,8 @@ mod tests {
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let from = out.len();
             self.inner.read_audio(out)?;
-            for i in from..out.len() {
-                out[i] += self.sigma * self.gauss();
+            for v in out.iter_mut().skip(from) {
+                *v += self.sigma * self.gauss();
             }
             Ok(())
         }
@@ -3504,6 +3698,118 @@ mod tests {
             "{text:?} did not arrive at {}",
             a.transmit_modulation()
         );
+    }
+
+    /// A radio on a small shared-air model: it hears the stations whose pipes it is given and
+    /// its transmissions go to the pipes of the stations that hear it.
+    struct MeshRadio {
+        rx: Vec<Pipe>,
+        tx: Vec<Pipe>,
+        sigma: f32,
+        state: u64,
+    }
+
+    impl Backend for MeshRadio {
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            let from = out.len();
+            for p in &self.rx {
+                out.extend(p.lock().unwrap().drain(..));
+            }
+            if self.sigma > 0.0 {
+                for v in out.iter_mut().skip(from) {
+                    self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let a = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+                    self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let b = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+                    *v += self.sigma * ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32;
+                }
+            }
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            for p in &self.tx {
+                p.lock().unwrap().extend(samples[start..end].iter().copied());
+            }
+            Ok(())
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Engines for `calls`, where `hears` lists (from, to): station `to` hears station `from`.
+    fn mesh(tag: &str, calls: &[&str], hears: &[(usize, usize)], sigma: f32) -> Vec<Engine> {
+        let pipes: Vec<Pipe> = hears.iter().map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect();
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| {
+                let rx: Vec<Pipe> =
+                    hears.iter().zip(&pipes).filter(|((_, to), _)| *to == i).map(|(_, p)| p.clone()).collect();
+                let tx: Vec<Pipe> =
+                    hears.iter().zip(&pipes).filter(|((from, _), _)| *from == i).map(|(_, p)| p.clone()).collect();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(MeshRadio { rx: rx.clone(), tx: tx.clone(), sigma, state: 7 + i as u64 }) as Box<dyn Backend>)
+                });
+                Engine::spawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap()
+            })
+            .collect()
+    }
+
+    fn make_relay(e: &Engine) {
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        // A relay sends only in its scheduled transmit slots: give it one that covers the test.
+        let now = now_unix_secs().max(0) as u64;
+        e.accept_relay_schedule(vec![Slot {
+            channel_khz: 14_000.0,
+            start_unix: now - 60,
+            duration_s: 3_600,
+            direction: relay::Direction::Transmit,
+        }])
+        .unwrap();
+        e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+    }
+
+    #[test]
+    fn automatic_link_sends_a_queued_message_and_hangs_up() {
+        let mut st = mesh("autolink", &["AA1AAA", "BB1BBB"], &[(0, 1), (1, 0)], 0.0);
+        let (mut b, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        b.listen().unwrap();
+        a.set_auto_link(true);
+        a.send_message("BB1BBB", "no connect needed").unwrap();
+        assert!(
+            wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "no connect needed"), 120).is_some(),
+            "the queued message was not sent by itself"
+        );
+        // Nothing is waiting any more: the station closes its own link.
+        let closed = wait_for(&mut a, |e| matches!(e, Event::Link(kahf_core::link::LinkState::Idle)), 120);
+        assert!(closed.is_some(), "the automatic link was not closed");
+    }
+
+    #[test]
+    fn a_message_reaches_a_station_that_only_a_relay_can_hear() {
+        // A and B cannot hear each other; both hear the relay R.
+        let mut st = mesh("relay3", &["AA1AAA", "RR1RRR", "BB1BBB"], &[(0, 1), (1, 0), (1, 2), (2, 1)], 0.0);
+        let (mut b, mut r, mut a) = (st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap());
+        make_relay(&r);
+        r.listen().unwrap();
+        b.listen().unwrap();
+        a.set_auto_link(true);
+        a.set_relay_hints(&["RR1RRR".to_string()]);
+        a.set_relay_timeout_ms(500);
+        a.send_message("BB1BBB", "through the relay").unwrap();
+        assert!(
+            wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "through the relay"), 400).is_some(),
+            "the relayed message did not arrive"
+        );
+        assert_eq!(r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64), 1, "one forward counted");
+        // Delivered once only.
+        thread::sleep(Duration::from_secs(5));
+        let again = b.poll_events().into_iter().filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay")).count();
+        assert_eq!(again, 0, "no second copy");
     }
 
     #[test]
@@ -3769,6 +4075,7 @@ mod tests {
             station_key: None,
             key_error: Mutex::new(None),
             relay: Mutex::new(None),
+            relay_hints: Mutex::new(Vec::new()),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
         });

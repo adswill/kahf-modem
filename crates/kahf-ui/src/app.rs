@@ -1171,6 +1171,12 @@ impl App {
                     self.live_spectrum = Some(now);
                 }
             }
+            EngineEvent::Metrics(st) => {
+                self.engine_note = format!(
+                    "Link: {} (auto {}), net {} bit/s, we hear {:?} dB, they hear {:?} dB, lost {:.0}%",
+                    st.mode, st.auto, st.net_bps, st.own_snr_db, st.peer_snr_db, st.fer_pct
+                );
+            }
             EngineEvent::Log(msg) => {
                 if msg.starts_with("Could not reach") {
                     let peer = self.target.trim().to_uppercase();
