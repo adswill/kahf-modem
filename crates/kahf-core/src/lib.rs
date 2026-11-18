@@ -9,6 +9,7 @@ pub mod diversity;
 pub mod extras;
 pub mod frame;
 pub mod harq;
+pub mod hop;
 pub mod image;
 pub mod interf;
 pub mod io;

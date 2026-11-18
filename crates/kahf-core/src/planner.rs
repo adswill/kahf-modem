@@ -295,6 +295,37 @@ pub fn bond(plan: &Plan, wants: &[(u32, u8)]) -> Vec<Bonded> {
     out
 }
 
+/// One of a relay's granted cells, used to send to another relay over the air (purpose HOP).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HopGrant {
+    pub relay: u32,
+    pub target: u32,
+    pub lane: u8,
+    pub slot: u8,
+}
+
+/// Give each (from, to) request one cell of `from`'s grants: the earliest slot in which `to`
+/// holds no grant of its own (a relay cannot listen while it sends) and is not already the target
+/// of another hop. Requests that find no such cell get none this epoch.
+pub fn hop_grants(plan: &Plan, requests: &[(u32, u32)]) -> Vec<HopGrant> {
+    let mut receiving: Vec<(u8, u32)> = Vec::new();
+    let mut used: Vec<(u32, u8)> = Vec::new();
+    let mut out = Vec::new();
+    for &(from, to) in requests {
+        let mut mine: Vec<&Grant> = plan.grants.iter().filter(|g| g.relay == from).collect();
+        mine.sort_by_key(|g| g.slot);
+        let pick = mine.into_iter().find(|g| {
+            plan.grant_for(to, g.slot).is_none() && !receiving.contains(&(g.slot, to)) && !used.contains(&(from, g.slot))
+        });
+        if let Some(g) = pick {
+            receiving.push((g.slot, to));
+            used.push((from, g.slot));
+            out.push(HopGrant { relay: from, target: to, lane: g.lane, slot: g.slot });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +610,38 @@ mod bonding_tests {
                 assert_eq!(t.permit_tx("17m", first, first + count - 1, a.dial_hz, lo, hi), Ok(()), "{first}+{count}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hop_tests {
+    use super::*;
+
+    #[test]
+    fn a_hop_uses_a_cell_of_the_sender_and_a_slot_when_the_target_is_listening() {
+        let rs: Vec<RelayIn> = (0..12u32).map(|i| RelayIn { id: i, queue_bytes: if i < 8 { 500 } else { 0 }, urgency: 0 }).collect();
+        for epoch in 0..100 {
+            let p = plan(epoch, 4, &rs);
+            // Relay 0 wants to hop to 9 (idle: always listening) and relay 1 to 2 (busy).
+            let hops = hop_grants(&p, &[(0, 9), (1, 2), (3, 9)]);
+            let mut by_target: Vec<(u8, u32)> = vec![];
+            for h in &hops {
+                assert!(p.grants.iter().any(|g| g.relay == h.relay && g.slot == h.slot && g.lane == h.lane), "not the sender's own cell");
+                assert!(p.grant_for(h.target, h.slot).is_none(), "target {} sends in slot {}", h.target, h.slot);
+                assert!(!by_target.contains(&(h.slot, h.target)), "two hops into one relay in one slot");
+                by_target.push((h.slot, h.target));
+            }
+            assert!(hops.iter().any(|h| h.relay == 0 && h.target == 9), "an idle target is always reachable");
+        }
+    }
+
+    #[test]
+    fn a_target_that_transmits_all_epoch_gets_no_hop() {
+        let mut rs: Vec<RelayIn> = vec![RelayIn { id: 1, queue_bytes: 900, urgency: 0 }, RelayIn { id: 2, queue_bytes: 900, urgency: 0 }];
+        rs[0].queue_bytes = 900;
+        // Two busy relays each hold all six slots on their own lane: neither can listen to the other.
+        let p = plan(3, 1, &rs);
+        assert_eq!(p.grants.len(), 12);
+        assert!(hop_grants(&p, &[(1, 2)]).is_empty());
     }
 }
