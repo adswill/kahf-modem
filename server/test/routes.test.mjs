@@ -432,13 +432,13 @@ test("POST /schedule: a second relay in the same area avoids the first relay's s
   const [s] = second.slots;
   assert.ok(s.start >= NOW_S + 60, `W0AAB starts at ${s.start}, inside W0AAA's slot`);
 
-  // Same channel in another area does not clash.
+  // HF is global: the same channel in another area still waits for both transmit slots.
   const regC = { area: "N51W3", callsign: "W0AAC" };
   const c = await newKey();
   await handleRequest(post("/register", await signed(c, regC)), store, NOW);
   const reqC = { relay: "W0AAC", requests: [{ channel: 80, duration: 60, direction: "tx" }] };
   const third = await (await handleRequest(post("/schedule", await signed(c, reqC)), store, NOW)).json();
-  assert.equal(third.slots[0].start, NOW_S);
+  assert.ok(third.slots[0].start >= s.start + 60, "a relay in another area must not transmit over the others");
 });
 
 test("POST /schedule: a relay's slots that have already ended are not booked", async () => {

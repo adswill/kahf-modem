@@ -875,12 +875,13 @@ S(G.sched, "30 relays in one area, same channel, each asks 20 times in turn: no 
   for (let i = 1; i < all.length; i++) check(all[i].start >= all[i - 1].start + all[i - 1].duration, `overlap on channel 7: ${snip(all[i - 1])} and ${snip(all[i])}`);
   check(all[0].start >= nowS(h) - 5, "first slot starts before now");
 });
-S(G.sched, "relays in different areas may use the same channel at the same time", "both start now", async (h) => {
+S(G.sched, "relays in different areas never transmit on one channel at the same time (HF is global)", "second transmit slot starts after the first", async (h) => {
   const a = await relayWith(h, "N10E10"), b = await relayWith(h, "N11E10");
   const ra = await schedule(h, a.call, [tx(9, 30)], a.key);
   const rb = await schedule(h, b.call, [tx(9, 30)], b.key);
   status(ra, 200); status(rb, 200);
-  check(Math.abs(ra.json.slots[0].start - rb.json.slots[0].start) <= 5, `slots should start together: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
+  const x = ra.json.slots[0], y = rb.json.slots[0];
+  check(y.start >= x.start + x.duration || x.start >= y.start + y.duration, `transmit slots overlap: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
 });
 S(G.sched, "urgent request placed before earlier non-urgent ones on the same channel", "urgent slot (20 s) starts first, then non-urgent in request order", async (h) => {
   const r = await relayWith(h);
@@ -1008,9 +1009,9 @@ S(G.sched, "relay that moves area is planned against its new area only", "same-c
   const y = x === "N5E5" ? "N6E6" : "N5E5";
   const a = await relayWith(h, x);
   const m = await relayWith(h, x);
-  status(await schedule(h, a.call, [tx(10, 300)], a.key), 200);
+  status(await schedule(h, a.call, [{ channel: 10, duration: 300, direction: "rx" }], a.key), 200);
   status((await registerRelay(h, m.call, y, m.key)).res, 200);
-  const res = await schedule(h, m.call, [tx(10, 30)], m.key);
+  const res = await schedule(h, m.call, [{ channel: 10, duration: 30, direction: "rx" }], m.key);
   status(res, 200);
   check(Math.abs(res.json.slots[0].start - nowS(h)) <= 5, `moved relay still waits behind the old area: ${snip(res.json.slots)}`);
 });

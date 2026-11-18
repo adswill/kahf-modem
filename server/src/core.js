@@ -741,6 +741,8 @@ export function planSchedule(relays, requests, nowUnix, booked = []) {
   const channelBusy = new Map();
   /** @type {Map<string, Array<[number, number]>>} relay id -> busy intervals */
   const relayBusy = new Map();
+  /** @type {Map<number, Array<[number, number]>>} channel -> transmit intervals, worldwide */
+  const txBusy = new Map();
   for (const b of booked) {
     if (!b || typeof b !== "object" || !isArea(b.area) || !isChannel(b.channel)) {
       throw new TypeError("each booked slot needs an area and a channel in the band");
@@ -751,6 +753,11 @@ export function planSchedule(relays, requests, nowUnix, booked = []) {
     const key = `${b.area}|${b.channel}`;
     if (!channelBusy.has(key)) channelBusy.set(key, []);
     channelBusy.get(key).push([b.start, b.start + b.duration]);
+    // HF skywave is global: a booked transmit slot blocks that channel in every area.
+    if (b.direction === "tx") {
+      if (!txBusy.has(b.channel)) txBusy.set(b.channel, []);
+      txBusy.get(b.channel).push([b.start, b.start + b.duration]);
+    }
   }
   /** @type {Record<string, Array<{ channel: number, start: number, duration: number, direction: "rx" | "tx" }>>} */
   const out = {};
@@ -762,7 +769,13 @@ export function planSchedule(relays, requests, nowUnix, booked = []) {
     const channelKey = `${areaOf.get(q.relay)}|${q.channel}`;
     if (!channelBusy.has(channelKey)) channelBusy.set(channelKey, []);
     if (!relayBusy.has(q.relay)) relayBusy.set(q.relay, []);
-    const busy = [...channelBusy.get(channelKey), ...relayBusy.get(q.relay)];
+    if (!txBusy.has(q.channel)) txBusy.set(q.channel, []);
+    const busy = [
+      ...channelBusy.get(channelKey),
+      ...relayBusy.get(q.relay),
+      // Two relays never transmit on one channel at the same time anywhere in the world.
+      ...(q.direction === "tx" ? txBusy.get(q.channel) : []),
+    ];
 
     // Push the start past any overlapping interval until none overlap.
     let start = nowUnix;
@@ -791,6 +804,7 @@ export function planSchedule(relays, requests, nowUnix, booked = []) {
     const interval = [start, start + q.duration];
     channelBusy.get(channelKey).push(interval);
     relayBusy.get(q.relay).push(interval);
+    if (q.direction === "tx") txBusy.get(q.channel).push(interval);
     out[q.relay].push({ channel: q.channel, start, duration: q.duration, direction: q.direction });
   }
 
