@@ -1,6 +1,6 @@
 <script lang="ts">
   // The live picture of the radio band: a line graph on top and a scrolling waterfall below.
-  // Audio from the radio covers 0 to 4 kHz; KAHF uses the middle part, 0.3 to 2.7 kHz.
+  // Audio from the radio covers 0 to 4 kHz; KAHF's lane is 480 Hz around 1.5 kHz.
   import { app } from "../lib/state.svelte";
 
   let { height = 340, compact = false }: { height?: number; compact?: boolean } = $props();
@@ -52,20 +52,20 @@
     ctx.fillStyle = css("--panel-2");
     ctx.fillRect(0, 0, w, h);
 
-    // The KAHF channel: the part of the audio that KAHF listens to and sends in.
+    // Lanes: each is 480 Hz wide and 700 Hz from the next. Your own lane is at 1500 Hz of audio.
     const x = (hz: number) => (hz / 4000) * w;
-    ctx.fillStyle = css("--accent-soft");
-    ctx.fillRect(x(300), 0, x(2700) - x(300), plotH + wfH);
-    ctx.strokeStyle = css("--accent");
     ctx.globalAlpha = 0.5;
     ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(x(300), 0);
-    ctx.lineTo(x(300), plotH + wfH);
-    ctx.moveTo(x(2700), 0);
-    ctx.lineTo(x(2700), plotH + wfH);
-    ctx.stroke();
+    ctx.strokeStyle = css("--accent");
+    for (const c of [100, 800, 2200, 2900, 3600]) {
+      ctx.strokeRect(x(c - 240), 0, x(c + 240) - x(c - 240), plotH + wfH);
+    }
     ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = css("--accent-soft");
+    ctx.fillRect(x(1260), 0, x(1740) - x(1260), plotH + wfH);
+    ctx.strokeStyle = css("--accent");
+    ctx.strokeRect(x(1260), 0, x(1740) - x(1260), plotH + wfH);
     ctx.globalAlpha = 1;
 
     // Grid.
@@ -135,7 +135,7 @@
     }
     ctx.textAlign = "left";
     ctx.fillStyle = css("--accent");
-    ctx.fillText("KAHF channel", x(300) + 8, 6);
+    ctx.fillText("Your lane", x(1260) + 6, 6);
   }
 
   $effect(() => {
@@ -149,7 +149,7 @@
   <canvas bind:this={canvas} aria-label="Live radio spectrum and waterfall"></canvas>
   {#if !compact}
     <div class="legend small faint">
-      Brighter is stronger. The shaded band is the one 2.4 kHz channel KAHF uses, whatever the speed.
+      Brighter is stronger. The shaded band is your lane, 480 Hz wide. The dashed boxes are the lanes next to it.
     </div>
   {/if}
 </div>
