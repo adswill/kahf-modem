@@ -47,9 +47,9 @@ fn main() {
             })
             .collect();
         audio.extend(modulate_frame(&bits, m));
-        audio.extend(std::iter::repeat(0.0).take(FS / 10));
+        audio.extend(std::iter::repeat_n(0.0, FS / 10));
     }
-    audio.extend(std::iter::repeat(0.0).take(FS));
+    audio.extend(std::iter::repeat_n(0.0, FS));
     // 8 kHz -> 48 kHz: windowed-sinc interpolation.
     let half = 12i64;
     let low = audio;

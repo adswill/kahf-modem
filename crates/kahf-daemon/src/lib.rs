@@ -24,6 +24,8 @@ use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 mod backbone;
+mod clock;
+pub use clock::Clock;
 use backbone::{Backbone, BbHandle, BbJob, BbResult, Queued};
 use kahf_core::mac::{Class, Mac};
 use kahf_core::link::{encode_beacon, BEACON_ONLINE, encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
@@ -354,6 +356,7 @@ pub struct Engine {
     shared: Arc<Shared>,
     ids: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
+    clock: Clock,
 }
 
 impl Engine {
@@ -715,6 +718,10 @@ pub fn transmit_modulation(&self) -> &'static str {
     }
 
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
+        Self::spawn_with_clock(config, factory, Clock::real())
+    }
+
+    fn spawn_with_clock(config: Config, factory: Factory, clock: Clock) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
         let (station_key, key_error) = match auth::load_or_create(&config.data_dir) {
@@ -740,9 +747,13 @@ pub fn transmit_modulation(&self) -> &'static str {
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
         let (worker_shared, worker_ids) = (shared.clone(), ids.clone());
+        let (worker_clock, joined) = (clock.clone(), clock.join());
         let worker = thread::Builder::new()
             .name("kahf-engine".into())
-            .spawn(move || Worker::new(config, cmd_rx, worker_shared, factory, worker_ids).run())
+            .spawn(move || {
+                let _joined = joined;
+                Worker::new(config, cmd_rx, worker_shared, factory, worker_ids, worker_clock).run()
+            })
             .map_err(|e| format!("cannot start engine thread: {e}"))?;
         Ok(Engine {
             config: engine_config,
@@ -750,6 +761,7 @@ pub fn transmit_modulation(&self) -> &'static str {
             shared,
             ids,
             worker: Some(worker),
+            clock,
         })
     }
 
@@ -797,7 +809,9 @@ impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.cmd.send(Cmd::Shutdown);
         if let Some(h) = self.worker.take() {
-            let _ = h.join();
+            self.clock.park(|| {
+                let _ = h.join();
+            });
         }
     }
 }
@@ -1342,7 +1356,15 @@ const BURST_MAX: usize = 8;
 const ID_MODE_MASK: u8 = 0x1F;
 
 /// How long after a transmission the sound card may still be handing back our own signal.
-const ECHO_TAIL: Duration = Duration::from_millis(400);
+/// Must stay below the MAC's answer gap (`SIFS_MS`): the station we sent to answers that soon
+/// after our burst, and an answer that starts inside this window would be thrown away unheard.
+/// A preamble has been heard but its first codeword has not decoded yet, so the burst is of an
+/// unknown mode and length. For this long it counts as a burst being received: starting our own
+/// burst now would talk over an answer on its way (a slow mode's first codeword is its whole frame).
+const PREAMBLE_HOLD: Duration = Duration::from_millis(2500);
+
+const ECHO_TAIL: Duration = Duration::from_millis(200);
+const _: () = assert!((ECHO_TAIL.as_millis() as u64) + 50 <= kahf_core::mac::SIFS_MS);
 /// Default transmit audio level: half of full scale (minus 6 dB).
 const DEFAULT_TX_LEVEL_PCT: u8 = 50;
 /// The test tone: a steady 1 kHz sine, long enough to set the radio's drive by its ALC meter.
@@ -1638,6 +1660,11 @@ fn band_name(mhz: f64) -> String {
         .unwrap_or_default()
 }
 
+/// A small stable hash, for repeatable test randomness.
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
 fn now_unix_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1718,6 +1745,7 @@ enum TxStep {
 }
 
 struct Worker {
+    clock: Clock,
     cmds: Receiver<Cmd>,
     shared: Arc<Shared>,
     factory: Factory,
@@ -1764,6 +1792,10 @@ struct Worker {
     since_kami: usize,
     /// A located KAMI preamble: its start in `rx_buf` and the frequency offset.
     kami_at: Option<(usize, f64, f64)>,
+    /// When the preamble in `kami_at` was found.
+    kami_seen: Option<Instant>,
+    /// The preamble estimate was redone once the whole preamble had arrived.
+    kami_refined: bool,
     /// Audio available after the preamble at the last decode attempt.
     kami_tried: usize,
     /// The mode of the burst being received, once its first codeword has decoded.
@@ -1879,6 +1911,7 @@ impl Worker {
         shared: Arc<Shared>,
         factory: Factory,
         ids: Arc<AtomicU64>,
+        clock: Clock,
     ) -> Self {
         let outbox_path = config.data_dir.join("outbox.bin");
         let outbox = fs::read(&outbox_path)
@@ -1904,6 +1937,7 @@ impl Worker {
             }
         }
         let w = Worker {
+            clock: clock.clone(),
             cmds,
             shared,
             factory,
@@ -1923,7 +1957,7 @@ impl Worker {
             link: Link::new(&config.callsign),
             tx_level: mod_level(MODULATION) as u8,
             tick_paused: Duration::ZERO,
-            last_tick: Instant::now(),
+            last_tick: clock.now(),
             link_state: LinkState::Idle,
             qso: None,
             outbox,
@@ -1935,37 +1969,39 @@ impl Worker {
             rx_buf: Vec::new(),
             since_kami: 0,
             kami_at: None,
+            kami_seen: None,
+            kami_refined: false,
             kami_tried: 0,
             kami_mode: None,
             kami_next: 0,
             kami_total: 0,
             kami_front: false,
             spec: Analyser::new(SPEC_FFT, RATE as f32),
-            spec_due: Instant::now(),
+            spec_due: clock.now(),
             since_scan: 0,
             rx_chunks: Vec::new(),
             rx_error: None,
             rx_retry_at: None,
             tick_error: None,
-            started: Instant::now(),
+            started: clock.now(),
             queued,
             unreached_noted: HashSet::new(),
             via: HashMap::new(),
             via_tried: HashMap::new(),
             auto_fails: HashMap::new(),
             auto_initiated: false,
-            last_activity: Instant::now(),
+            last_activity: clock.now(),
             forwarded: VecDeque::new(),
             rx_deaf_until: None,
-            mac: Mac::new(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)),
+            mac: Mac::new(if clock.is_virtual() { fnv(&config.callsign) } else { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) }),
             rx_locked: false,
             adverts_seen: VecDeque::new(),
             advert_seq: 0,
-            beacon_at: Instant::now() - Duration::from_secs(3600),
+            beacon_at: clock.now() - Duration::from_secs(3600),
             heard_recent: HashMap::new(),
             bb: None,
             bb_pending: HashMap::new(),
-            bb_last: Instant::now(),
+            bb_last: clock.now(),
             refusal_logged: None,
         };
         w.publish_pending();
@@ -1999,7 +2035,7 @@ impl Worker {
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
                 if !self.tx_step() {
-                    thread::sleep(POLL);
+                    self.clock.sleep(POLL);
                 }
                 continue;
             }
@@ -2009,10 +2045,13 @@ impl Worker {
             if let Some((id, msg, private)) = self.next_due() {
                 if self.clear_channel(id, &msg) {
                     self.send_item(id, msg, private);
+                    continue;
                 }
-                continue;
+                // Waiting for the channel: keep listening (the receive step below also sleeps
+                // when there is no audio), so an answer on its way is not missed.
             }
-            if let Some(samples) = self.bursts.pop_front() {
+            if !self.rx_provisional() && !self.bursts.is_empty() {
+                let samples = self.bursts.pop_front().unwrap_or_default();
                 let ms = self.now_ms();
                 self.mac.on_tx_start(ms, ms + (samples.len() as u64 * 1000 / RATE as u64));
                 self.tx = Some(TxJob {
@@ -2024,7 +2063,7 @@ impl Worker {
                 continue;
             }
             if self.rx_step() == 0 {
-                thread::sleep(POLL);
+                self.clock.sleep(POLL);
             }
         }
         self.abort_tx();
@@ -2102,7 +2141,7 @@ impl Worker {
     }
 
     fn now_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
+        self.clock.since(self.started).as_millis() as u64
     }
 
     /// Adds messages to the outbox in order and saves the queue. `ids` are the public ids the caller returned.
@@ -2211,7 +2250,7 @@ impl Worker {
         match self.link_state.clone() {
             LinkState::Idle => {
                 self.auto_initiated = false;
-                if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+                if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
                     return;
                 }
                 let now = self.now_ms();
@@ -2224,12 +2263,12 @@ impl Worker {
                 if self
                     .auto_fails
                     .get(&peer.to_uppercase())
-                    .is_some_and(|(_, until)| Instant::now() < *until)
+                    .is_some_and(|(_, until)| self.clock.now() < *until)
                 {
                     return;
                 }
                 self.auto_initiated = true;
-                self.last_activity = Instant::now();
+                self.last_activity = self.clock.now();
                 if let Err(e) = self.connect(&peer) {
                     self.log(e);
                 }
@@ -2250,7 +2289,7 @@ impl Worker {
                     .pending()
                     .iter()
                     .any(|(id, _, _)| self.route_peer_of(*id).is_some_and(|p| p.eq_ignore_ascii_case(&peer)));
-                if !waiting && self.last_activity.elapsed() >= AUTO_HANGUP {
+                if !waiting && self.clock.since(self.last_activity) >= AUTO_HANGUP {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
                     }
@@ -2305,16 +2344,16 @@ impl Worker {
         if call == self.callsign {
             return;
         }
-        self.heard_recent.insert(call.to_uppercase(), (snr.map(|s| s.round() as i32), Instant::now()));
+        self.heard_recent.insert(call.to_uppercase(), (snr.map(|s| s.round() as i32), self.clock.now()));
         if self.heard_recent.len() > 500 {
-            self.heard_recent.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(900));
+            self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(900));
         }
     }
 
     fn heard_lately(&self, call: &str) -> bool {
         self.heard_recent
             .get(&call.to_uppercase())
-            .is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(600))
+            .is_some_and(|(_, t)| self.clock.since(*t) < Duration::from_secs(600))
     }
 
     /// Starts the server thread when relay mode runs and a server is set, and stops it when not.
@@ -2394,16 +2433,16 @@ impl Worker {
                 BbResult::Log(t) => self.log(t),
             }
         }
-        if self.bb_last.elapsed() < Duration::from_secs(20) {
+        if self.clock.since(self.bb_last) < Duration::from_secs(20) {
             return;
         }
-        self.bb_last = Instant::now();
-        self.heard_recent.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(900));
+        self.bb_last = self.clock.now();
+        self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(900));
         let now = now_unix_secs().max(0) as u64;
         let list: Vec<(String, Option<i32>, u64)> = self
             .heard_recent
             .iter()
-            .map(|(c, (snr, t))| (c.clone(), *snr, now.saturating_sub(t.elapsed().as_secs())))
+            .map(|(c, (snr, t))| (c.clone(), *snr, now.saturating_sub(self.clock.since(*t).as_secs())))
             .collect();
         if let Some(bb) = &self.bb {
             let calls: Vec<String> = list.iter().map(|(c, _, _)| c.clone()).collect();
@@ -2416,12 +2455,12 @@ impl Worker {
     /// time (operators often have no clock source), and how busy it is.
     fn beacon_step(&mut self) {
         if !self.shared.flags.relay_running.load(Ordering::SeqCst)
-            || self.beacon_at.elapsed() < Duration::from_secs(60)
+            || self.clock.since(self.beacon_at) < Duration::from_secs(60)
             || tx_refusal(&self.shared.flags).is_some()
         {
             return;
         }
-        self.beacon_at = Instant::now();
+        self.beacon_at = self.clock.now();
         let flags = if self.bb.is_some() { BEACON_ONLINE } else { 0 };
         let load = (self.outbox.pending().len() * 16).min(255) as u8;
         let now = now_unix_secs().max(0) as u32;
@@ -2538,7 +2577,7 @@ impl Worker {
         if !self.transmit_allowed() || !self.relay_slot_open() {
             return None;
         }
-        if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
             return None;
         }
         let peer = match &self.link_state {
@@ -2585,7 +2624,7 @@ impl Worker {
     /// is taken at most once per FRAME_S. Power is summed over the channel width, so a
     /// station anywhere in the channel raises the level.
     fn feed_carrier(&mut self, bins_db: &[f32]) {
-        let now = Instant::now();
+        let now = self.clock.now();
         if self
             .carrier_fed
             .is_some_and(|t| now.duration_since(t).as_secs_f32() < access::FRAME_S)
@@ -2633,15 +2672,18 @@ impl Worker {
         } else {
             Class::Data
         };
+        if !answer && self.rx_provisional() {
+            return Pick::Wait;
+        }
         let now = self.now_ms();
         if self.mac.check(now, class).is_some() {
             return Pick::Wait;
         }
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-            ^ id.unwrap_or(0);
+        let seed = if self.clock.is_virtual() {
+            fnv(&self.callsign)
+        } else {
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+        } ^ id.unwrap_or(0);
         let pool = if urgent {
             select::Pool::Emergency
         } else {
@@ -2666,7 +2708,7 @@ impl Worker {
             }
             Err(Refusal::Wait { seconds }) => {
                 self.access_failures += 1;
-                self.access_retry_at = Some(Instant::now() + Duration::from_secs_f32(seconds));
+                self.access_retry_at = Some(self.clock.now() + Duration::from_secs_f32(seconds));
                 self.log(format!("Channel busy. Trying again in {seconds:.0} s."));
                 Pick::Wait
             }
@@ -2701,7 +2743,7 @@ impl Worker {
         if !self.relay_slot_open() {
             return;
         }
-        if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
             return;
         }
         let answer = self
@@ -2834,11 +2876,11 @@ impl Worker {
                 let key = peer.to_uppercase();
                 let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
                 let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(900));
-                self.auto_fails.insert(key, (fails, Instant::now() + pause));
+                self.auto_fails.insert(key, (fails, self.clock.now() + pause));
             }
             (_, LinkState::Connected { peer }) => {
                 self.auto_fails.remove(&peer.to_uppercase());
-                self.last_activity = Instant::now();
+                self.last_activity = self.clock.now();
             }
             _ => {}
         }
@@ -2925,17 +2967,24 @@ impl Worker {
     }
 
     /// Runs link timers (handshake retries, DATA retransmits) on the monotonic clock.
+    /// True while a heard preamble is still undecoded and young (see `PREAMBLE_HOLD`).
+    fn rx_provisional(&self) -> bool {
+        self.kami_at.is_some()
+            && self.kami_mode.is_none()
+            && self.kami_seen.is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD)
+    }
+
     fn tick_link(&mut self) {
         // Link timers run on time the radio is free: while a burst is queued or on the air the
         // peer cannot answer, so that time does not count towards a retransmit.
-        let now = Instant::now();
+        let now = self.clock.now();
         if self.tx.is_some() || !self.bursts.is_empty() {
             self.tick_paused += now.saturating_duration_since(self.last_tick);
         }
         self.last_tick = now;
         let now_ms = self
-            .started
-            .elapsed()
+            .clock
+            .since(self.started)
             .saturating_sub(self.tick_paused)
             .as_millis() as u64;
         match guard("link tick", || self.link.tick(now_ms)) {
@@ -3100,7 +3149,7 @@ impl Worker {
 
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
-        self.last_activity = Instant::now();
+        self.last_activity = self.clock.now();
         let before = self.tx_level;
         self.pick_level();
         let m = MODULATIONS[self.tx_level as usize];
@@ -3138,7 +3187,7 @@ impl Worker {
     /// Moves the current burst along by one step. Never waits for the device:
     /// audio is written only while the device is less than `TX_AHEAD_S` ahead.
     fn tx_advance(&mut self, job: &mut TxJob) -> Result<TxStep, String> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let Some(started) = job.started else {
             self.radio()?.tx_start()?;
             job.started = Some(now);
@@ -3187,7 +3236,7 @@ impl Worker {
                 self.end_rx_gap();
                 let now = self.now_ms();
                 self.mac.on_tx_end(now);
-                let link_now = self.started.elapsed().saturating_sub(self.tick_paused).as_millis() as u64;
+                let link_now = self.clock.since(self.started).saturating_sub(self.tick_paused).as_millis() as u64;
                 self.link.tx_finished(link_now);
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
@@ -3227,11 +3276,13 @@ impl Worker {
             let mut sink = Vec::new();
             let _ = be.read_audio(&mut sink);
         }
-        self.rx_deaf_until = Some(Instant::now() + ECHO_TAIL);
+        self.rx_deaf_until = Some(self.clock.now() + ECHO_TAIL);
         self.rx_buf.clear();
         self.since_scan = 0;
         // A burst being waited for pointed into the audio just thrown away.
         self.kami_at = None;
+        self.kami_seen = None;
+        self.kami_refined = false;
         self.kami_mode = None;
         self.kami_next = 0;
         self.kami_total = 0;
@@ -3242,10 +3293,10 @@ impl Worker {
     /// One RX pass: read what the radio has, update the spectrum, scan for frames.
     /// Returns the number of new samples.
     fn rx_step(&mut self) -> usize {
-        if self.rx_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.rx_retry_at.is_some_and(|t| self.clock.now() < t) {
             return 0;
         }
-        if self.rx_deaf_until.is_some_and(|t| Instant::now() < t) {
+        if self.rx_deaf_until.is_some_and(|t| self.clock.now() < t) {
             let mut sink = Vec::new();
             if let Some(be) = self.backend.as_mut() {
                 let _ = be.read_audio(&mut sink);
@@ -3270,7 +3321,7 @@ impl Worker {
 
         self.sense.push(&fresh);
         self.spec.push(&fresh);
-        let now = Instant::now();
+        let now = self.clock.now();
         if now >= self.spec_due {
             if let Some(bins) = self.spec.spectrum_db() {
                 debug_assert_eq!(bins.len(), SPEC_BINS);
@@ -3295,7 +3346,7 @@ impl Worker {
             self.log(format!("receive: {err}"));
             self.rx_error = Some(err);
         }
-        self.rx_retry_at = Some(Instant::now() + RX_RETRY);
+        self.rx_retry_at = Some(self.clock.now() + RX_RETRY);
     }
 
     /// Finds frames in the RX buffer. A preamble is searched for every KAMI_STEP samples in a
@@ -3331,6 +3382,8 @@ impl Worker {
                     }
                     if let Some(f) = found {
                         self.kami_at = Some(f);
+                        self.kami_seen = Some(self.clock.now());
+                        self.kami_refined = false;
                         self.kami_tried = 0;
                         self.since_kami = len.saturating_sub(f.0 + tl);
                         continue;
@@ -3350,6 +3403,8 @@ impl Worker {
             let w = window.min(len);
             if let Some((st, hz, tau)) = kahf_core::kami::find_preamble(&self.rx_buf[..w]) {
                 self.kami_at = Some((st, hz, tau));
+                self.kami_seen = Some(self.clock.now());
+                self.kami_refined = false;
                 self.kami_tried = 0;
                 self.since_kami = len.saturating_sub(st + tl);
                 continue;
@@ -3377,6 +3432,20 @@ impl Worker {
     /// Returns true when the burst ended or was given up, so the caller should look again for
     /// a preamble; false when more audio is needed.
     fn finish_kami(&mut self, start: usize, hz: f64, tau: f64) -> bool {
+        let (mut start, mut hz, mut tau) = (start, hz, tau);
+        let tl = kahf_core::kami::preamble_len();
+        // A preamble is first seen while it is still arriving, so its frequency and timing
+        // estimates are rough. Once all of it is here, estimate again; the modes are tried anew.
+        if self.kami_mode.is_none() && !self.kami_refined && self.rx_buf.len() >= start + tl + tl / 4 {
+            self.kami_refined = true;
+            let lo = start.saturating_sub(tl / 4);
+            let hi = (start + 2 * tl).min(self.rx_buf.len());
+            if let Some((st, h, t)) = kahf_core::kami::find_preamble(&self.rx_buf[lo..hi]) {
+                (start, hz, tau) = (lo + st, h, t);
+                self.kami_at = Some((start, hz, tau));
+                self.kami_tried = 0;
+            }
+        }
         let avail = self.rx_buf.len().saturating_sub(start);
         let longest = KAMI_MODES.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
         let modes: Vec<Modulation> = match self.kami_mode {
@@ -3398,6 +3467,11 @@ impl Worker {
             }
             if self.kami_mode.is_some() {
                 n = n.min(self.kami_total);
+            } else {
+                // The first codeword fixes the mode and the length of the burst. Asking for more
+                // than one now would run the demodulator over audio past the end of a short burst,
+                // which spoils the estimates and loses the burst.
+                n = n.min(1);
             }
             if n <= self.kami_next {
                 continue;
@@ -3467,6 +3541,8 @@ impl Worker {
         }
         self.rx_buf.drain(..end);
         self.kami_at = None;
+        self.kami_seen = None;
+        self.kami_refined = false;
         self.kami_mode = None;
         self.kami_next = 0;
         self.kami_total = 0;
@@ -3474,7 +3550,7 @@ impl Worker {
     }
 
     fn on_frame(&mut self, payload: Vec<u8>) {
-        self.last_activity = Instant::now();
+        self.last_activity = self.clock.now();
         if matches!(payload.first(), Some(0x11) | Some(0x02)) {
             self.mac.success();
         }
@@ -3619,11 +3695,39 @@ mod tests {
     struct FakeRadio {
         rx: Pipe,
         tx: Pipe,
+        clock: Clock,
+        start: Instant,
+        delivered: usize,
+    }
+
+    thread_local! {
+        static TEST_CLOCK: Clock = {
+            let c = Clock::virtual_time();
+            c.join_thread();
+            c
+        };
+    }
+
+    /// The virtual clock of the current test thread (made on first use).
+    fn test_clock() -> Clock {
+        TEST_CLOCK.with(|c| c.clone())
+    }
+
+    /// Spawns an engine on the test thread's virtual clock.
+    fn vspawn(config: Config, factory: Factory) -> Result<Engine, String> {
+        Engine::spawn_with_clock(config, factory, test_clock())
     }
 
     impl Backend for FakeRadio {
+        /// Like a sound card: one second of audio per (virtual) second; silence where nothing was sent.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            out.extend(self.rx.lock().unwrap().drain(..));
+            let due = (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize;
+            let n = due.saturating_sub(self.delivered);
+            let mut q = self.rx.lock().unwrap();
+            for _ in 0..n {
+                out.push(q.pop_front().unwrap_or(0.0));
+            }
+            self.delivered += n;
             Ok(())
         }
 
@@ -3644,30 +3748,54 @@ mod tests {
         }
     }
 
-    /// One shared channel for several stations: whatever one sends, every station hears, and so
-    /// does the sender itself (a virtual audio cable does exactly this).
+    /// One shared channel for several stations: signals that overlap in time add up, as on
+    /// the air, and every station hears all of it, itself included (a virtual audio cable does
+    /// exactly this). The line is a timeline of samples from the start; position = time x rate.
     struct Bus {
-        queues: Vec<Pipe>,
+        line: Mutex<Vec<f32>>,
     }
 
     struct BusRadio {
-        me: usize,
         bus: Arc<Bus>,
+        clock: Clock,
+        start: Instant,
+        delivered: usize,
+        /// Timeline position where the current transmission began.
+        tx_base: usize,
+    }
+
+    impl BusRadio {
+        fn now_index(&self) -> usize {
+            (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize
+        }
     }
 
     impl Backend for BusRadio {
+        /// Like a sound card: exactly one second of audio per second. Whatever was sent at
+        /// that moment is in it, mixed with anything else sent then; otherwise silence.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            out.extend(self.bus.queues[self.me].lock().unwrap().drain(..));
+            let due = self.now_index();
+            let line = self.bus.line.lock().unwrap();
+            for k in self.delivered..due {
+                out.push(line.get(k).copied().unwrap_or(0.0));
+            }
+            self.delivered = self.delivered.max(due);
             Ok(())
         }
 
         fn tx_start(&mut self) -> Result<(), String> {
+            self.tx_base = self.now_index();
             Ok(())
         }
 
         fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
-            for q in &self.bus.queues {
-                q.lock().unwrap().extend(samples[start..end].iter().copied());
+            let mut line = self.bus.line.lock().unwrap();
+            let last = self.tx_base + end;
+            if line.len() < last {
+                line.resize(last, 0.0);
+            }
+            for (k, v) in samples[start..end].iter().enumerate() {
+                line[self.tx_base + start + k] += *v;
             }
             Ok(())
         }
@@ -3679,14 +3807,17 @@ mod tests {
 
     /// `calls.len()` engines on one bus, all listening, with automatic linking on.
     fn bus_engines(tag: &str, calls: &[&str]) -> Vec<Engine> {
-        let bus = Arc::new(Bus { queues: calls.iter().map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect() });
+        let bus = Arc::new(Bus { line: Mutex::new(Vec::new()) });
+        let clock = Clock::virtual_time();
+        clock.join_thread();
         calls
             .iter()
-            .enumerate()
-            .map(|(i, call)| {
+            .map(|call| {
                 let b = bus.clone();
-                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { me: i, bus: b.clone() }) as Box<dyn Backend>));
-                let mut e = Engine::spawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap();
+                let c = clock.clone();
+                let start = clock.now();
+                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { bus: b.clone(), clock: c.clone(), start, delivered: 0, tx_base: 0 }) as Box<dyn Backend>));
+                let mut e = Engine::spawn_with_clock(config(call, temp_dir(&format!("{tag}-{call}"))), factory, clock.clone()).unwrap();
                 e.listen().unwrap();
                 e.set_auto_link(true);
                 e.set_fixed_mode("KAMI-1c").unwrap();
@@ -3699,19 +3830,21 @@ mod tests {
     /// `(receiver index, sender, text)`.
     fn run_bus(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[(usize, String, String)]) -> bool) -> Vec<(usize, String, String)> {
         let mut got: Vec<(usize, String, String)> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline && !done(&got) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let deadline = t0 + Duration::from_secs(secs);
+        while clock.now() < deadline && !done(&got) {
             for (i, e) in engines.iter_mut().enumerate() {
                 for ev in e.poll_events() {
                     if std::env::var_os("KAHF_TRACE").is_some() && !matches!(ev, Event::Spectrum(_) | Event::Metrics(_)) {
-                        eprintln!("[{:6.1}s] st{i}: {ev:?}", (Instant::now() + Duration::from_secs(secs)).duration_since(deadline).as_secs_f32());
+                        eprintln!("[{:6.1}s] st{i}: {ev:?}", clock.since(t0).as_secs_f32());
                     }
                     if let Event::Message { from, text } = ev {
                         got.push((i, from, text));
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(20));
+            clock.sleep(Duration::from_millis(20));
         }
         got
     }
@@ -3796,32 +3929,37 @@ mod tests {
 
     /// Polls until `want` holds or the time runs out. Used where a reply used to be waited for.
     fn wait_until(secs: u64, want: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline {
+        let deadline = test_clock().now() + Duration::from_secs(secs);
+        while test_clock().now() < deadline {
             if want() {
                 return true;
             }
-            thread::sleep(Duration::from_millis(5));
+            test_clock().sleep(Duration::from_millis(5));
         }
         want()
     }
 
     fn fake_factory(rx: Pipe, tx: Pipe) -> Factory {
+        let clock = test_clock();
+        let start = clock.now();
         Box::new(move || {
             Ok(Box::new(FakeRadio {
                 rx: rx.clone(),
                 tx: tx.clone(),
+                clock: clock.clone(),
+                start,
+                delivered: 0,
             }) as Box<dyn Backend>)
         })
     }
 
     fn wait_for(engine: &mut Engine, want: impl Fn(&Event) -> bool, secs: u64) -> Option<Event> {
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline {
+        let deadline = test_clock().now() + Duration::from_secs(secs);
+        while test_clock().now() < deadline {
             if let Some(ev) = engine.poll_events().into_iter().find(|e| want(e)) {
                 return Some(ev);
             }
-            thread::sleep(Duration::from_millis(20));
+            test_clock().sleep(Duration::from_millis(20));
         }
         None
     }
@@ -3894,8 +4032,8 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
             Err("no radio in this test".to_string())
         });
-        let engine = Engine::spawn(config("T1AA", temp_dir("lazy")), factory).unwrap();
-        thread::sleep(Duration::from_millis(50));
+        let engine = vspawn(config("T1AA", temp_dir("lazy")), factory).unwrap();
+        test_clock().sleep(Duration::from_millis(50));
         assert!(!opened.load(Ordering::SeqCst));
         drop(engine);
     }
@@ -4003,8 +4141,14 @@ mod tests {
         assert!(slowest < Duration::from_millis(5), "slowest call {slowest:?}");
         assert_eq!(states.first(), Some(&TxState::Starting), "{states:?}");
         assert!(states.contains(&TxState::Sending), "{states:?}");
-        let done = wait_for(&mut e, |ev| matches!(ev, Event::Tx { state: TxState::Done }), 10);
-        assert!(done.is_some(), "transmit did not finish");
+        // Real time here: this engine runs on the wall clock.
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut done = false;
+        while !done && Instant::now() < end {
+            done = e.poll_events().iter().any(|ev| matches!(ev, Event::Tx { state: TxState::Done }));
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(done, "transmit did not finish");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4165,12 +4309,12 @@ mod tests {
     fn queued_while_offline_is_sent_after_link_up() {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir("offline-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("offline-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4178,7 +4322,7 @@ mod tests {
 
         a.send_message("BB1BBB", "hi there").unwrap();
         assert!(wait_until(5, || a.outbox_pending().len() == 1));
-        thread::sleep(Duration::from_millis(200));
+        test_clock().sleep(Duration::from_millis(200));
         assert!(
             a_to_b.lock().unwrap().is_empty(),
             "nothing may go out before the link is up"
@@ -4199,9 +4343,9 @@ mod tests {
         );
         assert!(got.is_some(), "queued message did not arrive");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !a.outbox_pending().is_empty() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
+        let deadline = test_clock().now() + Duration::from_secs(30);
+        while !a.outbox_pending().is_empty() && test_clock().now() < deadline {
+            test_clock().sleep(Duration::from_millis(20));
         }
         assert!(a.outbox_pending().is_empty(), "sent item stayed in the outbox");
     }
@@ -4212,7 +4356,7 @@ mod tests {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         {
-            let mut a = Engine::spawn(
+            let mut a = vspawn(
                 config("AA1AAA", dir.clone()),
                 fake_factory(b_to_a.clone(), a_to_b.clone()),
             )
@@ -4222,7 +4366,7 @@ mod tests {
         }
         assert!(dir.join("outbox.bin").exists());
 
-        let mut a = Engine::spawn(config("AA1AAA", dir.clone()), fake_factory(b_to_a, a_to_b)).unwrap();
+        let mut a = vspawn(config("AA1AAA", dir.clone()), fake_factory(b_to_a, a_to_b)).unwrap();
         assert!(wait_until(5, || a.outbox_pending().len() == 2));
         let pending = a.outbox_pending();
         assert_eq!(pending.len(), 2, "{pending:?}");
@@ -4240,12 +4384,12 @@ mod tests {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let dir = temp_dir("logbook-a");
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", dir.clone()),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("logbook-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4264,9 +4408,9 @@ mod tests {
 
         a.disconnect().unwrap();
         let log = dir.join("logbook.txt");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !log.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
+        let deadline = test_clock().now() + Duration::from_secs(10);
+        while !log.exists() && test_clock().now() < deadline {
+            test_clock().sleep(Duration::from_millis(20));
         }
         let text = fs::read_to_string(&log).unwrap();
         assert!(
@@ -4280,12 +4424,12 @@ mod tests {
     fn loopback_message_reaches_other_engine() {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir("loop-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("loop-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4358,8 +4502,10 @@ mod tests {
     }
 
     fn noisy_factory(rx: Pipe, tx: Pipe, sigma: f32, seed: u64) -> Factory {
+        let clock = test_clock();
+        let start = clock.now();
         Box::new(move || {
-            Ok(Box::new(NoisyRadio { inner: FakeRadio { rx: rx.clone(), tx: tx.clone() }, sigma, state: seed })
+            Ok(Box::new(NoisyRadio { inner: FakeRadio { rx: rx.clone(), tx: tx.clone(), clock: clock.clone(), start, delivered: 0 }, sigma, state: seed })
                 as Box<dyn Backend>)
         })
     }
@@ -4368,12 +4514,12 @@ mod tests {
     fn linked_pair(tag: &str, sigma: f32) -> (Engine, Engine) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir(&format!("{tag}-a"))),
             noisy_factory(b_to_a.clone(), a_to_b.clone(), sigma, 11),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir(&format!("{tag}-b"))),
             noisy_factory(a_to_b.clone(), b_to_a.clone(), sigma, 22),
         )
@@ -4403,13 +4549,27 @@ mod tests {
         tx: Vec<Pipe>,
         sigma: f32,
         state: u64,
+        clock: Clock,
+        start: Instant,
+        delivered: usize,
     }
 
     impl Backend for MeshRadio {
+        /// One second of audio per (virtual) second: what the heard stations sent, added up, or silence.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let from = out.len();
+            let due = (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize;
+            let n = due.saturating_sub(self.delivered);
+            self.delivered += n;
+            out.resize(from + n, 0.0);
             for p in &self.rx {
-                out.extend(p.lock().unwrap().drain(..));
+                let mut q = p.lock().unwrap();
+                for v in out.iter_mut().skip(from) {
+                    match q.pop_front() {
+                        Some(x) => *v += x,
+                        None => break,
+                    }
+                }
             }
             if self.sigma > 0.0 {
                 for v in out.iter_mut().skip(from) {
@@ -4447,10 +4607,13 @@ mod tests {
                     hears.iter().zip(&pipes).filter(|((_, to), _)| *to == i).map(|(_, p)| p.clone()).collect();
                 let tx: Vec<Pipe> =
                     hears.iter().zip(&pipes).filter(|((from, _), _)| *from == i).map(|(_, p)| p.clone()).collect();
+                let clock = test_clock();
+                let start = clock.now();
                 let factory: Factory = Box::new(move || {
-                    Ok(Box::new(MeshRadio { rx: rx.clone(), tx: tx.clone(), sigma, state: 7 + i as u64 }) as Box<dyn Backend>)
+                    Ok(Box::new(MeshRadio { rx: rx.clone(), tx: tx.clone(), sigma, state: 7 + i as u64, clock: clock.clone(), start, delivered: 0 })
+                        as Box<dyn Backend>)
                 });
-                Engine::spawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap()
+                vspawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap()
             })
             .collect()
     }
@@ -4503,7 +4666,7 @@ mod tests {
         );
         assert_eq!(r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64), 1, "one forward counted");
         // Delivered once only.
-        thread::sleep(Duration::from_secs(5));
+        test_clock().sleep(Duration::from_secs(5));
         let again = b.poll_events().into_iter().filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay")).count();
         assert_eq!(again, 0, "no second copy");
     }
@@ -4513,7 +4676,7 @@ mod tests {
         let (mut a, mut b) = linked_pair("auto-clean", 0.0);
         let mut status = None;
         for i in 0..5 {
-            thread::sleep(Duration::from_millis(1500));
+            test_clock().sleep(Duration::from_millis(1500));
             send_and_wait(&mut a, &mut b, &format!("clean {i}"));
             for ev in a.poll_events() {
                 if let Event::Metrics(s) = ev {
@@ -4531,7 +4694,7 @@ mod tests {
     fn automatic_mode_stays_robust_on_a_noisy_link_and_still_delivers() {
         let (mut a, mut b) = linked_pair("auto-noisy", noise_for(-4.0));
         for i in 0..4 {
-            thread::sleep(Duration::from_millis(1500));
+            test_clock().sleep(Duration::from_millis(1500));
             send_and_wait(&mut a, &mut b, &format!("noisy {i}"));
         }
         let robust = ["KAMI-256", "KAMI-128", "KAMI-64", "KAMI-32", "KAMI-16", "KAMI-8", "KAMI-4"];
@@ -4544,7 +4707,7 @@ mod tests {
         assert!(a.set_fixed_mode("KAMI-99").is_err());
         assert!(Engine::mode_names().contains(&"KAMI-64"));
         a.set_fixed_mode("kami-64").unwrap();
-        thread::sleep(Duration::from_millis(1500));
+        test_clock().sleep(Duration::from_millis(1500));
         send_and_wait(&mut a, &mut b, "fixed rate");
         assert_eq!(a.transmit_modulation(), "KAMI-64");
         a.set_auto_mode(true);
@@ -4554,12 +4717,12 @@ mod tests {
     fn clean_link_steps_up_the_modulation() {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir("step-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("step-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4576,7 +4739,7 @@ mod tests {
         for i in 0..4 {
             // Give the peer's ACK, which carries its error report, time to come back before
             // the next burst is built: the level only moves on a report that has arrived.
-            thread::sleep(Duration::from_millis(1500));
+            test_clock().sleep(Duration::from_millis(1500));
             let text = format!("step {i}");
             a.send_message("BB1BBB", &text).unwrap();
             let got = wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if *t == text), 60);
@@ -4602,7 +4765,7 @@ mod tests {
     fn lone_station(tag: &str) -> (Engine, Pipe) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir(tag)),
             fake_factory(b_to_a, a_to_b.clone()),
         )
@@ -4620,7 +4783,7 @@ mod tests {
         assert_eq!(a.connect("BB1BBB").unwrap_err(), LISTEN_ONLY_TEXT);
         // Audio already built for transmit is dropped too.
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         assert!(a_to_b.lock().unwrap().is_empty(), "listen only let audio out");
         // Switching it off restores transmit.
         a.set_listen_only(false);
@@ -4659,12 +4822,12 @@ mod tests {
         let k = keyed.clone();
         let factory: Factory =
             Box::new(move || Ok(Box::new(PttCountingRadio { keyed: k.clone() }) as Box<dyn Backend>));
-        let mut a = Engine::spawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
+        let mut a = vspawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
         a.listen().unwrap();
         a.set_listen_only(true);
         assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(300));
+        test_clock().sleep(Duration::from_millis(300));
         assert_eq!(
             keyed.load(Ordering::SeqCst),
             0,
@@ -4686,7 +4849,7 @@ mod tests {
         assert_eq!(a.connect("BB1BBB").unwrap_err(), UPDATE_LOCK_TEXT);
         a.set_listen_only(false);
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         assert!(a_to_b.lock().unwrap().is_empty(), "update lock let audio out");
         a.set_update_locked(false);
         assert!(a.send_message("BB1BBB", "hi").is_ok());
@@ -4702,7 +4865,7 @@ mod tests {
         let want = "Could not reach CC1CCC on air. The station did not respond on any relay path. Try again later, or enable internet relay in Settings.";
         let got = wait_for(&mut a, |e| *e == Event::Log(want.to_string()), 10);
         assert!(got.is_some(), "plain sentence was not logged");
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         let again = a
             .poll_events()
             .iter()
@@ -4780,7 +4943,7 @@ mod tests {
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, temp_dir(tag));
         cfg.sdr = None;
-        Worker::new(cfg, rx, shared, factory, Arc::new(AtomicU64::new(1)))
+        Worker::new(cfg, rx, shared, factory, Arc::new(AtomicU64::new(1)), Clock::real())
     }
 
     fn chat(from: &str, to: &str, text: &str) -> Message {
@@ -4846,7 +5009,6 @@ mod tests {
     #[test]
     fn private_message_is_kept_only_by_its_addressee() {
         let private_air = session::encode_signed(&chat("AA1AAA", "BB1BBB", "secret"), None, true);
-        let public_air = session::encode(&chat("AA1AAA", "BB1BBB", "open"));
 
         let mut addressee = bare_worker("private-rx-to", "BB1BBB");
         for c in &private_air {
@@ -4863,7 +5025,9 @@ mod tests {
             "other station kept a private message"
         );
 
-        // The flag only narrows delivery: a public message still reaches any station.
+        // The flag only narrows delivery: a public message to this station still reaches it.
+        // (One addressed to somebody else is not shown: a station shows only its own mail.)
+        let public_air = session::encode(&chat("AA1AAA", "CC1CCC", "open"));
         for c in &public_air {
             other.deliver(c.clone());
         }
