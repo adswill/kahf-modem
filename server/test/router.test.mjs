@@ -32,11 +32,11 @@ test('known: a busy relay loses to a quieter one that heard it a little earlier'
   assert.equal(r.route('DD1DDD', T0).relay, 'C');
 });
 
-test('stale: heard four hours ago means deliver through that relay but page first', () => {
+test('stale: heard four hours ago is still tried first, the caller pages if that fails', () => {
   const r = mesh();
   r.heard('A', h24('DD1DDD'), 8, 2, T0 - 4 * 3600e3);
   const x = r.route('DD1DDD', T0);
-  assert.deepEqual([x.state, x.relay, x.pageFirst], ['known', 'A', true]);
+  assert.deepEqual([x.state, x.relay, x.pageFirst], ['known', 'A', false]);
   // Older than six hours is forgotten.
   assert.equal(r.route('DD1DDD', T0 + PRESENCE_TTL_MS).state, 'unknown');
   // An offline relay is not used.

@@ -484,7 +484,7 @@ The sender knows only the relay it can hear (A). It knows nothing about the rece
 **the server's presence table plus paging**:
 
 - **Known** (receiver heard by some relay in the last 6 h): the server names the best relay B and
-  delivers as in 6.2. B pages the receiver's hash first (below), because "heard 4 hours ago" does not
+  delivers as in 6.2. B tries delivery at once and pages only if that fails (below; changed 2026-11-18 after the soak), because "heard 4 hours ago" does not
   mean "listening now".
 - **Unknown or stale**: the server **pages the callsign** from every relay that can plausibly reach the
   receiver's region. "Plausibly" comes from the propagation table (which relay pairs with which area

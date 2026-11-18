@@ -5,7 +5,10 @@
 import { createHash } from "node:crypto";
 
 export const PRESENCE_TTL_MS = 6 * 3600e3;
-export const FRESH_MS = 2 * 60e3; // heard this recently: no page needed
+// Deliver first: a receiver heard within the presence window is tried at once, and paged only if
+// that fails (the soak showed that paging first makes nearly every message wait for a paging
+// window, a median of 322 s). Set lower to page first when the last hearing is older.
+export const FRESH_MS = PRESENCE_TTL_MS;
 export const DEDUPE_MS = 2 * 3600e3;
 export const PAGE_CYCLES = 3;
 export const PAGE_WINDOW_S = 20;
@@ -94,7 +97,7 @@ export class Router {
       state: "known",
       relay: best.id,
       second: ranked[1]?.id ?? null,
-      // Heard 4 hours ago does not mean listening now: page unless it was very recent.
+      // Try the best relay first; the caller pages if the delivery fails (see FRESH_MS).
       pageFirst: now - best.rec.at > FRESH_MS,
     };
   }

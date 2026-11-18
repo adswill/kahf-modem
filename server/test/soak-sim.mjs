@@ -126,7 +126,7 @@ export function runWeek({ seed = 1, ops = 14, messages = 260, flood = 400, crash
       const rcv = m.to;
       const ok = listening(rcv, t) && rng.u() < p(rcv, pos(d.relay), t) * (jammed(t) && rng.u() < 0.8 ? 0.2 : 1);
       learner.observe(d.relay, rcv.call, new Date(t).getUTCHours(), ok, t);
-      if (!ok) { m.log.push(['downlink-fail', t]); continue; }
+      if (!ok) { m.log.push(['downlink-fail', t]); m.needPage = true; continue; }
       // The receiver's app shows a message once, by id.
       if (rcv.seen.has(m.id)) { stats.serverDuplicatesStopped++; } else { rcv.seen.add(m.id); m.userSeen++; m.deliveredAt ??= t; }
       receipts.push({ m, at: t + T_RECEIPT });
@@ -176,7 +176,8 @@ export function runWeek({ seed = 1, ops = 14, messages = 260, flood = 400, crash
     const dest = m.to;
     const route = router.route(dest.call, t);
     let relayB = route.relay;
-    if (route.state === 'unknown' || route.pageFirst) {
+    if (route.state === 'unknown' || route.pageFirst || m.needPage) {
+      m.needPage = false;
       // Paging: the receiver answers in a paging window if it is listening and hears some relay.
       const job = router.page(dest.call, t, { pattern: dest.pattern });
       stats.pages++;
