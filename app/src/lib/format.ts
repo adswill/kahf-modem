@@ -1,0 +1,52 @@
+/** Words and numbers for people, not for engineers. */
+
+export function snrQuality(snr: number | null): { label: string; tone: "good" | "warn" | "bad" | "idle"; level: number } {
+  if (snr === null) return { label: "Unknown", tone: "idle", level: 0 };
+  if (snr >= 10) return { label: "Excellent", tone: "good", level: 4 };
+  if (snr >= 3) return { label: "Good", tone: "good", level: 3 };
+  if (snr >= -5) return { label: "Fair", tone: "warn", level: 2 };
+  if (snr >= -12) return { label: "Weak", tone: "warn", level: 1 };
+  return { label: "Very weak", tone: "bad", level: 1 };
+}
+
+/** Typing speed in plain terms, from net bits per second (8 bits per character). */
+export function speedWords(netBps: number): string {
+  const cps = netBps / 8;
+  if (cps < 1) return "under 1 letter a second";
+  if (cps < 20) return `about ${Math.round(cps)} letters a second`;
+  if (cps < 200) return `about ${Math.round(cps)} letters a second, like fast typing`;
+  return `about ${Math.round(cps)} letters a second, a page in a few seconds`;
+}
+
+export function timeAgo(ms: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s} seconds ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.round(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+export function clock(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+export function mhz(khz: number): string {
+  return `${(khz / 1000).toFixed(3)} MHz`;
+}
+
+/** What a mode name means in a sentence. */
+export function modeExplained(name: string): string {
+  const n = name.replace("KAMI-", "");
+  if (n === "256" || n === "128" || n === "64") return "Very slow but reaches the weakest signals.";
+  if (n === "32" || n === "16") return "Slow and sure. A good starting point.";
+  if (n === "8" || n === "4") return "Medium speed for decent signals.";
+  if (n === "1a") return "Fast. Needs a clear signal.";
+  if (n === "1b") return "Faster. Needs a good signal.";
+  if (n === "1c") return "Very fast. Needs a strong signal.";
+  if (n === "1d") return "Fastest. Needs an excellent signal.";
+  return "";
+}
