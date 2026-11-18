@@ -11,6 +11,7 @@ pub mod interf;
 pub mod io;
 pub mod kami;
 pub mod ldpc;
+pub mod lanes;
 pub mod ldpc_std;
 pub mod link;
 pub mod mac;

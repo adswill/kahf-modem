@@ -56,3 +56,14 @@ Not built yet (designs are in NETWORK-DESIGN.md, NETWORK-SCENARIOS.md, NETWORK-C
 - Channel tracking inside a burst (see above), then a re-measured mode table and ladder.
 - Any test on a real HF channel. (Transmit level: a setting with a 50 percent default and a 5 second test tone is in; automatic drive control is not.)
 - Relay mode needs the area shared (location not off) to register; without it the relay is radio only.
+
+## Mesh build (MESH-SPEC.md section 14), as of 2026-11-18
+
+| Step | State | Evidence |
+|---|---|---|
+| 1 Virtual time | built | `kahf-daemon/src/clock.rs`; the daemon suite (70 tests) runs in about 3 s |
+| 2 Echo bug | fixed | both echo tests pass; four engine bugs found with virtual time (see the commit message) |
+| 3 Band table and lanes | built | `kahf-core/src/lanes.rs`, 10 unit tests; every number of the spec table checked; the built-in table is **not verified** against the current IARU plan, so `permit_tx` refuses everything |
+| 4 to 17 | not started | |
+
+Measured on the test bench only. Nothing here has been on a real channel.
