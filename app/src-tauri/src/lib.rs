@@ -325,7 +325,8 @@ fn open_path(path: String) -> Res<()> {
 
 #[tauri::command]
 fn voice_record(app: AppHandle, state: State<Shared>) -> Res<()> {
-    state.voice.record(app, None)
+    let mic = settings::load(&state.data_dir)["micIn"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(String::from);
+    state.voice.record(app, mic)
 }
 
 #[tauri::command]
@@ -393,6 +394,11 @@ async fn relay_directory(state: State<'_, Shared>, refresh: bool) -> Res<Vec<Val
     tauri::async_runtime::spawn_blocking(move || directory::directory(&dir, here, &manual, refresh))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn engine_advertise(state: State<Shared>) -> Res<()> {
+    with_engine(&state, |e| e.advertise())
 }
 
 #[tauri::command]
@@ -486,6 +492,7 @@ pub fn run() {
             relay_status,
             relay_directory,
             engine_set_relay_hints,
+            engine_advertise,
         ])
         .run(tauri::generate_context!())
         .expect("the KAHF window could not start");

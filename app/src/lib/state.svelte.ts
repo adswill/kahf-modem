@@ -383,6 +383,16 @@ class AppState {
     }
   }
 
+  /** Announce this station on the air; relays pass it on. */
+  async advertise() {
+    try {
+      await this.engine.advertise();
+      this.toast("Announcement sent. Relays pass it on, and every station that hears it adds you to its contacts.", "info");
+    } catch (e) {
+      this.toast(String(e), "warn");
+    }
+  }
+
   async setRelayHints(calls: string[]) {
     await this.saveSettings({ relayHints: calls });
     await this.engine.setRelayHints(calls);

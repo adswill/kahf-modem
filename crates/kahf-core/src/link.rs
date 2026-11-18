@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 const TAG_CONNECT: u8 = 0x01;
 const TAG_CONNECT_ACK: u8 = 0x02;
 const TAG_DISCONNECT: u8 = 0x03;
+const TAG_ADVERT: u8 = 0x04;
 const TAG_DATA: u8 = 0x10;
 const TAG_ACK: u8 = 0x11;
 
@@ -60,6 +61,8 @@ pub enum Action {
     /// Deliver this payload to the session layer.
     Deliver(Vec<u8>),
     StateChanged(LinkState),
+    /// A station announced itself (no link needed). Relays pass it on while `ttl` lasts.
+    Advert { call: String, ttl: u8, seq: u8, flags: u8 },
     /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
     Metrics(LinkMetrics),
 }
@@ -217,6 +220,13 @@ impl Link {
             Some(&TAG_DISCONNECT) => self.on_disconnect(payload),
             Some(&TAG_DATA) => self.on_data(payload),
             Some(&TAG_ACK) => self.on_ack(payload),
+            Some(&TAG_ADVERT) => match decode_advert(payload) {
+                Some((call, ttl, seq, flags)) if call != self.callsign && valid_callsign(&call) => {
+                    self.note_heard(&call);
+                    vec![Action::Advert { call, ttl, seq, flags }]
+                }
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
@@ -624,6 +634,28 @@ fn valid_callsign(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CALLSIGN
 }
 
+/// Advert flag: the announcing station runs a relay.
+pub const ADVERT_RELAY: u8 = 1;
+/// How many more relays an advert may be passed through.
+pub const ADVERT_TTL: u8 = 4;
+
+/// An announcement of a station, for everyone who can hear it: tag, hops left, sequence number,
+/// flags, callsign.
+pub fn encode_advert(call: &str, ttl: u8, seq: u8, flags: u8) -> Vec<u8> {
+    let mut v = vec![TAG_ADVERT, ttl, seq, flags, call.len() as u8];
+    v.extend_from_slice(call.as_bytes());
+    v
+}
+
+fn decode_advert(p: &[u8]) -> Option<(String, u8, u8, u8)> {
+    let n = *p.get(4)? as usize;
+    if n == 0 || n > MAX_CALLSIGN || p.len() != 5 + n {
+        return None;
+    }
+    let call = String::from_utf8(p[5..].to_vec()).ok()?;
+    Some((call, p[1], p[2], p[3]))
+}
+
 fn encode_hs(tag: u8, from: &str, to: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + from.len() + to.len());
     v.push(tag);
@@ -700,7 +732,7 @@ mod tests {
                             self.b_rx.push(p)
                         }
                     }
-                    Action::StateChanged(_) | Action::Metrics(_) => {}
+                    Action::StateChanged(_) | Action::Metrics(_) | Action::Advert { .. } => {}
                 }
             }
         }
@@ -1030,5 +1062,21 @@ mod tests {
         let own = encode_hs(TAG_CONNECT, "AAA1", "BBB2");
         let _ = n.a.on_receive(&own);
         assert!(n.a.take_heard().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod advert_tests {
+    use super::*;
+
+    #[test]
+    fn an_advert_is_heard_without_a_link() {
+        let mut l = Link::new("KB2BRV");
+        let acts = l.on_receive(&encode_advert("KA1ALF", 3, 7, ADVERT_RELAY));
+        assert_eq!(acts, vec![Action::Advert { call: "KA1ALF".into(), ttl: 3, seq: 7, flags: ADVERT_RELAY }]);
+        assert_eq!(l.take_heard(), vec!["KA1ALF".to_string()]);
+        // Our own advert coming back, and nonsense, do nothing.
+        assert!(l.on_receive(&encode_advert("KB2BRV", 3, 7, 0)).is_empty());
+        assert!(l.on_receive(&[TAG_ADVERT, 1, 1, 0, 9, b'x']).is_empty());
     }
 }

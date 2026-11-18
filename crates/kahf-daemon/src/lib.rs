@@ -23,7 +23,7 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
-use kahf_core::link::{Action, Link, LinkState};
+use kahf_core::link::{encode_advert, Action, Link, LinkState, ADVERT_RELAY, ADVERT_TTL};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::Modulation;
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -79,6 +79,13 @@ pub enum Event {
         name: String,
         size: u64,
         path: PathBuf,
+    },
+    /// A station announced itself, directly or through relays. `hops` is how many relays it
+    /// went through (0 when heard straight from the station).
+    Advert {
+        call: String,
+        hops: u8,
+        relay: bool,
     },
     /// A mail arrived, with its text, and was saved in the inbox.
     MailReceived {
@@ -347,6 +354,12 @@ impl Engine {
         }
         self.shared.flags.operator_link.store(true, Ordering::SeqCst);
         self.send_cmd(Cmd::Connect { peer })
+    }
+
+    /// Tells everyone in range that this station exists. Relays pass it on, so stations beyond
+    /// direct range learn of it too and add it to their contacts. One short burst.
+    pub fn advertise(&self) -> Result<(), String> {
+        self.send_cmd(Cmd::Advertise)
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
@@ -768,6 +781,8 @@ enum Cmd {
     },
     Disconnect,
     Listen,
+    /// Announce this station to everyone who can hear it, and through relays to those who cannot.
+    Advertise,
     /// `ids[i]` is the public id of `msgs[i]`, allocated by the caller.
     /// `private`: the messages go on air with the session private bit.
     Queue {
@@ -1671,6 +1686,9 @@ struct Worker {
     last_activity: Instant,
     /// Digests of messages already forwarded for others, so one is never forwarded twice.
     forwarded: VecDeque<u64>,
+    /// Adverts already seen (callsign, sequence), so a relay passes each one on once.
+    adverts_seen: VecDeque<(String, u8)>,
+    advert_seq: u8,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
 }
@@ -1808,6 +1826,8 @@ impl Worker {
             auto_initiated: false,
             last_activity: Instant::now(),
             forwarded: VecDeque::new(),
+            adverts_seen: VecDeque::new(),
+            advert_seq: 0,
             refusal_logged: None,
         };
         w.publish_pending();
@@ -1888,6 +1908,7 @@ impl Worker {
                     self.log(e);
                 }
             }
+            Cmd::Advertise => self.advertise_now(),
             Cmd::Disconnect => {
                 if let Err(e) = self.disconnect() {
                     self.log(e);
@@ -2554,6 +2575,40 @@ impl Worker {
         self.apply_link(actions, false);
     }
 
+    /// Sends this station's own advert.
+    fn advertise_now(&mut self) {
+        if let Some(why) = tx_refusal(&self.shared.flags) {
+            self.hold_tx(why);
+            return;
+        }
+        // Time-based, so a restart does not reuse a number neighbours still remember.
+        let by_time = (self.now_ms() / 1000) as u8;
+        self.advert_seq = if by_time == self.advert_seq { by_time.wrapping_add(1) } else { by_time };
+        let relay = self.shared.flags.relay_running.load(Ordering::SeqCst);
+        let flags = if relay { ADVERT_RELAY } else { 0 };
+        self.adverts_seen.push_back((self.callsign.clone(), self.advert_seq));
+        self.control.push_back(vec![encode_advert(&self.callsign, ADVERT_TTL, self.advert_seq, flags)]);
+        self.log("Announcing this station on the air.");
+    }
+
+    /// Another station's advert: tell the operator, and pass it on when this is a running relay.
+    fn on_advert(&mut self, call: String, ttl: u8, seq: u8, flags: u8) {
+        if self.adverts_seen.iter().any(|(c, s)| *c == call && *s == seq) {
+            return;
+        }
+        self.adverts_seen.push_back((call.clone(), seq));
+        if self.adverts_seen.len() > 256 {
+            self.adverts_seen.pop_front();
+        }
+        self.emit(Event::Advert { call: call.clone(), hops: ADVERT_TTL.saturating_sub(ttl), relay: flags & ADVERT_RELAY != 0 });
+        let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station)
+            && self.shared.flags.relay_running.load(Ordering::SeqCst);
+        if is_relay && ttl > 0 && tx_refusal(&self.shared.flags).is_none() {
+            self.log(format!("Passing on the announcement of {call}."));
+            self.control.push_back(vec![encode_advert(&call, ttl - 1, seq, flags)]);
+        }
+    }
+
     /// Handles link actions: transmit payloads become one burst, deliveries go to the
     /// session layer, state changes become events. `cleared` means the channel was already
     /// checked for these payloads (data sent after `clear_channel`).
@@ -2563,6 +2618,7 @@ impl Worker {
             match action {
                 Action::Transmit(payload) => frames.push(payload),
                 Action::Deliver(chunk) => self.deliver(chunk),
+                Action::Advert { call, ttl, seq, flags } => self.on_advert(call, ttl, seq, flags),
                 Action::StateChanged(state) => {
                     self.on_link_state(&state);
                     self.emit(Event::Link(state));
@@ -2752,6 +2808,12 @@ impl Worker {
     fn end_rx_gap(&mut self) {
         self.rx_buf.clear();
         self.since_scan = 0;
+        // A burst being waited for pointed into the audio just thrown away.
+        self.kami_at = None;
+        self.kami_mode = None;
+        self.kami_next = 0;
+        self.kami_total = 0;
+        self.kami_front = true;
         self.spec = Analyser::new(SPEC_FFT, RATE as f32);
     }
 
@@ -2818,6 +2880,33 @@ impl Worker {
                 if self.finish_kami(start, hz, tau) {
                     continue;
                 }
+                // A false preamble (noise, the tail of our own echo) must not hide the real
+                // burst behind it for as long as the longest mode: while the mode is still
+                // unknown, keep looking at the audio that arrived after it.
+                if self.kami_mode.is_none() && self.since_kami >= KAMI_STEP {
+                    let len = self.rx_buf.len();
+                    let from = (start + tl).min(len);
+                    let mut at = len.saturating_sub(self.since_kami + tl).max(from);
+                    self.since_kami = 0;
+                    let mut found = None;
+                    while at + tl <= len {
+                        let end = (at + window).min(len);
+                        if let Some((st, hz2, tau2)) = kahf_core::kami::find_preamble(&self.rx_buf[at..end]) {
+                            found = Some((at + st, hz2, tau2));
+                            break;
+                        }
+                        if end == len {
+                            break;
+                        }
+                        at = end - tl;
+                    }
+                    if let Some(f) = found {
+                        self.kami_at = Some(f);
+                        self.kami_tried = 0;
+                        self.since_kami = len.saturating_sub(f.0 + tl);
+                        continue;
+                    }
+                }
                 return;
             }
             if !self.kami_front && self.since_kami < KAMI_STEP {
@@ -2833,6 +2922,7 @@ impl Worker {
             if let Some((st, hz, tau)) = kahf_core::kami::find_preamble(&self.rx_buf[..w]) {
                 self.kami_at = Some((st, hz, tau));
                 self.kami_tried = 0;
+                self.since_kami = len.saturating_sub(st + tl);
                 continue;
             }
             if len > w {
@@ -4558,6 +4648,29 @@ mod tests {
             peer: "BB1BBB".into(),
         };
         assert!(w.next_due().is_none(), "relay with no schedule sent an item");
+    }
+
+    #[test]
+    fn adverts_are_shown_once_and_only_a_running_relay_passes_them_on() {
+        let mut w = bare_worker("advert-plain", "AA1AAA");
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0);
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0);
+        let shown: Vec<_> = lock(&w.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
+        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 0, relay: false }]);
+        assert!(w.control.is_empty(), "a plain station passed an advert on");
+
+        let mut r = bare_worker("advert-relay", "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.on_advert("BB1BBB".into(), 3, 9, ADVERT_RELAY);
+        let shown: Vec<_> = lock(&r.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
+        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 1, relay: true }]);
+        assert_eq!(r.control.len(), 1);
+        assert_eq!(r.control[0], vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY)]);
+        // The last hop is shown but not passed on.
+        r.on_advert("CC1CCC".into(), 0, 1, 0);
+        assert_eq!(r.control.len(), 1);
     }
 
     #[test]

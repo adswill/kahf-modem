@@ -20,8 +20,9 @@
   <section class="mapbox">
     <div class="head row">
       <h1>Stations</h1>
-      <Tip text="A station is one person's KAHF setup, named by its callsign. The map shows relays, and stations that chose to share their location, from kahf.dev." />
+      <Tip text="A station is one person's KAHF setup, named by its callsign. The map shows relays, and stations that chose to share their location, from kahf.dev. Announce myself tells everyone in range, and through relays everyone beyond, that you exist, so they add you to their contacts." />
       <div class="spacer"></div>
+      <button class="btn sm primary" disabled={app.settings.listenOnly} title="Announce your station on the air" onclick={() => app.advertise()}>Announce myself</button>
       <button class="btn sm" onclick={() => app.refreshRelayDirectory(true)}>Refresh from kahf.dev</button>
       <button class="btn sm quiet" onclick={() => window.open("https://kahf.dev/map", "_blank")}>Open the website map</button>
     </div>
@@ -47,7 +48,13 @@
             {@const q = snrQuality(h.snr)}
             <tr>
               <td class="call">{h.call}</td>
-              <td><span class="tag {q.tone}">{q.label}</span> {#if h.snr !== null}<span class="faint small mono">{h.snr} dB</span>{/if}</td>
+              <td>
+                {#if h.hops !== undefined && h.snr === null}
+                  <span class="tag">Announced</span> <span class="faint small">{h.hops === 0 ? "heard directly" : `through ${h.hops} relay${h.hops === 1 ? "" : "s"}`}</span>
+                {:else}
+                  <span class="tag {q.tone}">{q.label}</span> {#if h.snr !== null}<span class="faint small mono">{h.snr} dB</span>{/if}
+                {/if}
+              </td>
               <td class="muted">{timeAgo(h.at, tick)}</td>
               <td class="r">
                 <button class="btn sm" disabled={app.settings.listenOnly} onclick={() => { app.peer = h.call; app.go("chats"); }}>Message</button>

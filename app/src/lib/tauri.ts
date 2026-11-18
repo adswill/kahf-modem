@@ -94,6 +94,9 @@ export class TauriEngine implements Engine {
   relayDirectory(refresh: boolean) {
     return invoke<RelayInfo[]>("relay_directory", { refresh });
   }
+  advertise() {
+    return invoke<void>("engine_advertise");
+  }
   setRelayHints(calls: string[]) {
     return invoke<void>("engine_set_relay_hints", { calls });
   }

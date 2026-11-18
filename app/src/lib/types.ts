@@ -28,6 +28,10 @@ export interface Heard {
   snr: number | null;
   /** Unix milliseconds. */
   at: number;
+  /** Set when the station announced itself: how many relays its announcement passed through. */
+  hops?: number;
+  /** The announcing station runs a relay. */
+  relay?: boolean;
 }
 
 export type MessageKind = "chat" | "private" | "urgent" | "signed";
@@ -220,6 +224,8 @@ export interface Engine {
   /** Relays this station knows, nearest first. `refresh` asks the server (needs the internet). */
   relayDirectory(refresh: boolean): Promise<RelayInfo[]>;
   setRelayHints(calls: string[]): Promise<void>;
+  /** Tells everyone in range, and through relays everyone beyond, that this station exists. */
+  advertise(): Promise<void>;
   rigAvailable(): Promise<boolean>;
   rigModels(): Promise<RigModel[]>;
   rigPorts(): Promise<string[]>;

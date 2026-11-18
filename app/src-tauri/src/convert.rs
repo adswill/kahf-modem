@@ -61,6 +61,10 @@ pub fn event_json(ev: &Event, pending: &[Pending]) -> Vec<Value> {
             })],
             None => Vec::new(),
         },
+        Event::Advert { call, hops, relay } => vec![json!({
+            "type": "heard",
+            "heard": { "call": call, "snr": Value::Null, "at": now_ms(), "hops": hops, "relay": relay }
+        })],
         Event::Spectrum(bins) => vec![json!({ "type": "spectrum", "bins": thin_spectrum(bins) })],
         Event::Metrics(m) => vec![json!({
             "type": "metrics",
