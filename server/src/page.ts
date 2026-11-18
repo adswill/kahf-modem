@@ -327,7 +327,7 @@ export function renderMap(stations, generatedIso, relays = []) {
 <p class="status" id="refresh-status" role="status"><span class="dot" aria-hidden="true"></span><span>Connecting to the live feed.</span></p>
 </div>
 <div class="livestage">
-<div class="livemap" id="map" role="region" aria-label="Map of relays and stations"><noscript>The live map needs JavaScript.</noscript></div>
+<div class="livemap" id="map" role="region" aria-label="Map of relays and stations"><noscript>The live map needs JavaScript.</noscript><div class="mapempty" id="map-empty" hidden><p><strong>No stations are on the map yet.</strong> Relays and stations appear here when their operators choose to share a location in the KAHF app.</p></div></div>
 <aside class="liveside">
 <section class="panel" aria-live="polite" aria-label="Selected node">
 <h2>Selected</h2>
@@ -336,8 +336,9 @@ export function renderMap(stations, generatedIso, relays = []) {
 <dt>Role</dt><dd id="p-role">-</dd>
 <dt>Last seen</dt><dd id="p-seen">-</dd>
 <dt>Position</dt><dd id="p-loc">-</dd>
+<dt>Details</dt><dd id="p-info">-</dd>
 </dl>
-<p class="note">Choose a point on the map to see its details.</p>
+<p class="note">Click a point on the map to see what is known about it.</p>
 </section>
 <p class="count" id="count">${relays.length} relay${relays.length === 1 ? "" : "s"}, ${reporters} station${reporters === 1 ? "" : "s"} reporting. Updated ${esc(generatedIso.replace(/\.\d+Z$/, "Z"))}.</p>
 <p class="note">Map tiles from OpenStreetMap contributors. Green circles are relays, dark circles are stations, grey circles are stations heard by others. A dashed ring marks a position given only as an area.</p>
