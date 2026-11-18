@@ -387,7 +387,7 @@ async function backboneAuth({ request, store, nowMs, options }, validate) {
   if (!parsed.ok) return parsed;
   const check = validate(parsed.body, nowMs);
   if (!check.ok) return { ok: false, response: json({ error: check.error }, 400) };
-  if (!(await verifySignature(check.publicKey, check.signature, check.message))) {
+  if (!(await verifySignature(check.publicKey, check.signature, check.canonical))) {
     return { ok: false, response: json({ error: "signature check failed" }, 401) };
   }
   const me = await store.getRelay(check.relay);

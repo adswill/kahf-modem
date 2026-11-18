@@ -58,7 +58,7 @@ function keyFields(b) {
   const publicKeyBytes = decodeBase64(b.public_key, 32);
   if (!publicKeyBytes) return { error: "public_key must be base64 of a 32 byte Ed25519 key" };
   if (!decodeBase64(b.signature, 64)) return { error: "signature must be base64 of a 64 byte Ed25519 signature" };
-  return { publicKey: encodeBase64(publicKeyBytes), signature: b.signature, message: signedMessage(b) };
+  return { publicKey: encodeBase64(publicKeyBytes), signature: b.signature, canonical: signedMessage(b) };
 }
 
 const isWhole = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
