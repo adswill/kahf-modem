@@ -31,6 +31,80 @@ export interface Heard {
 }
 
 export type MessageKind = "chat" | "private" | "urgent" | "signed";
+
+/** A file or a voice note that travels with a message. */
+export interface Attachment {
+  kind: "file" | "voice";
+  name: string;
+  size: number;
+  /** Where it is on this computer (sent from here, or saved to the inbox). */
+  path?: string;
+  /** Voice notes: length in seconds. */
+  seconds?: number;
+  /** Transfer progress in bytes, while it is on the air. */
+  done?: number;
+}
+
+export interface MailItem {
+  id: string;
+  peer: string;
+  dir: "in" | "out";
+  subject: string;
+  body: string;
+  at: number;
+  files: { name: string; size: number; path?: string }[];
+  state?: OutState;
+  note?: string;
+  read?: boolean;
+}
+
+export interface RigModel {
+  id: number;
+  maker: string;
+  model: string;
+  status: string;
+}
+
+export interface PickedFile {
+  path: string;
+  name: string;
+  size: number;
+}
+
+/** A recorded voice clip, ready to send. */
+export interface VoiceClip {
+  id: string;
+  seconds: number;
+  /** Size once compressed, in bytes. */
+  bytes: number;
+}
+
+export interface RelayHop {
+  at: number;
+  from: string;
+  to: string;
+  kind: string;
+}
+
+export interface RelayStatus {
+  running: boolean;
+  forwardedToday: number;
+  forwardedTotal: number;
+  recent: RelayHop[];
+  /** The one-degree square the relay is listed in, if it is on the map. */
+  area: string | null;
+}
+
+export interface RelayInfo {
+  call: string;
+  /** Centre of its area, when known. */
+  lat: number | null;
+  lon: number | null;
+  /** Kilometres from this station, when both positions are known. */
+  km: number | null;
+  source: "server" | "heard" | "manual";
+  lastSeen: number | null;
+}
 export type OutState = "queued" | "calling" | "sending" | "sent" | "failed";
 
 export interface Msg {
@@ -43,6 +117,8 @@ export interface Msg {
   kind: MessageKind;
   /** Only for outgoing messages. */
   state?: OutState;
+  /** A file or voice note, with or without text. */
+  attachment?: Attachment;
   /** Incoming: seen by the person. */
   read?: boolean;
   /** Plain-language reason when a message failed or is waiting. */
@@ -75,6 +151,12 @@ export interface Settings {
   fixedMode: string;
   /** Acts as a relay for other stations. */
   relay: boolean;
+  /** Relays to try, in order, when a station cannot be reached directly. */
+  relayHints: string[];
+  /** A radio chosen by name, for frequency control through Hamlib. */
+  rig: { model: number | null; name: string; port: string; baud: number };
+  /** Where voice notes are recorded: a sound device name, empty for the computer's microphone. */
+  micIn: string;
   /** Tuned frequency in kHz. */
   freqKhz: number;
   setupDone: boolean;
@@ -101,6 +183,10 @@ export type EngineEvent =
   | { type: "tx"; state: "starting" | "sending" | "done" | "failed"; reason?: string }
   | { type: "sent"; id: string }
   | { type: "failed"; id: string; reason: string }
+  | { type: "file"; name: string; done: number; total: number; dir: "in" | "out"; id: string; from?: string; path?: string }
+  | { type: "mail"; from: string; subject: string; body: string; at: number; files: { name: string; size: number; path?: string }[] }
+  | { type: "level"; level: number }
+  | { type: "relay"; status: RelayStatus }
   | { type: "log"; text: string };
 
 export interface Engine {
@@ -120,6 +206,26 @@ export interface Engine {
   setRelay(on: boolean, licenceHeld: boolean, termsAccepted: boolean): Promise<void>;
   /** Put the station on the public map as far as the person allowed. Returns a sentence to show. */
   shareOnMap(): Promise<string>;
+  sendMail(id: string, to: string, subject: string, body: string, paths: string[]): Promise<void>;
+  sendFile(id: string, to: string, path: string): Promise<void>;
+  pickFiles(): Promise<PickedFile[]>;
+  openPath(path: string): Promise<void>;
+  recordVoice(): Promise<void>;
+  /** Stops recording and returns the clip, or null when nothing was recorded. */
+  stopVoice(): Promise<VoiceClip | null>;
+  cancelVoice(): Promise<void>;
+  playVoice(path: string): Promise<void>;
+  sendVoice(id: string, to: string, clip: VoiceClip): Promise<void>;
+  relayStatus(): Promise<RelayStatus>;
+  /** Relays this station knows, nearest first. `refresh` asks the server (needs the internet). */
+  relayDirectory(refresh: boolean): Promise<RelayInfo[]>;
+  setRelayHints(calls: string[]): Promise<void>;
+  rigAvailable(): Promise<boolean>;
+  rigModels(): Promise<RigModel[]>;
+  rigPorts(): Promise<string[]>;
+  /** Starts radio control and returns the radio's frequency in Hz. */
+  rigConnect(model: number, port: string, baud: number): Promise<number>;
+  rigStop(): Promise<void>;
   listAudioDevices(): Promise<string[]>;
   detectSdr(): Promise<string[]>;
   modes(): Promise<ModeInfo[]>;

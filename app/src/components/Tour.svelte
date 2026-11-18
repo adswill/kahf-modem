@@ -10,15 +10,15 @@
   }
 
   const stops: Stop[] = [
-    { page: "home", target: "home-status", title: "What is happening", text: "This card always says what your radio is doing right now, in plain words. Start here." },
-    { page: "home", target: "checklist", title: "Your first steps", text: "A short list for new users. The highlighted step is the next thing to do." },
-    { page: "home", target: "heard", title: "Who is on the air", text: "Stations that KAHF hears appear here by themselves. You do not need to search." },
-    { page: "messages", target: "to", title: "Write to someone", text: "Type a callsign. KAHF suggests stations you have heard." },
-    { page: "messages", target: "compose", title: "Just press Send", text: "No connecting, no settings. KAHF reaches the station, sends your message and tells you what happened." },
-    { page: "radio", target: "spectrum", title: "The band, live", text: "Your radio's signal. The shaded band is the one channel KAHF uses. Moving lines mean it is working." },
+    { page: "chats", target: "strip", title: "The radio strip", text: "Always on screen. The frequency, a signal meter, RX and TX lamps, and what the radio is doing right now in words." },
+    { page: "chats", target: "nav", title: "Five places", text: "Chats for quick messages, voice notes and files. Mail for longer messages. Stations for who is on the air and the map. Radio for the signal and your equipment. Relay for passing messages on." },
+    { page: "chats", target: "to", title: "Who to write to", text: "Pick someone from the list, or type a callsign here. Stations KAHF hears appear on the left by themselves." },
+    { page: "chats", target: "compose", title: "Just press Enter", text: "No connecting, no settings. KAHF reaches the station and tells you what happened. The paperclip sends a file and the microphone records a voice note." },
+    { page: "radio", target: "spectrum", title: "The channel, live", text: "The shaded band is the one channel KAHF uses. Moving lines mean your radio is being heard." },
     { page: "radio", target: "speed", title: "Speed", text: "Automatic picks the fastest speed your signal can carry. You can leave it alone." },
-    { page: "settings", target: "location", title: "Your privacy", text: "Your location is off by default. Share a circle or your position only if you want to be on the public map." },
-    { page: "help", target: "help", title: "Help is always here", text: "Short guides, troubleshooting and a glossary. You can take this tour again from here." },
+    { page: "relay", target: "nav", title: "Relays", text: "A relay passes messages on for stations that cannot hear each other. Choose the ones KAHF may use, or run one yourself." },
+    { page: "chats", target: "settings", title: "Settings", text: "Your callsign, the location you share with the map, and whether KAHF may transmit at all." },
+    { page: "chats", target: "help", title: "Help is always here", text: "Searchable guides, troubleshooting and a glossary. You can take this tour again from there." },
   ];
 
   let i = $state(0);
@@ -27,14 +27,12 @@
 
   async function place() {
     app.page = stop.page;
-    // Wait for the page to draw, then find the element.
     for (let tries = 0; tries < 20; tries++) {
       await new Promise((r) => requestAnimationFrame(() => r(null)));
       const el = document.querySelector(`[data-tour="${stop.target}"]`) as HTMLElement | null;
       if (el) {
-        el.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
         const b = el.getBoundingClientRect();
-        rect = { x: b.left - 8, y: b.top - 8, w: b.width + 16, h: b.height + 16 };
+        rect = { x: b.left - 6, y: b.top - 6, w: b.width + 12, h: b.height + 12 };
         return;
       }
     }
@@ -49,13 +47,14 @@
   function done() {
     app.tourOpen = false;
     app.saveSettings({ tourDone: true });
-    app.page = "home";
+    app.page = "chats";
   }
 
-  // Put the card on the side of the highlighted part that has the most room.
   const cardStyle = $derived.by(() => {
     if (!rect) return "left: 50%; top: 40%; transform: translateX(-50%)";
     const below = window.innerHeight - (rect.y + rect.h);
+    const right = window.innerWidth - (rect.x + rect.w);
+    if (rect.w < 260 && right > 420) return `left: ${rect.x + rect.w + 14}px; top: ${Math.max(16, Math.min(rect.y, window.innerHeight - 230))}px`;
     const top = below > 220 ? rect.y + rect.h + 14 : Math.max(16, rect.y - 210);
     const left = Math.min(Math.max(16, rect.x), window.innerWidth - 400);
     return `left: ${left}px; top: ${top}px`;
@@ -68,18 +67,18 @@
   {:else}
     <div class="dim"></div>
   {/if}
-  <div class="card pop" style={cardStyle}>
-    <div class="faint small">Step {i + 1} of {stops.length}</div>
+  <div class="pop" style={cardStyle}>
+    <div class="label">Step {i + 1} of {stops.length}</div>
     <h2>{stop.title}</h2>
     <p class="muted">{stop.text}</p>
     <div class="row">
-      <button class="btn ghost small" onclick={done}>Skip</button>
-      <div class="grow"></div>
-      {#if i > 0}<button class="btn small" onclick={() => (i -= 1)}>Back</button>{/if}
+      <button class="btn sm quiet" onclick={done}>Skip</button>
+      <div class="spacer"></div>
+      {#if i > 0}<button class="btn sm" onclick={() => (i -= 1)}>Back</button>{/if}
       {#if i < stops.length - 1}
-        <button class="btn primary small" onclick={() => (i += 1)}>Next</button>
+        <button class="btn sm primary" onclick={() => (i += 1)}>Next</button>
       {:else}
-        <button class="btn primary small" onclick={done}>Finish</button>
+        <button class="btn sm primary" onclick={done}>Finish</button>
       {/if}
     </div>
   </div>
@@ -98,19 +97,22 @@
   }
   .hole {
     position: absolute;
-    border-radius: 16px;
+    border-radius: 6px;
     box-shadow: 0 0 0 9999px var(--scrim);
     outline: 2px solid var(--accent);
-    transition: all 0.2s ease;
+    transition: all 0.18s ease;
     pointer-events: none;
   }
   .pop {
     position: absolute;
-    width: 380px;
+    width: 360px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
     box-shadow: var(--shadow);
-    border-color: var(--line);
   }
 </style>

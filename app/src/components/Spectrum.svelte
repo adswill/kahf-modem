@@ -69,7 +69,7 @@
     ctx.globalAlpha = 1;
 
     // Grid.
-    ctx.strokeStyle = css("--line-soft");
+    ctx.strokeStyle = css("--line");
     ctx.lineWidth = 1;
     for (let db = -100; db <= -50; db += 10) {
       const y = plotH - ((db - DB_MIN) / (DB_MAX - DB_MIN)) * plotH;
@@ -148,7 +148,7 @@
   <canvas bind:this={canvas} aria-label="Live radio spectrum and waterfall"></canvas>
   {#if !compact}
     <div class="legend small faint">
-      Bright means a stronger signal. The shaded band is the channel KAHF uses: one transmission fills only this band, nothing else.
+      Brighter is stronger. The shaded band is the one 2.4 kHz channel KAHF uses, whatever the speed.
     </div>
   {/if}
 </div>
@@ -156,9 +156,9 @@
 <style>
   .spectrum {
     position: relative;
-    border-radius: 12px;
+    border-radius: 6px;
     overflow: hidden;
-    border: 1px solid var(--line-soft);
+    border: 1px solid var(--line);
     display: flex;
     flex-direction: column;
   }
@@ -170,7 +170,7 @@
   }
   .legend {
     padding: 8px 12px;
-    border-top: 1px solid var(--line-soft);
+    border-top: 1px solid var(--line);
     background: var(--panel);
   }
 </style>

@@ -19,6 +19,8 @@ kahf-daemon = { path = "../../crates/kahf-daemon" }
 kahf-audio = { path = "../../crates/kahf-audio" }
 kahf-core = { path = "../../crates/kahf-core" }
 kahf-sdr = { path = "../../crates/kahf-sdr" }
+codec2 = "0.3.1"
+tauri-plugin-dialog = "2"
 
 [profile.dev.package.kahf-core]
 opt-level = 3

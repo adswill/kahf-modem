@@ -1,12 +1,16 @@
-// The one place that holds what the window shows. Pages read from here and call its methods;
+// The one place that holds what the window shows. Views read from here and call its methods;
 // they never talk to the engine directly.
 
 import { callProblem, normaliseCall, validCall } from "./callsign";
 import { defaultSettings } from "./defaults";
 import { makeEngine } from "./engine";
-import type { Engine, EngineEvent, Heard, LinkState, Metrics, MessageKind, ModeInfo, Msg, Settings } from "./types";
+import type {
+  Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile,
+  RelayInfo, RelayStatus, Settings, VoiceClip,
+} from "./types";
 
-export type Page = "welcome" | "setup" | "home" | "messages" | "network" | "radio" | "help" | "settings";
+export type Page = "welcome" | "setup" | "chats" | "mail" | "stations" | "radio" | "relay";
+export type SettingsTab = "station" | "radio" | "location" | "sending" | "relay" | "look" | "about";
 
 export interface Toast {
   id: number;
@@ -19,11 +23,10 @@ export interface Step {
   title: string;
   why: string;
   done: boolean;
-  go: Page;
-  action: string;
 }
 
 const MSG_STORE = "kahf.messages";
+const MAIL_STORE = "kahf.mail";
 const HEARD_STORE = "kahf.heard";
 
 function load<T>(key: string, fallback: T): T {
@@ -53,9 +56,16 @@ export function explainStartError(raw: string): string {
     return "KAHF could not find the SDR receiver. Plug it in, make sure its driver is installed, and try again.";
   }
   if (t.includes("rig") || t.includes("rigctld") || t.includes("4532")) {
-    return "KAHF could not reach the radio control program. Check its address in Settings, or leave it empty.";
+    return "KAHF could not reach the radio control program. Check the radio on the Radio page, or leave radio control off.";
   }
   return `The radio could not start. ${raw}`;
+}
+
+/** Bytes in plain words. */
+export function sizeWords(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 class AppState {
@@ -66,18 +76,30 @@ class AppState {
   link = $state<LinkState>({ state: "idle" });
   heard = $state<Heard[]>([]);
   messages = $state<Msg[]>([]);
+  mail = $state<MailItem[]>([]);
   metrics = $state<Metrics | null>(null);
   modes = $state<ModeInfo[]>([]);
   log = $state<{ at: number; text: string }[]>([]);
   spectrum = $state<number[]>([]);
   transmitting = $state(false);
+  receiving = $state(false);
   toasts = $state<Toast[]>([]);
   peer = $state<string>("");
   tourOpen = $state(false);
+  settingsOpen = $state(false);
+  settingsTab = $state<SettingsTab>("station");
+  helpOpen = $state(false);
+  helpTopic = $state<string>("");
   /** Why the radio could not start, in plain words. Empty when all is well. */
   engineError = $state("");
-  helpTopic = $state<string>("");
+  recording = $state(false);
+  recordLevel = $state(0);
+  relay = $state<RelayStatus>({ running: false, forwardedToday: 0, forwardedTotal: 0, recent: [], area: null });
+  relays = $state<RelayInfo[]>([]);
   private toastId = 0;
+  private lastSignal = 0;
+  /** How strong the signal in the KAHF channel is, 0 to 1, smoothed. Drives the meter. */
+  signal = $state(0);
 
   // ---- derived ---------------------------------------------------------------------------
 
@@ -85,83 +107,55 @@ class AppState {
     return validCall(this.settings.callsign);
   }
 
-  get unread(): number {
+  get unreadChats(): number {
     return this.messages.filter((m) => m.dir === "in" && !m.read).length;
+  }
+
+  get unreadMail(): number {
+    return this.mail.filter((m) => m.dir === "in" && !m.read).length;
   }
 
   get steps(): Step[] {
     const s = this.settings;
     return [
-      {
-        id: "call",
-        title: "Enter your callsign",
-        why: "It is your name on the air. Everyone you talk to sees it.",
-        done: this.hasCall,
-        go: "setup",
-        action: "Set callsign",
-      },
+      { id: "call", title: "Your callsign is set", why: "It is your name on the air.", done: this.hasCall },
       {
         id: "radio",
-        title: "Choose how KAHF hears your radio",
-        why: "Pick the sound card or receiver that your radio is connected to.",
+        title: "KAHF can hear your radio",
+        why: "A sound card or receiver is chosen.",
         done: s.setupDone && (s.audioIn !== "" || s.sdr !== "" || this.engine.demo),
-        go: "setup",
-        action: "Choose radio",
       },
-      {
-        id: "listen",
-        title: "Hear your first station",
-        why: "Leave KAHF running for a few minutes. Stations nearby appear on their own.",
-        done: this.heard.length > 0,
-        go: "network",
-        action: "See who is on",
-      },
+      { id: "listen", title: "You have heard a station", why: "Leave KAHF running. Stations appear on their own.", done: this.heard.length > 0 },
       {
         id: "send",
-        title: "Send your first message",
-        why: "Pick a station you heard, write a line, and press Send. KAHF does the rest.",
+        title: "You have sent a message",
+        why: "Pick a station, write a line, press Send.",
         done: this.messages.some((m) => m.dir === "out" && m.state === "sent"),
-        go: "messages",
-        action: "Write a message",
       },
     ];
   }
 
-  get progress(): { done: number; total: number } {
-    const steps = this.steps;
-    return { done: steps.filter((x) => x.done).length, total: steps.length };
-  }
-
-  /** One sentence for the top of every page: what is happening right now. */
+  /** What the radio is doing, in one short line: shown in the strip on every screen. */
   get status(): { tone: "idle" | "good" | "busy" | "warn"; title: string; detail: string } {
-    if (!this.hasCall) {
-      return { tone: "warn", title: "Not set up yet", detail: "Enter your callsign to get started." };
+    if (!this.hasCall && !this.settings.listenOnly) {
+      return { tone: "warn", title: "Not set up", detail: "Enter your callsign to start." };
     }
+    if (this.engineError) return { tone: "warn", title: "Radio not running", detail: this.engineError };
     if (this.settings.listenOnly) {
-      return { tone: "idle", title: "Listening only", detail: "KAHF will not transmit. Turn this off in Settings when you are ready." };
+      return { tone: "idle", title: "Listening only", detail: "KAHF will not transmit." };
     }
-    if (this.transmitting) {
-      return { tone: "busy", title: "Transmitting", detail: "Your signal is on the air. Wait a moment." };
-    }
+    if (this.transmitting) return { tone: "busy", title: "Sending", detail: "Your signal is on the air." };
     if (this.link.state === "calling") {
       return {
         tone: "busy",
-        title: `Contacting ${this.link.peer}`,
-        detail:
-          this.link.of > 0
-            ? `Try ${this.link.attempt} of ${this.link.of}. KAHF keeps trying by itself.`
-            : "KAHF keeps trying by itself. This can take a minute.",
+        title: `Reaching ${this.link.peer}`,
+        detail: this.link.of > 0 ? `Try ${this.link.attempt} of ${this.link.of}` : "KAHF keeps trying by itself",
       };
     }
-    if (this.link.state === "linked") {
-      return { tone: "good", title: `Connected to ${this.link.peer}`, detail: "Messages go straight to them." };
-    }
+    if (this.link.state === "linked") return { tone: "good", title: `Linked to ${this.link.peer}`, detail: "Messages go straight to them." };
+    if (this.receiving) return { tone: "good", title: "Receiving", detail: "A signal is on the channel." };
     const n = this.heard.length;
-    return {
-      tone: "idle",
-      title: "Listening",
-      detail: n === 0 ? "Nobody has been heard yet. This can take a few minutes." : `${n} station${n === 1 ? "" : "s"} heard so far.`,
-    };
+    return { tone: "idle", title: "Listening", detail: n === 0 ? "Nobody heard yet." : `${n} heard` };
   }
 
   // ---- startup ---------------------------------------------------------------------------
@@ -169,12 +163,17 @@ class AppState {
   async init() {
     this.settings = await this.engine.loadSettings();
     this.messages = load<Msg[]>(MSG_STORE, []);
+    this.mail = load<MailItem[]>(MAIL_STORE, []);
     this.heard = load<Heard[]>(HEARD_STORE, []);
     this.applyTheme();
     this.modes = await this.engine.modes();
     this.engine.onEvent((e) => this.handle(e));
-    this.page = this.settings.setupDone && this.hasCall ? "home" : "welcome";
-    if (this.settings.setupDone) await this.startEngine();
+    this.page = this.settings.setupDone && (this.hasCall || this.settings.listenOnly) ? "chats" : "welcome";
+    if (this.settings.setupDone) {
+      await this.startEngine();
+      this.engine.setRelayHints(this.settings.relayHints).catch(() => {});
+      this.refreshRelayDirectory(false);
+    }
     this.ready = true;
   }
 
@@ -182,10 +181,20 @@ class AppState {
     document.documentElement.dataset.theme = this.settings.theme;
   }
 
-  go(page: Page, topic = "") {
+  go(page: Page) {
     this.page = page;
+    if (page === "chats") this.markChatsRead();
+    if (page === "mail") this.markMailRead();
+  }
+
+  openSettings(tab: SettingsTab = "station") {
+    this.settingsTab = tab;
+    this.settingsOpen = true;
+  }
+
+  openHelp(topic = "") {
     if (topic) this.helpTopic = topic;
-    if (page === "messages") this.markRead();
+    this.helpOpen = true;
   }
 
   async saveSettings(patch: Partial<Settings>) {
@@ -198,8 +207,9 @@ class AppState {
   async finishSetup(patch: Partial<Settings>) {
     await this.saveSettings({ ...patch, setupDone: true });
     const ok = await this.startEngine();
-    this.page = "home";
+    this.page = "chats";
     if (ok) this.toast("All set. KAHF is listening for stations.", "good");
+    this.refreshRelayDirectory(false);
   }
 
   /** Starts the radio. Never throws: a problem becomes a sentence the person can act on. */
@@ -214,7 +224,19 @@ class AppState {
     }
   }
 
-  // ---- doing things ----------------------------------------------------------------------
+  // ---- text, files and voice ---------------------------------------------------------------
+
+  private newId() {
+    return `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  }
+
+  private canSend(): boolean {
+    if (this.settings.listenOnly) {
+      this.toast("Listen-only is on, so nothing can be sent. Turn it off in Settings, under Sending.", "warn");
+      return false;
+    }
+    return true;
+  }
 
   async call(peer: string) {
     const to = normaliseCall(peer);
@@ -232,24 +254,88 @@ class AppState {
   async send(to: string, text: string, kind: MessageKind = "chat") {
     const peer = normaliseCall(to);
     const body = text.trim();
-    if (peer === "" || body === "") return;
+    if (peer === "" || body === "" || !this.canSend()) return;
     if (callProblem(peer)) {
       this.toast(`"${peer}" does not look like a callsign.`, "warn");
       return;
     }
-    if (this.settings.listenOnly) {
-      this.toast("Listen-only is on, so nothing can be sent. Turn it off in Settings.", "warn");
-      return;
-    }
-    const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const msg: Msg = { id, peer, dir: "out", text: body, at: Date.now(), kind, state: "queued", read: true };
-    this.messages = [...this.messages, msg];
-    this.persistMessages();
+    const id = this.newId();
+    this.addOut({ id, peer, dir: "out", text: body, at: Date.now(), kind, state: "queued", read: true });
     try {
       await this.engine.send(id, peer, body, kind);
     } catch (e) {
       this.update(id, { state: "failed", note: String(e) });
     }
+  }
+
+  async sendFile(to: string, file: PickedFile) {
+    const peer = normaliseCall(to);
+    if (!peer || callProblem(peer) || !this.canSend()) return;
+    const id = this.newId();
+    const attachment: Attachment = { kind: "file", name: file.name, size: file.size, path: file.path, done: 0 };
+    this.addOut({ id, peer, dir: "out", text: "", at: Date.now(), kind: "chat", state: "queued", read: true, attachment });
+    try {
+      await this.engine.sendFile(id, peer, file.path);
+    } catch (e) {
+      this.update(id, { state: "failed", note: String(e) });
+    }
+  }
+
+  async sendVoice(to: string, clip: VoiceClip) {
+    const peer = normaliseCall(to);
+    if (!peer || callProblem(peer) || !this.canSend()) return;
+    const id = this.newId();
+    const attachment: Attachment = { kind: "voice", name: "Voice note", size: clip.bytes, seconds: clip.seconds, done: 0 };
+    this.addOut({ id, peer, dir: "out", text: "", at: Date.now(), kind: "chat", state: "queued", read: true, attachment });
+    try {
+      await this.engine.sendVoice(id, peer, clip);
+    } catch (e) {
+      this.update(id, { state: "failed", note: String(e) });
+    }
+  }
+
+  async sendMail(to: string, subject: string, body: string, files: PickedFile[]): Promise<boolean> {
+    const peer = normaliseCall(to);
+    if (!peer || callProblem(peer)) {
+      this.toast("Enter the callsign of the station you are writing to.", "warn");
+      return false;
+    }
+    if (!this.canSend()) return false;
+    const id = this.newId();
+    const item: MailItem = {
+      id, peer, dir: "out", subject: subject.trim() || "(no subject)", body, at: Date.now(),
+      files: files.map((f) => ({ name: f.name, size: f.size, path: f.path })), state: "queued", read: true,
+    };
+    this.mail = [...this.mail, item];
+    save(MAIL_STORE, this.mail.slice(-300));
+    try {
+      await this.engine.sendMail(id, peer, item.subject, body, files.map((f) => f.path));
+    } catch (e) {
+      this.updateMail(id, { state: "failed", note: String(e) });
+    }
+    return true;
+  }
+
+  async startRecording() {
+    if (this.recording) return;
+    try {
+      await this.engine.recordVoice();
+      this.recording = true;
+    } catch (e) {
+      this.toast(`Could not record: ${e}. Check the microphone in Settings, under Radio.`, "warn");
+    }
+  }
+
+  async stopRecording(): Promise<VoiceClip | null> {
+    this.recording = false;
+    this.recordLevel = 0;
+    return this.engine.stopVoice();
+  }
+
+  async cancelRecording() {
+    this.recording = false;
+    this.recordLevel = 0;
+    await this.engine.cancelVoice();
   }
 
   async setAutoMode(on: boolean) {
@@ -272,14 +358,10 @@ class AppState {
     await this.saveSettings({ autoLink: on });
   }
 
-  discard(id: string) {
-    this.messages = this.messages.filter((m) => m.id !== id);
-    this.persistMessages();
-  }
-
   async setRelay(on: boolean, licence: boolean, terms: boolean) {
     await this.engine.setRelay(on, licence, terms);
     await this.saveSettings({ relay: on });
+    this.relay = await this.engine.relayStatus();
     if (on) await this.shareOnMap();
   }
 
@@ -292,10 +374,36 @@ class AppState {
     }
   }
 
-  markRead() {
+  async refreshRelayDirectory(refresh: boolean) {
+    try {
+      this.relays = await this.engine.relayDirectory(refresh);
+      if (refresh) this.toast(`${this.relays.length} relay${this.relays.length === 1 ? "" : "s"} known.`, "info");
+    } catch (e) {
+      if (refresh) this.toast(`Could not reach the server: ${e}. KAHF still works without it.`, "warn");
+    }
+  }
+
+  async setRelayHints(calls: string[]) {
+    await this.saveSettings({ relayHints: calls });
+    await this.engine.setRelayHints(calls);
+  }
+
+  discard(id: string) {
+    this.messages = this.messages.filter((m) => m.id !== id);
+    this.persistMessages();
+  }
+
+  markChatsRead() {
     if (this.messages.some((m) => m.dir === "in" && !m.read)) {
       this.messages = this.messages.map((m) => (m.dir === "in" ? { ...m, read: true } : m));
       this.persistMessages();
+    }
+  }
+
+  markMailRead() {
+    if (this.mail.some((m) => m.dir === "in" && !m.read)) {
+      this.mail = this.mail.map((m) => (m.dir === "in" ? { ...m, read: true } : m));
+      save(MAIL_STORE, this.mail);
     }
   }
 
@@ -307,9 +415,19 @@ class AppState {
 
   // ---- events from the engine ------------------------------------------------------------
 
+  private addOut(m: Msg) {
+    this.messages = [...this.messages, m];
+    this.persistMessages();
+  }
+
   private update(id: string, patch: Partial<Msg>) {
     this.messages = this.messages.map((m) => (m.id === id ? { ...m, ...patch } : m));
     this.persistMessages();
+  }
+
+  private updateMail(id: string, patch: Partial<MailItem>) {
+    this.mail = this.mail.map((m) => (m.id === id ? { ...m, ...patch } : m));
+    save(MAIL_STORE, this.mail);
   }
 
   private persistMessages() {
@@ -332,46 +450,101 @@ class AppState {
       case "message": {
         this.messages = [
           ...this.messages,
-          { id: `in-${e.at}-${this.messages.length}`, peer: e.from, dir: "in", text: e.text, at: e.at, kind: "chat", read: this.page === "messages" },
+          { id: `in-${e.at}-${this.messages.length}`, peer: e.from, dir: "in", text: e.text, at: e.at, kind: "chat", read: this.page === "chats" },
         ];
         this.persistMessages();
-        if (this.page !== "messages") this.toast(`New message from ${e.from}`, "info");
+        if (this.page !== "chats") this.toast(`New message from ${e.from}`, "info");
+        break;
+      }
+      case "mail": {
+        this.mail = [
+          ...this.mail,
+          { id: `in-${e.at}-${this.mail.length}`, peer: e.from, dir: "in", subject: e.subject, body: e.body, at: e.at, files: e.files, read: this.page === "mail" },
+        ];
+        save(MAIL_STORE, this.mail.slice(-300));
+        if (this.page !== "mail") this.toast(`New mail from ${e.from}: ${e.subject}`, "info");
+        break;
+      }
+      case "file": {
+        if (e.dir === "out") {
+          this.update(e.id, { attachment: { ...(this.messages.find((m) => m.id === e.id)?.attachment as Attachment), done: e.done } });
+          break;
+        }
+        // A file or voice note that arrived: shown in the conversation with the sender.
+        if (e.done >= e.total && e.from) {
+          const voice = /\.kvm$/i.test(e.name);
+          this.messages = [
+            ...this.messages,
+            {
+              id: `in-file-${Date.now()}-${this.messages.length}`, peer: e.from, dir: "in", text: "", at: Date.now(), kind: "chat",
+              read: this.page === "chats",
+              attachment: { kind: voice ? "voice" : "file", name: voice ? "Voice note" : e.name, size: e.total, path: e.path, done: e.total },
+            },
+          ];
+          this.persistMessages();
+          if (this.page !== "chats") this.toast(`${voice ? "Voice note" : "File"} from ${e.from}`, "info");
+        }
         break;
       }
       case "heard": {
         const rest = this.heard.filter((h) => h.call !== e.heard.call);
-        this.heard = [e.heard, ...rest].slice(0, 60);
+        this.heard = [e.heard, ...rest].slice(0, 80);
         save(HEARD_STORE, this.heard);
         break;
       }
       case "metrics":
         this.metrics = e.metrics;
         break;
-      case "spectrum":
+      case "spectrum": {
         this.spectrum = e.bins;
+        // A signal inside the KAHF channel (0.3 to 2.7 kHz) well above the floor.
+        const n = e.bins.length;
+        if (n) {
+          const lo = Math.floor((300 / 4000) * n);
+          const hi = Math.floor((2700 / 4000) * n);
+          const band = e.bins.slice(lo, hi);
+          const mean = band.reduce((a, b) => a + b, 0) / Math.max(1, band.length);
+          const floor = [...e.bins].sort((a, b) => a - b)[Math.floor(n * 0.2)];
+          const above = mean - floor;
+          const loud = above > 12;
+          if (loud) this.lastSignal = Date.now();
+          this.receiving = Date.now() - this.lastSignal < 1500;
+          const target = Math.max(0, Math.min(1, above / 40));
+          this.signal = this.signal * 0.7 + target * 0.3;
+        }
+        break;
+      }
+      case "level":
+        this.recordLevel = e.level;
+        break;
+      case "relay":
+        this.relay = e.status;
         break;
       case "tx":
         this.transmitting = e.state === "starting" || e.state === "sending";
         if (e.state === "sending") {
           for (const m of this.messages) if (m.dir === "out" && (m.state === "queued" || m.state === "calling")) this.update(m.id, { state: "sending" });
+          for (const m of this.mail) if (m.dir === "out" && (m.state === "queued" || m.state === "calling")) this.updateMail(m.id, { state: "sending" });
         }
         break;
       case "sent":
-        this.update(e.id, { state: "sent", note: undefined });
+        if (this.mail.some((m) => m.id === e.id)) this.updateMail(e.id, { state: "sent", note: undefined });
+        else this.update(e.id, { state: "sent", note: undefined });
         break;
       case "failed":
-        this.update(e.id, { state: "failed", note: e.reason });
+        if (this.mail.some((m) => m.id === e.id)) this.updateMail(e.id, { state: "failed", note: e.reason });
+        else this.update(e.id, { state: "failed", note: e.reason });
         this.toast(e.reason, "warn");
         break;
       case "log":
-        this.log = [{ at: Date.now(), text: e.text }, ...this.log].slice(0, 80);
+        this.log = [{ at: Date.now(), text: e.text }, ...this.log].slice(0, 100);
         break;
     }
   }
 
   // ---- views over the data ---------------------------------------------------------------
 
-  /** The people you have talked to, most recent first. */
+  /** The people you have written to or heard from in conversations, most recent first. */
   get conversations(): { peer: string; last: Msg; unread: number }[] {
     const by = new Map<string, Msg[]>();
     for (const m of this.messages) by.set(m.peer, [...(by.get(m.peer) ?? []), m]);
@@ -382,6 +555,18 @@ class AppState {
 
   thread(peer: string): Msg[] {
     return this.messages.filter((m) => m.peer === peer);
+  }
+
+  /** Heard stations you have not talked to yet. */
+  get onTheAir(): Heard[] {
+    const talked = new Set(this.conversations.map((c) => c.peer));
+    return this.heard.filter((h) => !talked.has(h.call));
+  }
+
+  get inboxFiles(): { name: string; size: number; path?: string; from: string; at: number }[] {
+    return this.messages
+      .filter((m) => m.dir === "in" && m.attachment?.kind === "file")
+      .map((m) => ({ name: m.attachment!.name, size: m.attachment!.size, path: m.attachment!.path, from: m.peer, at: m.at }));
   }
 }
 

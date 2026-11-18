@@ -73,6 +73,21 @@ pub enum Event {
         done: u64,
         total: u64,
     },
+    /// A file arrived and was saved in the inbox.
+    FileReceived {
+        from: String,
+        name: String,
+        size: u64,
+        path: PathBuf,
+    },
+    /// A mail arrived, with its text, and was saved in the inbox.
+    MailReceived {
+        from: String,
+        subject: String,
+        body: String,
+        attachments: Vec<String>,
+        path: Option<PathBuf>,
+    },
     Spectrum(Vec<f32>),
     /// Link quality and the KAMI mode in use, every few seconds while linked and whenever the
     /// mode changes.
@@ -467,6 +482,11 @@ pub fn transmit_modulation(&self) -> &'static str {
     /// Forward counters for this station as a relay (plan 4).
     pub fn relay_stats(&self) -> Stats {
         lock(&self.shared.relay_stats).clone()
+    }
+
+    /// The most recent forwards across all messages, newest first, with how many in total.
+    pub fn relay_recent(&self, n: usize) -> (Vec<Hop>, usize) {
+        lock(&self.shared.hops).recent(n)
     }
 
     /// Forwards recorded for one message, in order (plan 4). `message_id` is the public id.
@@ -2982,17 +3002,38 @@ impl Worker {
                         text.push_str(&format!("  {a}\n"));
                     }
                 }
-                match save_file(&self.inbox, &format!("mail-{id}.txt"), text.as_bytes()) {
-                    Ok(p) => self.log(format!("saved mail to {}", p.display())),
-                    Err(e) => self.log(e),
-                }
+                let saved = match save_file(&self.inbox, &format!("mail-{id}.txt"), text.as_bytes()) {
+                    Ok(p) => {
+                        self.log(format!("saved mail to {}", p.display()));
+                        Some(p)
+                    }
+                    Err(e) => {
+                        self.log(e);
+                        None
+                    }
+                };
+                self.emit(Event::MailReceived {
+                    from: from.clone(),
+                    subject: subject.clone(),
+                    body: body.to_string(),
+                    attachments: attachments.clone(),
+                    path: saved,
+                });
                 self.emit(Event::Mail { id, from, subject });
             }
-            Message::File { name, data, .. } => {
+            Message::File { from, name, data, .. } => {
                 let id = self.next_id();
                 let total = data.len() as u64;
                 match save_file(&self.inbox, &name, &data) {
-                    Ok(p) => self.log(format!("saved file to {}", p.display())),
+                    Ok(p) => {
+                        self.log(format!("saved file to {}", p.display()));
+                        self.emit(Event::FileReceived {
+                            from,
+                            name: name.clone(),
+                            size: total,
+                            path: p,
+                        });
+                    }
                     Err(e) => self.log(e),
                 }
                 self.emit(Event::FileProgress {

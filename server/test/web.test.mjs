@@ -232,3 +232,24 @@ test("pages stay small", () => {
   assert.ok(renderHome().length < 60_000);
   assert.ok(renderMap([STATION], NOW, [RELAY]).length < 60_000);
 });
+
+test("a click on a map node opens a card with its details, built from DOM calls", () => {
+  assert.match(MAP_SCRIPT, /new window\.maplibregl\.Popup\(/);
+  assert.match(MAP_SCRIPT, /setDOMContent\(wrap\)/);
+  assert.match(MAP_SCRIPT, /function nodeCard\(p\)/);
+  assert.match(MAP_SCRIPT, /Heard by "/);
+  assert.match(MAP_SCRIPT, /Reported hearing "/);
+  assert.match(MAP_SCRIPT, /Passes messages between stations/);
+  // Nodes at the same point are listed together, and the chosen one is marked.
+  assert.match(MAP_SCRIPT, /here\.forEach\(function \(x\) \{ wrap\.appendChild\(nodeCard/);
+  assert.match(MAP_SCRIPT, /function syncSelection\(\)/);
+  assert.doesNotMatch(MAP_SCRIPT, /setHTML|innerHTML|outerHTML/);
+});
+
+test("the map page says why it is empty and has a details row", () => {
+  const html = renderMap([], NOW, []);
+  assert.match(html, /id="map-empty"/);
+  assert.match(html, /No stations are on the map yet/);
+  assert.match(html, /id="p-info"/);
+  assert.match(html, /Click a point on the map/);
+});

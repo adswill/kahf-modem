@@ -1,274 +1,144 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { app } from "../lib/state.svelte";
   import { callProblem, normaliseCall, validCall } from "../lib/callsign";
   import { validLat, validLon } from "../lib/geo";
   import type { LocationMode } from "../lib/types";
-  import Icon from "../components/Icon.svelte";
-  import Spectrum from "../components/Spectrum.svelte";
+  import AudioPicker from "../components/AudioPicker.svelte";
+  import RigPicker from "../components/RigPicker.svelte";
   import LocationEditor from "../components/LocationEditor.svelte";
+  import Spectrum from "../components/Spectrum.svelte";
+  import Icon from "../components/Icon.svelte";
 
   // A copy of the settings that only becomes real when the person finishes.
-  let draft = $state({ ...app.settings, location: { ...app.settings.location } });
+  let draft = $state({ ...app.settings, location: { ...app.settings.location }, rig: { ...app.settings.rig } });
   let step = $state(0);
   let haveLicence = $state(app.settings.callsign !== "" || !app.settings.listenOnly);
-  let audioDevices = $state<string[]>([]);
-  let sdrDevices = $state<string[]>([]);
-  let radioKind = $state<"sound" | "sdr" | "none">(draft.sdr ? "sdr" : "sound");
+  let kind = $state<"sound" | "sdr" | "none">(draft.sdr ? "sdr" : "sound");
   let previewing = $state(false);
 
-  const STEPS = ["Callsign", "Radio", "Frequency", "Location", "Ready"];
+  const STEPS = ["You", "Radio", "Channel", "Place", "Ready"];
   const BANDS = [
-    { khz: 14103, name: "20 metres", note: "Most active. Best in the daytime, works across continents." },
+    { khz: 14103, name: "20 metres", note: "Most active. Best by day, reaches across continents." },
     { khz: 7103, name: "40 metres", note: "Good in the evening and at night, medium distances." },
     { khz: 3603, name: "80 metres", note: "Night-time and short distances, such as inside one country." },
   ];
 
-  onMount(async () => {
-    audioDevices = await app.engine.listAudioDevices();
-    sdrDevices = await app.engine.detectSdr();
-  });
-
   const call = $derived(normaliseCall(draft.callsign));
   const callMsg = $derived(callProblem(draft.callsign));
   const callOk = $derived(validCall(call) && !callMsg);
-
   const posOk = $derived(validLat(draft.location.lat) && validLon(draft.location.lon));
-
-  const canNext = $derived.by(() => {
-    if (step === 0) return haveLicence ? callOk : true;
-    if (step === 3) return draft.location.mode === "off" || posOk;
-    return true;
-  });
+  const canNext = $derived(step === 0 ? (haveLicence ? callOk : true) : step === 3 ? draft.location.mode === "off" || posOk : true);
 
   async function preview() {
     previewing = true;
-    await app.engine.start($state.snapshot({ ...draft, callsign: call }) as typeof draft);
+    await app.engine.start($state.snapshot({ ...draft, callsign: call, audioIn: kind === "sound" ? draft.audioIn : "" }) as typeof draft);
   }
 
   async function finish() {
-    const loc = {
-      mode: draft.location.mode as LocationMode,
-      lat: draft.location.mode === "off" ? null : draft.location.lat,
-      lon: draft.location.mode === "off" ? null : draft.location.lon,
-      radiusKm: draft.location.radiusKm,
-    };
     await app.finishSetup({
       callsign: haveLicence ? call : "",
       listenOnly: !haveLicence,
-      audioIn: radioKind === "sound" ? draft.audioIn : "",
-      audioOut: radioKind === "sound" ? draft.audioOut : "",
-      sdr: radioKind === "sdr" ? draft.sdr || sdrDevices[0] || "" : "",
-      rigctld: draft.rigctld,
+      audioIn: kind === "sound" ? draft.audioIn : "",
+      audioOut: kind === "sound" ? draft.audioOut : "",
+      sdr: kind === "sdr" ? draft.sdr || "HackRF" : "",
+      rig: { ...draft.rig },
       freqKhz: draft.freqKhz,
-      location: loc,
+      location: {
+        mode: draft.location.mode as LocationMode,
+        lat: draft.location.mode === "off" ? null : draft.location.lat,
+        lon: draft.location.mode === "off" ? null : draft.location.lon,
+        radiusKm: draft.location.radiusKm,
+      },
       autoLink: draft.autoLink,
       autoMode: draft.autoMode,
     });
     app.tourOpen = !app.settings.tourDone;
   }
 
-  function next() {
-    if (step < STEPS.length - 1) step += 1;
-    else finish();
-  }
+  const next = () => (step < STEPS.length - 1 ? (step += 1) : finish());
 </script>
 
 <main class="setup">
-  <header class="top">
-    <div class="row">
-      <div class="logo" aria-hidden="true">K</div>
-      <strong>Set up KAHF</strong>
-    </div>
-    <button class="btn ghost small" onclick={() => app.go(app.settings.setupDone ? "settings" : "welcome")}>
-      Cancel
-    </button>
+  <header class="row">
+    <span class="brand mono">KAHF</span>
+    <span class="muted">Set up</span>
+    <div class="spacer"></div>
+    <button class="btn quiet sm" onclick={() => app.go(app.settings.setupDone ? "chats" : "welcome")}>Cancel</button>
   </header>
 
   <ol class="steps" aria-label="Progress">
     {#each STEPS as s, i}
-      <li class:done={i < step} class:now={i === step}>
-        <span class="n">{#if i < step}<Icon name="check" size={14} />{:else}{i + 1}{/if}</span>
-        <span class="t">{s}</span>
-      </li>
+      <li class:done={i < step} class:now={i === step}><span class="mono">{i + 1}</span> {s}</li>
     {/each}
   </ol>
 
   <section class="body">
     {#if step === 0}
       <h1>Who are you on the air?</h1>
-      <p class="lead muted">
-        Every radio amateur has a callsign, like <span class="callsign">KA1ABC</span>. It is how other
-        stations know it is you.
-      </p>
-      <div class="stack">
-        <button class="choice" class:on={haveLicence} onclick={() => (haveLicence = true)}>
-          <span class="dot"></span>
-          <span>
-            <strong>I have an amateur radio licence</strong>
-            <span class="sub">I can transmit and I know my callsign.</span>
-          </span>
-        </button>
-        {#if haveLicence}
-          <label class="field">
-            Your callsign
-            <input
-              type="text"
-              placeholder="For example KA1ABC"
-              autocapitalize="characters"
-              spellcheck="false"
-              bind:value={draft.callsign}
-              oninput={() => (draft.callsign = draft.callsign.toUpperCase())}
-            />
-            {#if callMsg}<span class="field-error">{callMsg}</span>
-            {:else if callOk}<span class="field-ok">Looks good.</span>
-            {:else}<span class="help">Letters and numbers, with at least one number.</span>{/if}
-          </label>
-          <div class="notice warn">
-            <Icon name="warn" />
-            <span>
-              Only transmit if your licence allows it on the frequency you use. KAHF never checks for you.
-            </span>
-          </div>
-        {/if}
-        <button class="choice" class:on={!haveLicence} onclick={() => (haveLicence = false)}>
-          <span class="dot"></span>
-          <span>
-            <strong>I only want to listen for now</strong>
-            <span class="sub">KAHF will not transmit at all. You can add a callsign later in Settings.</span>
-          </span>
-        </button>
-      </div>
+      <p class="muted">Every radio amateur has a callsign, like <span class="call">KA1ABC</span>. It is how other stations know it is you.</p>
+      <button class="pick" class:on={haveLicence} onclick={() => (haveLicence = true)}>
+        <span class="dot"></span><span><b>I have an amateur radio licence</b><span class="s">I can transmit and I know my callsign.</span></span>
+      </button>
+      {#if haveLicence}
+        <label class="field">
+          <span class="t">Your callsign</span>
+          <input type="text" placeholder="For example KA1ABC" autocapitalize="characters" spellcheck="false" bind:value={draft.callsign} oninput={() => (draft.callsign = draft.callsign.toUpperCase())} />
+          {#if callMsg}<span class="err">{callMsg}</span>{:else if callOk}<span class="ok">Looks good.</span>{:else}<span class="hint">Letters and numbers, with at least one number.</span>{/if}
+        </label>
+        <div class="note warn">Only transmit if your licence allows it on the frequency you use. KAHF cannot check that for you.</div>
+      {/if}
+      <button class="pick" class:on={!haveLicence} onclick={() => (haveLicence = false)}>
+        <span class="dot"></span><span><b>I only want to listen for now</b><span class="s">KAHF will not transmit. You can add a callsign later in Settings.</span></span>
+      </button>
     {:else if step === 1}
-      <h1>How is your radio connected?</h1>
-      <p class="lead muted">KAHF needs to hear the radio. Pick the way yours is connected.</p>
-      <div class="stack">
-        <button class="choice" class:on={radioKind === "sound"} onclick={() => (radioKind = "sound")}>
-          <span class="dot"></span>
-          <span>
-            <strong>A sound-card cable or interface</strong>
-            <span class="sub">The most common way. The radio's audio goes to this computer's sound input.</span>
-          </span>
-        </button>
-        {#if radioKind === "sound"}
-          <div class="grid-2">
-            <label class="field">
-              Sound in (from the radio)
-              <select bind:value={draft.audioIn}>
-                <option value="">Computer default</option>
-                {#each audioDevices as d}<option value={d}>{d}</option>{/each}
-              </select>
-            </label>
-            <label class="field">
-              Sound out (to the radio)
-              <select bind:value={draft.audioOut}>
-                <option value="">Computer default</option>
-                {#each audioDevices as d}<option value={d}>{d}</option>{/each}
-              </select>
-            </label>
-          </div>
-        {/if}
-        <button class="choice" class:on={radioKind === "sdr"} onclick={() => (radioKind = "sdr")}>
-          <span class="dot"></span>
-          <span>
-            <strong>An SDR (HackRF, RTL-SDR and similar)</strong>
-            <span class="sub">A USB radio that connects straight to the computer.</span>
-          </span>
-        </button>
-        {#if radioKind === "sdr"}
-          <label class="field">
-            Detected receivers
-            <select bind:value={draft.sdr}>
-              {#each sdrDevices as d}<option value={d}>{d}</option>{/each}
-              {#if sdrDevices.length === 0}<option value="">None found. Plug it in and reopen this step.</option>{/if}
-            </select>
-          </label>
-        {/if}
-        <button class="choice" class:on={radioKind === "none"} onclick={() => (radioKind = "none")}>
-          <span class="dot"></span>
-          <span>
-            <strong>No radio yet</strong>
-            <span class="sub">Skip this. Nothing will be heard until you connect one in Settings.</span>
-          </span>
-        </button>
-        {#if radioKind !== "none"}
-          <div class="row">
-            <button class="btn" onclick={preview}><Icon name="wave" /> Check that I can hear it</button>
-            <span class="muted small">Opens the radio and shows the signal below. Moving lines mean it works.</span>
-          </div>
-          {#if previewing}
-            <Spectrum height={220} compact />
-          {/if}
-        {/if}
-      </div>
+      <h1>Connect your radio</h1>
+      <p class="muted">Two separate things: how the sound reaches the computer, and, optionally, letting KAHF control the radio's frequency.</p>
+      <h2>1. Sound</h2>
+      <AudioPicker bind:kind bind:audioIn={draft.audioIn} bind:audioOut={draft.audioOut} bind:sdr={draft.sdr} />
+      {#if kind !== "none"}
+        <div class="row">
+          <button class="btn" onclick={preview}>Check that I can hear it</button>
+          <span class="faint small">Moving lines below mean it works.</span>
+        </div>
+        {#if previewing}<Spectrum height={200} compact />{/if}
+      {/if}
+      <h2>2. Radio control <span class="faint small">(optional)</span></h2>
+      <RigPicker bind:value={draft.rig} />
     {:else if step === 2}
       <h1>Where do you listen?</h1>
-      <p class="lead muted">
-        KAHF stations gather on one frequency, like a meeting place. Pick a band. You can change it any time.
-      </p>
-      <div class="stack">
-        {#each BANDS as b}
-          <button class="choice" class:on={draft.freqKhz === b.khz} onclick={() => (draft.freqKhz = b.khz)}>
-            <span class="dot"></span>
-            <span>
-              <strong>{b.name} <span class="mono faint">{(b.khz / 1000).toFixed(3)} MHz</span></strong>
-              <span class="sub">{b.note}</span>
-            </span>
-          </button>
-        {/each}
-        <label class="field">
-          Radio control address (optional)
-          <input type="text" placeholder="localhost:4532" bind:value={draft.rigctld} />
-          <span class="help">If you use Hamlib, KAHF can set the radio's frequency for you. Leave empty if unsure.</span>
-        </label>
-      </div>
+      <p class="muted">KAHF stations meet on one frequency, like a meeting place. You can change it any time.</p>
+      {#each BANDS as b}
+        <button class="pick" class:on={draft.freqKhz === b.khz} onclick={() => (draft.freqKhz = b.khz)}>
+          <span class="dot"></span>
+          <span><b>{b.name} <span class="mono faint">{(b.khz / 1000).toFixed(3)} MHz</span></b><span class="s">{b.note}</span></span>
+        </button>
+      {/each}
     {:else if step === 3}
       <h1>Do you want to be on the map?</h1>
-      <p class="lead muted">
-        The public map at kahf.dev shows where KAHF stations are, so people can see who is nearby.
-        <strong>Sharing is off unless you turn it on.</strong>
-      </p>
+      <p class="muted">The public map at kahf.dev shows stations that choose to share where they are. <b>It is off unless you turn it on.</b></p>
       <LocationEditor bind:value={draft.location} />
     {:else}
       <h1>You are ready</h1>
-      <p class="lead muted">Here is what KAHF will do. You can change all of it later.</p>
-      <div class="stack">
-        <div class="card flat summary">
-          <div><span class="muted">Callsign</span><strong class="callsign">{haveLicence ? call : "listening only"}</strong></div>
-          <div>
-            <span class="muted">Radio</span>
-            <strong>{radioKind === "sound" ? "Sound card" : radioKind === "sdr" ? "SDR" : "none yet"}</strong>
-          </div>
-          <div><span class="muted">Frequency</span><strong class="mono">{(draft.freqKhz / 1000).toFixed(3)} MHz</strong></div>
-          <div>
-            <span class="muted">Map</span>
-            <strong>{draft.location.mode === "off" ? "not shared" : draft.location.mode === "area" ? "circle" : "exact"}</strong>
-          </div>
-        </div>
-        <div class="card flat stack-sm">
-          <div class="row">
-            <div class="grow">
-              <h3>Connect by itself</h3>
-              <p class="muted small">When you write to someone, KAHF contacts them, sends it, and hangs up. You never press Connect.</p>
-            </div>
-            <label class="switch"><input type="checkbox" bind:checked={draft.autoLink} aria-label="Connect by itself" /><span></span></label>
-          </div>
-          <div class="row">
-            <div class="grow">
-              <h3>Choose the speed by itself</h3>
-              <p class="muted small">Faster when the signal is strong, slower but surer when it is weak.</p>
-            </div>
-            <label class="switch"><input type="checkbox" bind:checked={draft.autoMode} aria-label="Automatic speed" /><span></span></label>
-          </div>
-        </div>
-      </div>
+      <p class="muted">This is what KAHF will do. You can change all of it later.</p>
+      <dl class="sum">
+        <dt>Callsign</dt><dd class="call">{haveLicence ? call : "listening only"}</dd>
+        <dt>Sound</dt><dd>{kind === "sound" ? "Sound card" : kind === "sdr" ? "SDR receiver" : "none yet"}</dd>
+        <dt>Radio control</dt><dd>{draft.rig.model !== null ? draft.rig.name : "off"}</dd>
+        <dt>Frequency</dt><dd class="mono">{(draft.freqKhz / 1000).toFixed(3)} MHz</dd>
+        <dt>Map</dt><dd>{draft.location.mode === "off" ? "not shared" : draft.location.mode === "area" ? "a circle" : "exact position"}</dd>
+      </dl>
+      <div class="row opt"><div class="grow"><h3>Connect by itself</h3><p class="muted small">When you send, KAHF reaches the station, sends it and hangs up.</p></div>
+        <label class="switch"><input type="checkbox" bind:checked={draft.autoLink} aria-label="Connect by itself" /><i></i></label></div>
+      <div class="row opt"><div class="grow"><h3>Choose the speed by itself</h3><p class="muted small">Faster when the signal is strong, slower but surer when it is weak.</p></div>
+        <label class="switch"><input type="checkbox" bind:checked={draft.autoMode} aria-label="Automatic speed" /><i></i></label></div>
     {/if}
   </section>
 
-  <footer class="foot">
-    <button class="btn ghost" disabled={step === 0} onclick={() => (step -= 1)}>Back</button>
-    <button class="btn primary big" disabled={!canNext} onclick={next}>
-      {step === STEPS.length - 1 ? "Start listening" : "Continue"} <Icon name="arrow" />
+  <footer class="row">
+    <button class="btn" disabled={step === 0} onclick={() => (step -= 1)}>Back</button>
+    <div class="spacer"></div>
+    <button class="btn primary lg" disabled={!canNext} onclick={next}>
+      {step === STEPS.length - 1 ? "Start listening" : "Continue"} <Icon name="arrow" size={15} />
     </button>
   </footer>
 </main>
@@ -276,98 +146,69 @@
 <style>
   .setup {
     height: 100%;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 18px 28px;
     display: flex;
     flex-direction: column;
-    max-width: 860px;
-    margin: 0 auto;
-    padding: 20px 28px 20px;
   }
-  .top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 0 18px;
-  }
-  .logo {
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
-    background: var(--accent);
-    color: var(--accent-ink);
-    display: grid;
-    place-items: center;
+  .brand {
     font-weight: 800;
+    letter-spacing: 0.3em;
+    color: var(--accent);
   }
   .steps {
     list-style: none;
-    margin: 0 0 22px;
-    padding: 0;
     display: flex;
-    gap: 8px;
+    margin: 16px 0 6px;
+    padding: 0;
+    border-bottom: 1px solid var(--line);
   }
   .steps li {
     flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    padding: 8px 0;
     color: var(--faint);
-    font-size: 13px;
-    font-weight: 600;
-    padding-top: 10px;
-    border-top: 3px solid var(--line);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
   }
   .steps li.now {
     color: var(--text);
-    border-color: var(--accent);
+    border-bottom-color: var(--accent);
   }
   .steps li.done {
     color: var(--accent);
-    border-color: var(--accent);
-  }
-  .n {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    background: var(--raised);
-    font-size: 12px;
-  }
-  .steps li.done .n,
-  .steps li.now .n {
-    background: var(--accent);
-    color: var(--accent-ink);
-  }
-  @media (max-width: 700px) {
-    .steps .t {
-      display: none;
-    }
   }
   .body {
     flex: 1;
     overflow: auto;
+    padding: 16px 2px 20px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding: 6px 4px 20px;
+    gap: 14px;
   }
-  .lead {
-    font-size: 16.5px;
-    max-width: 640px;
+  footer {
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
   }
-  .foot {
-    display: flex;
-    justify-content: space-between;
-    padding-top: 14px;
-    border-top: 1px solid var(--line-soft);
-  }
-  .summary {
+  .sum {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 14px 24px;
+    grid-template-columns: 140px 1fr;
+    gap: 0;
+    margin: 0;
+    border: 1px solid var(--line);
+    border-radius: 6px;
   }
-  .summary div {
-    display: flex;
-    flex-direction: column;
+  .sum dt,
+  .sum dd {
+    margin: 0;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sum dt {
+    color: var(--muted);
+  }
+  .opt {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
   }
 </style>

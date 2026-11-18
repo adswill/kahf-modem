@@ -4,7 +4,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { defaultSettings } from "./defaults";
-import type { Engine, EngineEvent, MessageKind, ModeInfo, Settings } from "./types";
+import type {
+  Engine, EngineEvent, MessageKind, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, VoiceClip,
+} from "./types";
 
 export class TauriEngine implements Engine {
   readonly demo = false;
@@ -58,6 +60,57 @@ export class TauriEngine implements Engine {
   }
   shareOnMap() {
     return invoke<string>("map_share");
+  }
+  sendMail(id: string, to: string, subject: string, body: string, paths: string[]) {
+    return invoke<void>("engine_send_mail", { id, to, subject, body, paths });
+  }
+  sendFile(id: string, to: string, path: string) {
+    return invoke<void>("engine_send_file", { id, to, path });
+  }
+  pickFiles() {
+    return invoke<PickedFile[]>("pick_files");
+  }
+  openPath(path: string) {
+    return invoke<void>("open_path", { path });
+  }
+  recordVoice() {
+    return invoke<void>("voice_record");
+  }
+  stopVoice() {
+    return invoke<VoiceClip | null>("voice_stop");
+  }
+  cancelVoice() {
+    return invoke<void>("voice_cancel");
+  }
+  playVoice(path: string) {
+    return invoke<void>("voice_play", { path });
+  }
+  sendVoice(id: string, to: string, clip: VoiceClip) {
+    return invoke<void>("voice_send", { id, to, clipId: clip.id });
+  }
+  relayStatus() {
+    return invoke<RelayStatus>("relay_status");
+  }
+  relayDirectory(refresh: boolean) {
+    return invoke<RelayInfo[]>("relay_directory", { refresh });
+  }
+  setRelayHints(calls: string[]) {
+    return invoke<void>("engine_set_relay_hints", { calls });
+  }
+  rigAvailable() {
+    return invoke<boolean>("rig_available");
+  }
+  rigModels() {
+    return invoke<RigModel[]>("rig_models");
+  }
+  rigPorts() {
+    return invoke<string[]>("rig_ports");
+  }
+  rigConnect(model: number, port: string, baud: number) {
+    return invoke<number>("rig_connect", { model, port, baud });
+  }
+  rigStop() {
+    return invoke<void>("rig_stop");
   }
   listAudioDevices() {
     return invoke<string[]>("list_audio_devices");

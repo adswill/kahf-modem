@@ -4,9 +4,11 @@
 //! channel as plain JSON. Everything the window shows comes from here or from its own settings.
 
 mod convert;
+mod directory;
 mod report;
 mod rig;
 mod settings;
+mod voice;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -27,6 +29,7 @@ struct Shared {
     data_dir: PathBuf,
     /// The `rigctld` KAHF started for the chosen radio, if any.
     rigctld: Mutex<Option<std::process::Child>>,
+    voice: voice::Voice,
 }
 
 type Res<T> = Result<T, String>;
@@ -152,6 +155,10 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
     };
     let mut engine = Engine::new(cfg)?;
     engine.listen()?;
+    if let Some(hints) = settings["relayHints"].as_array() {
+        let calls: Vec<String> = hints.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        engine.set_relay_hints(&calls);
+    }
     engine.set_listen_only(s.listen_only);
     engine.set_auto_link(s.auto_link);
     if s.auto_mode {
@@ -261,6 +268,141 @@ fn engine_set_relay(state: State<Shared>, on: bool, licence_held: bool, terms_ac
     })
 }
 
+/// Remembers that the window's message `id` is waiting in the engine's outbox as `engine_id`.
+fn track(state: &State<Shared>, id: &str, to: &str, engine_id: u64) -> Res<()> {
+    state.pending.lock().map_err(|e| e.to_string())?.push(Pending { ui_id: id.into(), to: to.into(), engine_id });
+    Ok(())
+}
+
+#[tauri::command]
+fn engine_send_mail(state: State<Shared>, id: String, to: String, subject: String, body: String, paths: Vec<String>) -> Res<()> {
+    let files: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let engine_id = with_engine(&state, |e| e.send_mail(&to, &subject, &body, &files))?;
+    track(&state, &id, &to, engine_id)
+}
+
+#[tauri::command]
+fn engine_send_file(state: State<Shared>, id: String, to: String, path: String) -> Res<()> {
+    let engine_id = with_engine(&state, |e| e.send_file(&to, std::path::Path::new(&path)))?;
+    track(&state, &id, &to, engine_id)
+}
+
+/// Opens the system's file chooser (several files allowed). Empty when the person cancels.
+#[tauri::command]
+async fn pick_files(app: AppHandle) -> Res<Vec<Value>> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_files(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx.recv().map_err(|e| e.to_string())?.unwrap_or_default();
+    Ok(picked
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .map(|p| {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            json!({ "path": p.to_string_lossy(), "name": name, "size": size })
+        })
+        .collect())
+}
+
+/// Shows a received file in the system's file manager.
+#[tauri::command]
+fn open_path(path: String) -> Res<()> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err("That file is not there any more.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg("-R").arg(&p).spawn();
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(&p)).spawn();
+    r.map(|_| ()).map_err(|e| format!("Cannot open the folder: {e}"))
+}
+
+#[tauri::command]
+fn voice_record(app: AppHandle, state: State<Shared>) -> Res<()> {
+    state.voice.record(app, None)
+}
+
+#[tauri::command]
+fn voice_stop(state: State<Shared>) -> Res<Option<Value>> {
+    state.voice.stop(&state.data_dir)
+}
+
+#[tauri::command]
+fn voice_cancel(state: State<Shared>) {
+    state.voice.cancel();
+}
+
+#[tauri::command]
+fn voice_play(state: State<Shared>, path: String) -> Res<()> {
+    state.voice.play(std::path::Path::new(&path), None)
+}
+
+#[tauri::command]
+fn voice_send(state: State<Shared>, id: String, to: String, clip_id: String) -> Res<()> {
+    let path = voice::Voice::clip_path(&state.data_dir, &clip_id)?;
+    let engine_id = with_engine(&state, |e| e.send_file(&to, &path))?;
+    track(&state, &id, &to, engine_id)
+}
+
+#[tauri::command]
+fn relay_status(state: State<Shared>) -> Res<Value> {
+    let v = settings::load(&state.data_dir);
+    let area = match (v["location"]["lat"].as_f64(), v["location"]["lon"].as_f64()) {
+        (Some(la), Some(lo)) if v["location"]["mode"].as_str().unwrap_or("off") != "off" => Some(report::area_key(la, lo)),
+        _ => None,
+    };
+    let running = v["relay"].as_bool().unwrap_or(false);
+    let (hops, total) = match state.engine.lock().map_err(|e| e.to_string())?.as_ref() {
+        Some(e) => e.relay_recent(25),
+        None => (Vec::new(), 0),
+    };
+    let day_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(86_400))
+        .unwrap_or(0);
+    let today = hops.iter().filter(|h| h.at_unix >= day_ago).count();
+    Ok(json!({
+        "running": running,
+        "forwardedToday": today,
+        "forwardedTotal": total,
+        "recent": hops.iter().map(|h| json!({
+            "at": h.at_unix * 1000, "from": h.relay, "to": "", "kind": if h.heard_by_next { "forwarded" } else { "sent on" }
+        })).collect::<Vec<_>>(),
+        "area": if running { area } else { None },
+    }))
+}
+
+#[tauri::command]
+async fn relay_directory(state: State<'_, Shared>, refresh: bool) -> Res<Vec<Value>> {
+    let v = settings::load(&state.data_dir);
+    let here = match (v["location"]["lat"].as_f64(), v["location"]["lon"].as_f64()) {
+        (Some(la), Some(lo)) => Some((la, lo)),
+        _ => None,
+    };
+    let manual: Vec<String> = v["relayHints"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || directory::directory(&dir, here, &manual, refresh))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn engine_set_relay_hints(state: State<Shared>, calls: Vec<String>) -> Res<()> {
+    with_engine(&state, |e| {
+        e.set_relay_hints(&calls);
+        Ok(())
+    })
+}
+
 /// Pulls the engine's events about 25 times a second and hands them to the window.
 fn poll_loop(app: AppHandle) {
     std::thread::spawn(move || loop {
@@ -298,6 +440,7 @@ fn poll_loop(app: AppHandle) {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(Shared {
@@ -305,6 +448,7 @@ pub fn run() {
                 pending: Mutex::new(Vec::new()),
                 data_dir: data_dir(&handle),
                 rigctld: Mutex::new(None),
+                voice: voice::Voice::default(),
             });
             poll_loop(handle);
             Ok(())
@@ -330,6 +474,18 @@ pub fn run() {
             engine_set_auto_link,
             engine_set_relay,
             map_share,
+            engine_send_mail,
+            engine_send_file,
+            pick_files,
+            open_path,
+            voice_record,
+            voice_stop,
+            voice_cancel,
+            voice_play,
+            voice_send,
+            relay_status,
+            relay_directory,
+            engine_set_relay_hints,
         ])
         .run(tauri::generate_context!())
         .expect("the KAHF window could not start");

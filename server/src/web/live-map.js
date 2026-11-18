@@ -16,6 +16,7 @@ const LIVE = String.raw`
   var lastBody = "";
   var inflight = false;
   var selected = null;
+  var popup = null;
   var features = { nodes: [], areas: [] };
   var markers = {};
 
@@ -48,20 +49,88 @@ const LIVE = String.raw`
       Math.abs(loc.latitude) <= 90 && Math.abs(loc.longitude) <= 180;
   }
 
-  function addNode(list, id, call, role, loc, seen, extra) {
+  function addNode(list, id, call, role, loc, seen, extra, info) {
     if (!validPoint(loc)) return;
     var area = loc.mode === "area";
     var radius = area ? (loc.radius_km || AREA_KM) : 0;
     var props = { id: id, call: call, role: role, area: area ? 1 : 0, seen: seen || "", radius: radius,
-      lat: loc.latitude, lon: loc.longitude, detail: extra || "" };
+      lat: loc.latitude, lon: loc.longitude, detail: extra || "", info: (info || []).join("\n") };
     list.push({ type: "Feature", properties: props, geometry: { type: "Point", coordinates: [loc.longitude, loc.latitude] } });
+  }
+
+  function freqText(s) {
+    var f = Number(s.frequency_khz);
+    return (isFinite(f) ? (f / 1000).toFixed(3) + " MHz" : "unknown frequency") + (s.mode ? ", " + s.mode : "");
+  }
+
+  function ago(iso) {
+    var t = Date.parse(iso);
+    if (!isFinite(t)) return "-";
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " days ago";
+  }
+
+  function place(p) {
+    return p.area ? "Somewhere inside a circle about " + p.radius + " km across."
+      : p.lat.toFixed(4) + ", " + p.lon.toFixed(4);
+  }
+
+  /** One node as a small card. Built with DOM calls, never from markup text. */
+  function nodeCard(p) {
+    var card = doc.createElement("div");
+    card.className = "nodecard";
+    var h = doc.createElement("h3");
+    var call = doc.createElement("span");
+    call.textContent = p.call;
+    var role = doc.createElement("em");
+    role.textContent = p.detail;
+    h.appendChild(call);
+    h.appendChild(role);
+    card.appendChild(h);
+    (p.info ? p.info.split("\n") : []).forEach(function (line) {
+      var l = doc.createElement("p");
+      l.textContent = line;
+      card.appendChild(l);
+    });
+    var seen = doc.createElement("p");
+    seen.className = "meta";
+    seen.textContent = "Last seen " + (p.seen ? ago(p.seen) : "-") + ". " + place(p);
+    card.appendChild(seen);
+    return card;
+  }
+
+  function showPopup(id) {
+    var f = null;
+    features.nodes.forEach(function (x) { if (x.properties.id === id) f = x; });
+    if (!f || !loaded) return;
+    var here = features.nodes.filter(function (x) {
+      return Math.abs(x.properties.lat - f.properties.lat) < 1e-4 && Math.abs(x.properties.lon - f.properties.lon) < 1e-4;
+    });
+    var wrap = doc.createElement("div");
+    here.forEach(function (x) { wrap.appendChild(nodeCard(x.properties)); });
+    if (popup) popup.remove();
+    popup = new window.maplibregl.Popup({ offset: 14, maxWidth: "300px", className: "nodepop" })
+      .setLngLat(f.geometry.coordinates).setDOMContent(wrap).addTo(map);
+    popup.on("close", function () { selected = null; showSelected(); syncSelection(); });
+  }
+
+  function syncSelection() {
+    Object.keys(markers).forEach(function (id) {
+      var el = markers[id].getElement();
+      el.className = el.className.replace(/ sel\b/, "") + (id === selected ? " sel" : "");
+    });
   }
 
   function build(data) {
     var nodes = [], areas = [];
     var relays = Array.isArray(data.relays) ? data.relays : [];
     relays.forEach(function (r) {
-      addNode(nodes, "r:" + r.callsign, r.callsign, "relay", r.location, r.last_seen, "Relay");
+      addNode(nodes, "r:" + r.callsign, r.callsign, "relay", r.location, r.last_seen, "Relay",
+        ["Passes messages between stations that cannot hear each other.",
+         "Shown by the one-degree square it registered in."]);
     });
     var stations = Array.isArray(data.stations) ? data.stations : [];
     var seen = {};
@@ -69,10 +138,12 @@ const LIVE = String.raw`
       var key = "s:" + s.reporter_call;
       if (!seen[key]) {
         seen[key] = 1;
-        addNode(nodes, key, s.reporter_call, "station", s.reporter_location, s.refreshed_at, "Station");
+        addNode(nodes, key, s.reporter_call, "station", s.reporter_location, s.refreshed_at, "Station",
+          ["Reported hearing " + s.heard_call + ".", freqText(s)]);
       }
       var hkey = "h:" + s.heard_call + ":" + i;
-      addNode(nodes, hkey, s.heard_call, "heard", s.heard_location, s.heard_at, "Heard");
+      addNode(nodes, hkey, s.heard_call, "heard", s.heard_location, s.heard_at, "Heard",
+        ["Heard by " + s.reporter_call + ".", freqText(s)]);
     });
     nodes.forEach(function (f) {
       if (f.properties.area) {
@@ -94,7 +165,7 @@ const LIVE = String.raw`
         el.type = "button";
         el.className = "mk " + p.role;
         el.setAttribute("aria-label", p.call + ", " + p.detail);
-        el.addEventListener("click", function () { selected = id; showSelected(); });
+        el.addEventListener("click", function () { selected = id; showSelected(); syncSelection(); showPopup(id); });
         m = new window.maplibregl.Marker({ element: el, anchor: "center" });
         markers[id] = m;
         m.setLngLat(f.geometry.coordinates).addTo(map);
@@ -118,7 +189,10 @@ const LIVE = String.raw`
       count.textContent = features.relays + " relay" + (features.relays === 1 ? "" : "s") + ", " +
         features.stations + " station" + (features.stations === 1 ? "" : "s") + " reporting. Updated " + clock() + ".";
     }
+    var empty = doc.getElementById("map-empty");
+    if (empty) empty.hidden = features.nodes.length > 0;
     showSelected();
+    syncSelection();
   }
 
   function showSelected() {
@@ -130,14 +204,15 @@ const LIVE = String.raw`
       set("p-role", "-");
       set("p-seen", "-");
       set("p-loc", "-");
+      set("p-info", "-");
       return;
     }
     var p = f.properties;
     set("p-call", p.call);
     set("p-role", p.detail);
-    set("p-seen", p.seen ? new Date(p.seen).toISOString().replace(/\.\d+Z$/, "Z") : "-");
-    set("p-loc", p.area ? "Area, about " + p.radius + " km across. The station is somewhere inside." :
-      p.lat.toFixed(4) + ", " + p.lon.toFixed(4));
+    set("p-seen", p.seen ? ago(p.seen) + " (" + new Date(p.seen).toISOString().replace(/\.\d+Z$/, "Z") + ")" : "-");
+    set("p-loc", place(p));
+    set("p-info", p.info ? p.info.split("\n").join(" ") : "-");
   }
 
   function poll() {

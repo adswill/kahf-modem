@@ -42,17 +42,25 @@ pub fn event_json(ev: &Event, pending: &[Pending]) -> Vec<Value> {
             json!({ "type": "heard", "heard": { "call": from, "snr": Value::Null, "at": now_ms() } }),
             json!({ "type": "message", "from": from, "text": text, "at": now_ms() }),
         ],
-        Event::Mail { from, subject, .. } => vec![json!({
-            "type": "message", "from": from, "at": now_ms(),
-            "text": format!("Mail: {subject} (saved in your inbox folder)")
+        // The inbox events below carry the text and the file, so the plain ones add nothing.
+        Event::Mail { .. } => Vec::new(),
+        Event::MailReceived { from, subject, body, attachments, .. } => vec![
+            json!({ "type": "heard", "heard": { "call": from, "snr": Value::Null, "at": now_ms() } }),
+            json!({
+                "type": "mail", "from": from, "subject": subject, "body": body, "at": now_ms(),
+                "files": attachments.iter().map(|n| json!({ "name": n, "size": 0 })).collect::<Vec<_>>()
+            }),
+        ],
+        Event::FileReceived { from, name, size, path } => vec![json!({
+            "type": "file", "id": format!("in-{}", now_ms()), "name": name, "done": size, "total": size,
+            "dir": "in", "from": from, "path": path.to_string_lossy()
         })],
-        Event::FileProgress { name, done, total, .. } => {
-            if done >= total {
-                vec![json!({ "type": "log", "text": format!("File {name} transferred.") })]
-            } else {
-                Vec::new()
-            }
-        }
+        Event::FileProgress { id, name, done, total } => match pending.iter().find(|p| p.engine_id == *id) {
+            Some(p) => vec![json!({
+                "type": "file", "id": p.ui_id, "name": name, "done": done, "total": total, "dir": "out"
+            })],
+            None => Vec::new(),
+        },
         Event::Spectrum(bins) => vec![json!({ "type": "spectrum", "bins": thin_spectrum(bins) })],
         Event::Metrics(m) => vec![json!({
             "type": "metrics",
@@ -122,6 +130,34 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["type"], "heard");
         assert_eq!(out[1]["text"], "hi");
+    }
+
+    #[test]
+    fn a_received_file_and_mail_reach_the_window_with_their_content() {
+        let f = &event_json(
+            &Event::FileReceived { from: "DL5XYZ".into(), name: "a.kvm".into(), size: 90, path: "/tmp/a.kvm".into() },
+            &[],
+        )[0];
+        assert_eq!(f["dir"], "in");
+        assert_eq!(f["from"], "DL5XYZ");
+        assert_eq!(f["path"], "/tmp/a.kvm");
+        let m = event_json(
+            &Event::MailReceived {
+                from: "G4HAM".into(), subject: "Plan".into(), body: "Meet at 9".into(),
+                attachments: vec!["map.png".into()], path: None,
+            },
+            &[],
+        );
+        assert_eq!(m[1]["body"], "Meet at 9");
+        assert_eq!(m[1]["files"][0]["name"], "map.png");
+    }
+
+    #[test]
+    fn sending_progress_belongs_to_the_waiting_message() {
+        let out = event_json(&Event::FileProgress { id: 1, name: "x".into(), done: 5, total: 10 }, &[pend("ui-7", "KA1ABC")]);
+        assert_eq!(out[0]["id"], "ui-7");
+        assert_eq!(out[0]["dir"], "out");
+        assert!(event_json(&Event::FileProgress { id: 9, name: "x".into(), done: 1, total: 1 }, &[]).is_empty());
     }
 
     #[test]

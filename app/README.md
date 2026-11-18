@@ -37,12 +37,16 @@ cd src-tauri && cargo test && cargo clippy --all-targets -- -D warnings
 
 | Path | What it holds |
 |---|---|
-| `src/pages/` | One file per screen: Welcome, Setup, Home, Messages, Network, Radio, Settings, Help |
-| `src/components/` | Spectrum and waterfall, the guided tour, sidebar, toasts, the location editor |
+| `src/pages/` | Welcome and Setup (first run) |
+| `src/views/` | The five main screens: Chats, Mail, Stations, Radio, Relay |
+| `src/components/` | Top strip, nav, settings sheet, help panel, tour, map, radio and sound pickers, spectrum |
 | `src/lib/state.svelte.ts` | Everything the window shows, and the only place that talks to the engine |
 | `src/lib/types.ts` | The shapes shared with the Rust side |
 | `src-tauri/src/lib.rs` | The commands the window calls, and the event loop |
 | `src-tauri/src/convert.rs` | Engine events to the JSON the window understands |
+| `src-tauri/src/voice.rs` | Voice notes: microphone, Codec2 at 1200 bit/s, `.kvm` files (Codec2 is LGPL, patent-free) |
+| `src-tauri/src/directory.rs` | Relays this station knows: server list, saved copy, typed-in callsigns. Never required |
+| `src-tauri/src/rig.rs` | Radio control through Hamlib |
 
 ## Design rules
 
