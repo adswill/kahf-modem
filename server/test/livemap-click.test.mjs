@@ -114,7 +114,8 @@ test("nodes at the same point are listed together in one card", async () => {
   assert.match(text, /Reported hearing DL5XYZ/);
   assert.match(text, /14\.103 MHz, KAHF/);
   assert.match(text, /DL5XYZ/);
-  assert.match(text, /Heard by G4ABC/);
+  assert.match(text, /Known only because G4ABC heard it/);
+  assert.match(text, /Heard only/);
 });
 
 test("the chosen marker is highlighted and the side panel is filled in", async () => {

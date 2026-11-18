@@ -341,7 +341,7 @@ export function renderMap(stations, generatedIso, relays = []) {
 <p class="note">Click a point on the map to see what is known about it.</p>
 </section>
 <p class="count" id="count">${relays.length} relay${relays.length === 1 ? "" : "s"}, ${reporters} station${reporters === 1 ? "" : "s"} reporting. Updated ${esc(generatedIso.replace(/\.\d+Z$/, "Z"))}.</p>
-<p class="note">Map tiles from OpenStreetMap contributors. Green circles are relays, dark circles are stations, grey circles are stations heard by others. A dashed ring marks a position given only as an area.</p>
+<p class="note">Map tiles from OpenStreetMap contributors. A <strong>station</strong> is one person's KAHF setup. A <strong>relay</strong> is a station that passes messages on for others. Green circles are relays, dark circles are stations that share their location, and grey circles are stations known only because another station heard them, so their position is approximate. A dashed ring marks a position given only as an area.</p>
 </aside>
 </div>
 </div>`;
