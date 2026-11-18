@@ -14,7 +14,7 @@
     { page: "home", target: "checklist", title: "Your first steps", text: "A short list for new users. The highlighted step is the next thing to do." },
     { page: "home", target: "heard", title: "Who is on the air", text: "Stations that KAHF hears appear here by themselves. You do not need to search." },
     { page: "messages", target: "to", title: "Write to someone", text: "Type a callsign. KAHF suggests stations you have heard." },
-    { page: "messages", target: "compose", title: "Just press Send", text: "No connecting, no settings. KAHF calls the station, sends your message and tells you what happened." },
+    { page: "messages", target: "compose", title: "Just press Send", text: "No connecting, no settings. KAHF reaches the station, sends your message and tells you what happened." },
     { page: "radio", target: "spectrum", title: "The band, live", text: "Your radio's signal. The shaded band is the one channel KAHF uses. Moving lines mean it is working." },
     { page: "radio", target: "speed", title: "Speed", text: "Automatic picks the fastest speed your signal can carry. You can leave it alone." },
     { page: "settings", target: "location", title: "Your privacy", text: "Your location is off by default. Share a circle or your position only if you want to be on the public map." },

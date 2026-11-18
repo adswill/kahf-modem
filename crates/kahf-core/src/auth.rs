@@ -60,6 +60,12 @@ impl StationKey {
         self.key.sign(&signed_data(callsign, body)).to_bytes()
     }
 
+    /// Plain Ed25519 signature over `data`, with no domain prefix. The kahf.dev server checks
+    /// its requests this way, over the canonical JSON of the request.
+    pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
+        self.key.sign(data).to_bytes()
+    }
+
     /// Fingerprint of this station's public key, for comparison in Settings.
     pub fn fingerprint(&self) -> String {
         fingerprint(&self.to_public())
@@ -185,6 +191,16 @@ mod tests {
 
     fn key() -> StationKey {
         StationKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn raw_signature_verifies_with_plain_ed25519_and_not_with_the_domain_prefix() {
+        let key = StationKey::generate();
+        let msg = br#"{"area":"N51W1","callsign":"G4ABC"}"#;
+        let sig = Signature::from_bytes(&key.sign_raw(msg));
+        let public = VerifyingKey::from_bytes(&key.to_public()).unwrap();
+        assert!(public.verify(msg, &sig).is_ok(), "the server checks plain Ed25519");
+        assert!(public.verify(&signed_data("G4ABC", msg), &sig).is_err());
     }
 
     #[test]

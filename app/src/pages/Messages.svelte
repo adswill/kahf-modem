@@ -50,7 +50,7 @@
   const label = (m: Msg): string => {
     switch (m.state) {
       case "queued": return app.settings.autoLink ? "Waiting for a turn on the air" : "Waiting. Connect to send it";
-      case "calling": return "Calling them…";
+      case "calling": return "Reaching them…";
       case "sending": return "Sending…";
       case "sent": return "Sent over the air";
       case "failed": return "Not delivered";
@@ -101,7 +101,7 @@
           <span class="chip good">Connected</span>
           <button class="btn small" onclick={() => app.hangUp()}>Hang up</button>
         {:else}
-          <button class="btn small" onclick={() => app.call(peer)} disabled={app.settings.listenOnly}>Call now</button>
+          <button class="btn small" onclick={() => app.call(peer)} disabled={app.settings.listenOnly}>Connect now</button>
         {/if}
       {/if}
     </header>
@@ -114,7 +114,7 @@
           <h2>Write to someone</h2>
           <p class="muted">
             Type a callsign above. Stations you have heard are suggested. You do not need to connect first:
-            KAHF calls them for you when you press Send.
+            KAHF contacts them for you when you press Send.
           </p>
           {#if suggestions.length}
             <div class="row wrap">

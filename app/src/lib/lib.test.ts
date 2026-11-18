@@ -104,3 +104,13 @@ describe("defaults", () => {
     expect(MODE_TABLE.at(-1)!.netBps).toBeGreaterThan(4000);
   });
 });
+
+import { explainStartError } from "./state.svelte";
+describe("start errors", () => {
+  it("turn engine messages into advice", () => {
+    expect(explainStartError("cannot open radio: audio device missing")).toMatch(/sound device/);
+    expect(explainStartError("no HackRF found")).toMatch(/SDR/);
+    expect(explainStartError("cannot connect to rigctld at localhost:4532")).toMatch(/radio control/);
+    expect(explainStartError("something odd")).toMatch(/could not start/);
+  });
+});

@@ -118,6 +118,8 @@ export interface Engine {
   setAutoLink(on: boolean): Promise<void>;
   /** Pass messages on for other stations (the station must stay on and attended). */
   setRelay(on: boolean, licenceHeld: boolean, termsAccepted: boolean): Promise<void>;
+  /** Put the station on the public map as far as the person allowed. Returns a sentence to show. */
+  shareOnMap(): Promise<string>;
   listAudioDevices(): Promise<string[]>;
   detectSdr(): Promise<string[]>;
   modes(): Promise<ModeInfo[]>;

@@ -1,5 +1,5 @@
 // A pretend radio, so the whole app can be tried (and tested) without any hardware.
-// It behaves like the real engine: spectrum frames, stations appearing, calls that connect or
+// It behaves like the real engine: spectrum frames, stations appearing, connections that succeed or
 // fail, messages that go out in steps, and link quality that changes.
 
 import { defaultSettings, MODE_TABLE } from "./defaults";
@@ -119,7 +119,7 @@ export class MockEngine implements Engine {
   }
 
   async connect(call: string): Promise<void> {
-    this.emit({ type: "log", text: `Calling ${call}.` });
+    this.emit({ type: "log", text: `Contacting ${call}.` });
     this.callPeer(call, 6);
   }
 
@@ -183,6 +183,12 @@ export class MockEngine implements Engine {
   }
   async setRelay(on: boolean, _l: boolean, _t: boolean) {
     this.emit({ type: "log", text: on ? "Relay mode is on (demo)." : "Relay mode is off." });
+  }
+  async shareOnMap(): Promise<string> {
+    const loc = this.settings.location;
+    if (loc.mode === "off") return "You chose not to share your location, so nothing was sent.";
+    if (!this.settings.relay) return "The map lists relays for now. Turn on relay mode to appear on it.";
+    return "Demo: your relay would be on the map now.";
   }
   async listAudioDevices(): Promise<string[]> {
     return ["MacBook Pro Microphone", "BlackHole 2ch", "USB Audio CODEC (radio interface)"];

@@ -96,7 +96,7 @@
       {#if value.mode === "area"}
         <label class="field">
           Circle size: {value.radiusKm} km
-          <input type="range" min="10" max="200" step="10" bind:value={value.radiusKm} />
+          <input type="range" min="10" max="100" step="10" bind:value={value.radiusKm} />
         </label>
       {/if}
     </div>
@@ -105,4 +105,13 @@
     <Icon name="eye" />
     <span>{sharingSummary(value.mode, lat, lon, value.radiusKm)}</span>
   </div>
+  {#if value.mode !== "off"}
+    <div class="notice warn">
+      <Icon name="info" />
+      <span>
+        Today the public map lists <strong>relays</strong>, each shown by the one-degree square it is in. Other stations
+        appear once they can announce themselves over the air. Your choice is saved now and used as soon as that works.
+      </span>
+    </div>
+  {/if}
 </div>

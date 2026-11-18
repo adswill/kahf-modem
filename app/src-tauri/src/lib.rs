@@ -4,6 +4,7 @@
 //! channel as plain JSON. Everything the window shows comes from here or from its own settings.
 
 mod convert;
+mod report;
 mod settings;
 
 use std::path::PathBuf;
@@ -160,6 +161,26 @@ fn engine_set_auto_link(state: State<Shared>, on: bool) -> Res<()> {
     })
 }
 
+/// Puts the relay on the public map, in its one-degree square, if the person chose to share a
+/// location. Returns a sentence for the person.
+#[tauri::command]
+fn map_share(state: State<Shared>) -> Res<String> {
+    let v = settings::load(&state.data_dir);
+    let s = EngineSettings::from_json(&v);
+    let loc = &v["location"];
+    if loc["mode"].as_str().unwrap_or("off") == "off" {
+        return Ok("You chose not to share your location, so nothing was sent.".into());
+    }
+    let (Some(lat), Some(lon)) = (loc["lat"].as_f64(), loc["lon"].as_f64()) else {
+        return Err("Enter your position in Settings first.".into());
+    };
+    if !v["relay"].as_bool().unwrap_or(false) {
+        return Ok("The map lists relays for now. Turn on relay mode to appear on it.".into());
+    }
+    let key = kahf_core::auth::load_or_create(&state.data_dir).map_err(|e| format!("Cannot open your station key: {e}"))?;
+    report::register_relay(&key, &s.callsign(), lat, lon)
+}
+
 #[tauri::command]
 fn engine_set_relay(state: State<Shared>, on: bool, licence_held: bool, terms_accepted: bool) -> Res<()> {
     // The relay works on the frequency the person listens on.
@@ -236,6 +257,7 @@ pub fn run() {
             engine_set_listen_only,
             engine_set_auto_link,
             engine_set_relay,
+            map_share,
         ])
         .run(tauri::generate_context!())
         .expect("the KAHF window could not start");

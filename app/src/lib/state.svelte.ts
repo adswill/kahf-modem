@@ -43,6 +43,21 @@ function save(key: string, value: unknown) {
   }
 }
 
+/** Turns what the engine said into advice. */
+export function explainStartError(raw: string): string {
+  const t = raw.toLowerCase();
+  if (t.includes("audio") || t.includes("device") || t.includes("sound")) {
+    return "KAHF could not open the sound device. Check that your radio interface is plugged in and not used by another program, then choose it again on the Radio page.";
+  }
+  if (t.includes("sdr") || t.includes("hackrf") || t.includes("rtl")) {
+    return "KAHF could not find the SDR receiver. Plug it in, make sure its driver is installed, and try again.";
+  }
+  if (t.includes("rig") || t.includes("rigctld") || t.includes("4532")) {
+    return "KAHF could not reach the radio control program. Check its address in Settings, or leave it empty.";
+  }
+  return `The radio could not start. ${raw}`;
+}
+
 class AppState {
   engine: Engine = makeEngine();
   ready = $state(false);
@@ -59,6 +74,8 @@ class AppState {
   toasts = $state<Toast[]>([]);
   peer = $state<string>("");
   tourOpen = $state(false);
+  /** Why the radio could not start, in plain words. Empty when all is well. */
+  engineError = $state("");
   helpTopic = $state<string>("");
   private toastId = 0;
 
@@ -129,7 +146,7 @@ class AppState {
     if (this.link.state === "calling") {
       return {
         tone: "busy",
-        title: `Calling ${this.link.peer}`,
+        title: `Contacting ${this.link.peer}`,
         detail:
           this.link.of > 0
             ? `Try ${this.link.attempt} of ${this.link.of}. KAHF keeps trying by itself.`
@@ -157,7 +174,7 @@ class AppState {
     this.modes = await this.engine.modes();
     this.engine.onEvent((e) => this.handle(e));
     this.page = this.settings.setupDone && this.hasCall ? "home" : "welcome";
-    if (this.settings.setupDone) await this.engine.start(this.settings);
+    if (this.settings.setupDone) await this.startEngine();
     this.ready = true;
   }
 
@@ -180,9 +197,21 @@ class AppState {
   /** The end of setup: remember it and start the radio. */
   async finishSetup(patch: Partial<Settings>) {
     await this.saveSettings({ ...patch, setupDone: true });
-    await this.engine.start($state.snapshot(this.settings) as Settings);
+    const ok = await this.startEngine();
     this.page = "home";
-    this.toast("All set. KAHF is listening for stations.", "good");
+    if (ok) this.toast("All set. KAHF is listening for stations.", "good");
+  }
+
+  /** Starts the radio. Never throws: a problem becomes a sentence the person can act on. */
+  async startEngine(): Promise<boolean> {
+    try {
+      await this.engine.start($state.snapshot(this.settings) as Settings);
+      this.engineError = "";
+      return true;
+    } catch (e) {
+      this.engineError = explainStartError(String(e));
+      return false;
+    }
   }
 
   // ---- doing things ----------------------------------------------------------------------
@@ -251,6 +280,16 @@ class AppState {
   async setRelay(on: boolean, licence: boolean, terms: boolean) {
     await this.engine.setRelay(on, licence, terms);
     await this.saveSettings({ relay: on });
+    if (on) await this.shareOnMap();
+  }
+
+  /** Tell the person what the map now shows about them, in a sentence. */
+  async shareOnMap() {
+    try {
+      this.toast(await this.engine.shareOnMap(), "info");
+    } catch (e) {
+      this.toast(String(e), "warn");
+    }
   }
 
   markRead() {

@@ -24,7 +24,8 @@
   async function saveLocation() {
     if (!locOk) return;
     await app.saveSettings({ location: { ...loc, lat: loc.mode === "off" ? null : loc.lat, lon: loc.mode === "off" ? null : loc.lon } });
-    app.toast(loc.mode === "off" ? "You are not shared on the map." : "Location saved.", "good");
+    app.toast("Location saved.", "good");
+    await app.shareOnMap();
   }
   async function reset() {
     localStorage.clear();
@@ -68,7 +69,7 @@
       <div class="row">
         <div class="grow">
           <h3>Connect by itself</h3>
-          <p class="muted small">When you send a message, KAHF calls the station, sends it, and hangs up after it goes quiet.</p>
+          <p class="muted small">When you send a message, KAHF contacts the station, sends it, and hangs up after it goes quiet.</p>
         </div>
         <label class="switch">
           <input type="checkbox" checked={app.settings.autoLink} onchange={(e) => app.setAutoLink(e.currentTarget.checked)} aria-label="Connect by itself" />

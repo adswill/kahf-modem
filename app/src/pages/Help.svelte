@@ -61,7 +61,7 @@
         <ol>
           <li><strong>Leave KAHF listening</strong> for a few minutes. Stations that are on the air appear on the Home and Network pages.</li>
           <li>Open <button class="link" onclick={() => app.go("messages")}>Messages</button> and type the callsign of a station you heard.</li>
-          <li>Write a line and press <kbd>Enter</kbd>. KAHF calls them, sends it, and tells you what happened.</li>
+          <li>Write a line and press <kbd>Enter</kbd>. KAHF contacts them, sends it, and tells you what happened.</li>
         </ol>
         <div class="notice">
           <Icon name="info" />
@@ -144,6 +144,7 @@
       {:else}
         <h2>Glossary</h2>
         <dl>
+          <dt>Connect</dt><dd>Your station sends a short signal asking another station to answer. When it does, you are connected and messages go straight to it. KAHF does this for you when you press Send.</dd>
           <dt>Callsign</dt><dd>Your unique name on the air, issued with your amateur licence.</dd>
           <dt>Band</dt><dd>A range of radio frequencies, like 20 metres (14 MHz).</dd>
           <dt>Channel</dt><dd>A 2.7 kHz slice of a band. One KAHF message fits in one.</dd>

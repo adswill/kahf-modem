@@ -37,6 +37,13 @@
     <div class="shell">
       <Sidebar />
       <main class="main">
+        {#if app.engineError}
+          <div class="banner" role="alert">
+            <span>{app.engineError}</span>
+            <button class="btn small" onclick={() => app.startEngine()}>Try again</button>
+            <button class="btn small" onclick={() => app.go("radio")}>Open Radio</button>
+          </div>
+        {/if}
         {#if app.page === "home"}<Home />
         {:else if app.page === "messages"}<Messages />
         {:else if app.page === "network"}<Network />
@@ -60,5 +67,24 @@
     min-width: 0;
     height: 100%;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .main > :global(:not(.banner)) {
+    flex: 1;
+    min-height: 0;
+  }
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    background: var(--amber-soft);
+    color: var(--text);
+    border-bottom: 1px solid var(--amber);
+    font-size: 14px;
+  }
+  .banner span {
+    flex: 1;
   }
 </style>

@@ -125,7 +125,7 @@
           <p><strong>Not connected</strong></p>
           <p class="muted small">
             {app.settings.autoLink
-              ? "You do not need to connect. When you send a message, KAHF calls the other station by itself."
+              ? "You do not need to connect. When you send a message, KAHF contacts the other station by itself."
               : "Connect from the Network page, or turn on automatic connections in Settings."}
           </p>
         </div>

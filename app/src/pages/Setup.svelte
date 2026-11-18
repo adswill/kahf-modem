@@ -249,7 +249,7 @@
           <div class="row">
             <div class="grow">
               <h3>Connect by itself</h3>
-              <p class="muted small">When you write to someone, KAHF calls them, sends it, and hangs up. You never press Connect.</p>
+              <p class="muted small">When you write to someone, KAHF contacts them, sends it, and hangs up. You never press Connect.</p>
             </div>
             <label class="switch"><input type="checkbox" bind:checked={draft.autoLink} aria-label="Connect by itself" /><span></span></label>
           </div>

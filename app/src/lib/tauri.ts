@@ -56,6 +56,9 @@ export class TauriEngine implements Engine {
   setRelay(on: boolean, licenceHeld: boolean, termsAccepted: boolean) {
     return invoke<void>("engine_set_relay", { on, licenceHeld, termsAccepted });
   }
+  shareOnMap() {
+    return invoke<string>("map_share");
+  }
   listAudioDevices() {
     return invoke<string[]>("list_audio_devices");
   }

@@ -66,7 +66,7 @@
                     app.go("messages");
                   }}>Message</button
                 >
-                <button class="btn small ghost" disabled={app.settings.listenOnly} onclick={() => app.call(h.call)}>Call</button>
+                <button class="btn small ghost" disabled={app.settings.listenOnly} title="Ask this station to answer, to check that you can reach it" onclick={() => app.call(h.call)}>Connect</button>
               </td>
             </tr>
           {/each}
@@ -101,7 +101,7 @@
     <div class="card-title">
       <div>
         <h2>The map</h2>
-        <p class="muted small">Stations that choose to share their location appear on the public map at kahf.dev.</p>
+        <p class="muted small">Relays that choose to share appear on the public map at kahf.dev. Other stations will join them later.</p>
       </div>
       <button class="btn" onclick={openMap}>Open the map</button>
     </div>
@@ -110,9 +110,9 @@
       <span>
         {app.settings.location.mode === "off"
           ? "You are not on the map. This is the default. You can change it in Settings, under Location."
-          : app.settings.location.mode === "area"
-            ? "You are on the map as a circle. Your exact position is not shown."
-            : "You are on the map with your position shown to about 200 metres."}
+          : app.settings.relay
+            ? "Your relay is listed on the map by its one-degree square. Your exact position is not sent."
+            : "You chose to share. The map lists relays for now, so you appear on it once you turn on relay mode."}
       </span>
     </div>
   </section>
