@@ -100,7 +100,7 @@ test("system fonts only, a serif display face and a mono face for data", () => {
 });
 
 const MAP_LIB = /https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)/;
-const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TILES = 'window.location.origin + "/tiles/{z}/{x}/{y}.png"';
 
 test("the map is MapLibre with OpenStreetMap raster tiles and the pinned library", () => {
   const html = renderMap([STATION], NOW, [RELAY]);
@@ -134,7 +134,7 @@ test("the map script makes only the feed fetch and loads only the tiles it names
   const fetches = MAP_SCRIPT.match(/\bfetch\(/g) || [];
   assert.equal(fetches.length, 2, "the shared helper and the live poll");
   const urls = MAP_SCRIPT.match(/https?:\/\/[^\s"'`)]+/g) || [];
-  assert.deepEqual([...new Set(urls)], [TILES]);
+  assert.deepEqual([...new Set(urls)], [], "no external URL in the script");
 });
 
 test("the map page has its status line, the selected-node panel and the count", () => {
@@ -171,8 +171,9 @@ test("the strict CSP is still applied to both pages and the image", async () => 
   assert.match(home, /img-src 'self'/);
   assert.match(home, /connect-src 'self'/);
   assert.match(map, /script-src 'sha256-[^']+' https:\/\/unpkg\.com/);
-  assert.match(map, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
-  assert.match(map, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
+  assert.match(map, /connect-src 'self'; /);
+  assert.match(map, /img-src 'self' data: blob:;/);
+  assert.doesNotMatch(map, /tile\.openstreetmap/);
   assert.ok(home.includes(`script-src ${await homeScriptSha256()}`));
   assert.ok(map.includes(`script-src ${await mapScriptSha256()}`));
 });
