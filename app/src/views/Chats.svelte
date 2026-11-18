@@ -375,7 +375,6 @@
     background: none;
     border: 0;
     border-bottom: 1px solid var(--line);
-    border-left: 2px solid transparent;
     color: var(--text);
     font: inherit;
     padding: 9px 14px;
@@ -388,8 +387,8 @@
     background: var(--hover);
   }
   .person.on {
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .clip {
     overflow: hidden;

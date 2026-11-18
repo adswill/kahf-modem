@@ -33,14 +33,14 @@
 <style>
   .note {
     border: 1px solid var(--line-strong);
-    border-left: 3px solid var(--accent);
-    border-radius: 4px;
+    border-color: var(--accent);
+    border-radius: 6px;
     padding: 9px 12px;
     font-size: 13px;
     background: var(--panel-2);
   }
   .note.bad {
-    border-left-color: var(--bad, #d9534f);
+    border-color: var(--bad);
   }
   .line {
     margin: 0 0 4px;

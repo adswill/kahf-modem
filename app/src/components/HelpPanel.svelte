@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { modal } from "../lib/modal";
   import { app } from "../lib/state.svelte";
   import { MODE_TABLE } from "../lib/defaults";
   import Icon from "./Icon.svelte";
@@ -132,7 +133,7 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={close}></div>
-<div class="help" role="dialog" aria-label="Help">
+<div class="help" role="dialog" aria-label="Help" use:modal={{ onClose: close }}>
   <header class="row">
     <h1>Help</h1>
     <div class="spacer"></div>
@@ -180,8 +181,21 @@
     flex-direction: column;
   }
   header {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--line);
+    padding: 6px 8px 6px 14px;
+    background: linear-gradient(var(--title-top), var(--title-bot));
+    color: var(--title-ink);
+    border-radius: 0;
+  }
+  header :global(h2) {
+    color: inherit;
+    font-size: 13px;
+  }
+  header :global(.btn) {
+    color: var(--title-ink);
+  }
+  header :global(.btn:hover) {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.5);
   }
   .find {
     display: flex;
@@ -212,7 +226,6 @@
     text-align: left;
     background: none;
     border: 0;
-    border-left: 2px solid transparent;
     color: var(--muted);
     font: inherit;
     padding: 9px 14px;
@@ -224,8 +237,8 @@
   }
   nav button.on {
     color: var(--text);
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .pad {
     padding: 12px;

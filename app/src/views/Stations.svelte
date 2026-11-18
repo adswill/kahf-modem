@@ -87,13 +87,13 @@
   }
   th {
     text-align: left;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 12px;
+    color: var(--muted);
     font-weight: 600;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--line);
+    padding: 4px 8px;
+    background: linear-gradient(var(--bar-top), var(--bar-bot));
+    border: 1px solid var(--line);
+    border-width: 1px 1px 1px 0;
   }
   td {
     padding: 8px;

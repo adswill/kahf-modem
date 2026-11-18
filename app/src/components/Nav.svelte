@@ -2,43 +2,38 @@
   import { app, type Page } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
-  const items: { page: Page; label: string; icon: string }[] = [
-    { page: "chats", label: "Chats", icon: "message" },
-    { page: "mail", label: "Mail", icon: "mail" },
-    { page: "stations", label: "Stations", icon: "map" },
-    { page: "radio", label: "Radio", icon: "radio" },
-    { page: "relay", label: "Relay", icon: "relay" },
+  // Three places, not five: Chats and Mail live under Messages; Relay lives under Stations.
+  const items: { pages: Page[]; label: string; icon: string }[] = [
+    { pages: ["chats", "mail"], label: "Messages", icon: "message" },
+    { pages: ["stations", "relay"], label: "Stations", icon: "map" },
+    { pages: ["radio"], label: "Radio", icon: "radio" },
   ];
-  const count = (p: Page) => (p === "chats" ? app.unreadChats : p === "mail" ? app.unreadMail : 0);
+  const count = (pages: Page[]) => (pages.includes("chats") ? app.unreadChats + app.unreadMail : 0);
+  const here = (pages: Page[]) => pages.includes(app.page);
+  const open = (pages: Page[]) => app.go(here(pages) ? app.page : pages[0]);
 </script>
 
 <nav class="nav" aria-label="Sections" data-tour="nav">
   {#each items as it}
-    <button class="item" class:on={app.page === it.page} onclick={() => app.go(it.page)} data-tour={it.page}>
+    <button class="item" class:on={here(it.pages)} onclick={() => open(it.pages)} aria-current={here(it.pages) ? "page" : undefined} data-tour={it.pages[0]}>
       <Icon name={it.icon} size={16} />
       <span class="grow">{it.label}</span>
-      {#if count(it.page) > 0}<span class="n mono">{count(it.page)}</span>{/if}
-      {#if it.page === "relay" && app.relay.running}<span class="lamp good"></span>{/if}
+      {#if count(it.pages) > 0}<span class="n mono" aria-label="{count(it.pages)} unread">{count(it.pages)}</span>{/if}
+      {#if it.pages.includes("relay") && app.relay.running}<span class="lamp good"></span>{/if}
     </button>
   {/each}
-  <div class="spacer"></div>
-  <div class="who">
-    <div class="label">Station</div>
-    <div class="call">{app.settings.callsign || "listening only"}</div>
-    {#if app.engine.demo}<div class="demo small">Demo: pretend radio</div>{/if}
-  </div>
 </nav>
 
 <style>
   .nav {
-    width: 156px;
+    width: 150px;
     flex: none;
     border-right: 1px solid var(--line);
-    background: var(--panel);
-    padding: 10px 8px 12px;
+    background: var(--bg);
+    padding: 10px 8px 10px;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
   .item {
     display: flex;
@@ -46,38 +41,28 @@
     gap: 10px;
     padding: 8px 10px;
     background: none;
-    border: 0;
-    border-left: 2px solid transparent;
-    border-radius: 0 5px 5px 0;
-    color: var(--muted);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text);
     font: inherit;
-    font-weight: 550;
     cursor: pointer;
     text-align: left;
   }
   .item:hover {
-    color: var(--text);
     background: var(--hover);
   }
   .item.on {
-    color: var(--text);
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--sel);
+    color: var(--sel-ink);
+    border-color: var(--edge);
+    font-weight: 600;
   }
   .n {
-    background: var(--accent);
-    color: var(--accent-ink);
-    border-radius: 3px;
+    background: var(--alert);
+    color: #fff;
+    border-radius: 9px;
     font-size: 11px;
     font-weight: 700;
-    padding: 0 5px;
-  }
-  .who {
-    padding: 10px;
-    border-top: 1px solid var(--line);
-  }
-  .demo {
-    margin-top: 6px;
-    color: var(--accent);
+    padding: 0 6px;
   }
 </style>

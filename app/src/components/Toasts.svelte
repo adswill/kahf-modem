@@ -23,15 +23,15 @@
     padding: 9px 13px;
     background: var(--panel-2);
     border: 1px solid var(--line-strong);
-    border-left: 3px solid var(--info);
-    border-radius: 4px;
+    border-color: var(--info);
+    border-radius: 6px;
     box-shadow: var(--shadow);
     font-size: 13px;
   }
   .toast.good {
-    border-left-color: var(--good);
+    border-color: var(--good);
   }
   .toast.warn {
-    border-left-color: var(--accent);
+    border-color: var(--accent);
   }
 </style>

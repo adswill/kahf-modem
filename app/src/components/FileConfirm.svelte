@@ -2,12 +2,13 @@
   import { app, sizeWords } from "../lib/state.svelte";
   import FileNotice from "./FileNotice.svelte";
   import Icon from "./Icon.svelte";
+  import { modal } from "../lib/modal";
 </script>
 
 {#if app.pendingFiles}
   {@const p = app.pendingFiles}
   <div class="scrim" role="presentation" onclick={() => (app.pendingFiles = null)}></div>
-  <div class="dlg" role="dialog" aria-label="Send files">
+  <div class="dlg" role="dialog" aria-label="Send files" use:modal={{ onClose: () => (app.pendingFiles = null) }}>
     <h2>Send to {p.to}?</h2>
     <ul>
       {#each p.files as f}

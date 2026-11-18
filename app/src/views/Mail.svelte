@@ -153,11 +153,7 @@
         {/if}
       </article>
     {:else}
-      <div class="blank">
-        <Icon name="mail" size={30} />
-        <h2>Mail</h2>
-        <p class="muted">Pick a message on the left, or write a new one.</p>
-      </div>
+      <p class="blank muted">No message selected. Pick one on the left, or write a new one.</p>
     {/if}
   </section>
 </div>
@@ -166,7 +162,7 @@
   .mail {
     height: 100%;
     display: grid;
-    grid-template-columns: 180px 300px 1fr;
+    grid-template-columns: 150px 290px 1fr;
     min-height: 0;
   }
   .folders {
@@ -180,7 +176,6 @@
   .folder {
     background: none;
     border: 0;
-    border-left: 2px solid transparent;
     color: var(--muted);
     font: inherit;
     font-weight: 550;
@@ -196,8 +191,8 @@
   }
   .folder.on {
     color: var(--text);
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .n {
     background: var(--accent);
@@ -220,7 +215,6 @@
     background: none;
     border: 0;
     border-bottom: 1px solid var(--line);
-    border-left: 2px solid transparent;
     color: var(--text);
     font: inherit;
     padding: 9px 14px;
@@ -233,8 +227,8 @@
     background: var(--hover);
   }
   .item.on {
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .item.unread .subj {
     font-weight: 700;
@@ -268,12 +262,7 @@
     border-radius: 6px;
   }
   .blank {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--faint);
+    margin: 0;
+    padding: 14px 18px;
   }
 </style>

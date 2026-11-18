@@ -11,12 +11,12 @@
 
   const stops: Stop[] = [
     { page: "chats", target: "strip", title: "The radio strip", text: "Always on screen. The frequency, a signal meter, RX and TX lamps, and what the radio is doing right now in words." },
-    { page: "chats", target: "nav", title: "Five places", text: "Chats for quick messages, voice notes and files. Mail for longer messages. Stations for who is on the air and the map. Radio for the signal and your equipment. Relay for passing messages on." },
+    { page: "chats", target: "nav", title: "Three places", text: "Messages holds Chats for quick messages, voice notes and files, and Mail for longer ones. Stations shows who is on the air, the map and the relays. Radio is for the signal and your equipment." },
     { page: "chats", target: "to", title: "Who to write to", text: "Pick someone from the list, or type a callsign here. Stations KAHF hears appear on the left by themselves." },
     { page: "chats", target: "compose", title: "Just press Enter", text: "No connecting, no settings. KAHF reaches the station and tells you what happened. The paperclip sends a file and the microphone records a voice note." },
     { page: "radio", target: "spectrum", title: "The channel, live", text: "The shaded band is the one channel KAHF uses. Moving lines mean your radio is being heard." },
     { page: "radio", target: "speed", title: "Speed", text: "Automatic picks the fastest speed your signal can carry. You can leave it alone." },
-    { page: "relay", target: "nav", title: "Relays", text: "A relay passes messages on for stations that cannot hear each other. Choose the ones KAHF may use, or run one yourself." },
+    { page: "relay", target: "nav", title: "Relays", text: "Under Stations, Relays: a relay passes messages on for stations that cannot hear each other. Choose the ones KAHF may use, or run one yourself." },
     { page: "chats", target: "settings", title: "Settings", text: "Your callsign, the location you share with the map, and whether KAHF may transmit at all." },
     { page: "chats", target: "help", title: "Help is always here", text: "Searchable guides, troubleshooting and a glossary. You can take this tour again from there." },
   ];

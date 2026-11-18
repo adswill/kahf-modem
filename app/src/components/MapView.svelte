@@ -187,7 +187,7 @@
     border: 2px solid var(--bg);
   }
   .pin.station::after {
-    background: var(--info, #6aa9ff);
+    background: var(--info);
   }
   .pin.me span {
     color: var(--accent-ink);

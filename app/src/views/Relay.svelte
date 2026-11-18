@@ -58,9 +58,9 @@
         When a station does not answer, KAHF tries the relays you chose here, in order.
       </p>
       <div class="flow" aria-label="How a relay passes a message on">
-        <div><b class="call">You</b><span class="faint small">write</span></div>
-        <Icon name="arrow" /> <div class="rl"><b class="call">Relay</b><span class="faint small">passes it on</span></div>
-        <Icon name="arrow" /> <div><b class="call">Them</b><span class="faint small">receive</span></div>
+        <div><b>You</b><span class="faint small">write</span></div>
+        <Icon name="arrow" /> <div class="rl"><b>Relay</b><span class="faint small">passes it on</span></div>
+        <Icon name="arrow" /> <div><b>Them</b><span class="faint small">receive</span></div>
       </div>
 
       <div class="row">
@@ -207,13 +207,13 @@
   }
   th {
     text-align: left;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 12px;
+    color: var(--muted);
     font-weight: 600;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--line);
+    padding: 4px 8px;
+    background: linear-gradient(var(--bar-top), var(--bar-bot));
+    border: 1px solid var(--line);
+    border-width: 1px 1px 1px 0;
   }
   th.r,
   td.r {

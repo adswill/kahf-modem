@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { modal } from "../lib/modal";
   import { app, type SettingsTab } from "../lib/state.svelte";
   import { callProblem, normaliseCall, validCall } from "../lib/callsign";
   import { validLat, validLon } from "../lib/geo";
@@ -46,7 +47,7 @@
 </script>
 
 <div class="scrim" role="presentation" onclick={close}></div>
-<div class="sheet" role="dialog" aria-label="Settings">
+<div class="sheet" role="dialog" aria-label="Settings" use:modal={{ onClose: close }}>
   <header class="row">
     <h1>Settings</h1>
     <div class="spacer"></div>
@@ -151,8 +152,21 @@
     flex-direction: column;
   }
   header {
-    padding: 12px 18px;
-    border-bottom: 1px solid var(--line);
+    padding: 6px 8px 6px 14px;
+    background: linear-gradient(var(--title-top), var(--title-bot));
+    color: var(--title-ink);
+    border-radius: 8px 8px 0 0;
+  }
+  header :global(h2) {
+    color: inherit;
+    font-size: 13px;
+  }
+  header :global(.btn) {
+    color: var(--title-ink);
+  }
+  header :global(.btn:hover) {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.5);
   }
   .body {
     flex: 1;
@@ -170,11 +184,10 @@
     text-align: left;
     background: none;
     border: 0;
-    border-left: 2px solid transparent;
-    color: var(--muted);
+    border-left: 0;
+    color: var(--text);
     font: inherit;
-    font-weight: 550;
-    padding: 9px 16px;
+    padding: 8px 16px;
     cursor: pointer;
   }
   nav button:hover {
@@ -183,8 +196,9 @@
   }
   nav button.on {
     color: var(--text);
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+    background: var(--hover);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .pane {
     overflow: auto;

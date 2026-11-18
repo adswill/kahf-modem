@@ -60,7 +60,7 @@
 
 <main class="setup">
   <header class="row">
-    <span class="brand mono">KAHF</span>
+    <span class="brand">KAHF</span>
     <span class="muted">Set up</span>
     <div class="spacer"></div>
     <button class="btn quiet sm" onclick={() => app.go(app.settings.setupDone ? "chats" : "welcome")}>Cancel</button>
@@ -145,17 +145,35 @@
 
 <style>
   .setup {
-    height: 100%;
-    max-width: 780px;
-    margin: 0 auto;
-    padding: 18px 28px;
+    height: min(660px, calc(100% - 32px));
+    width: min(780px, calc(100% - 32px));
+    margin: 16px auto;
+    padding: 0 22px 14px;
     display: flex;
     flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .setup > header {
+    margin: 0 -22px;
+    padding: 6px 10px 6px 14px;
+    background: linear-gradient(var(--title-top), var(--title-bot));
+    color: var(--title-ink);
+  }
+  .setup > header :global(.muted),
+  .setup > header :global(.btn) {
+    color: var(--title-ink);
+  }
+  .setup > header :global(.btn:hover) {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.5);
   }
   .brand {
-    font-weight: 800;
-    letter-spacing: 0.3em;
-    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.2em;
   }
   .steps {
     list-style: none;

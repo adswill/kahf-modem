@@ -6,12 +6,10 @@
   import AudioPicker from "../components/AudioPicker.svelte";
   import RigPicker from "../components/RigPicker.svelte";
   import Tip from "../components/Tip.svelte";
+  import { BANDS } from "../lib/bands";
 
-  const BANDS = [
-    { khz: 14103, name: "20 m" },
-    { khz: 7103, name: "40 m" },
-    { khz: 3603, name: "80 m" },
-  ];
+  // The tabs below keep the long-standing order: 20 m first.
+  const BAND_TABS = [...BANDS].reverse();
 
   // The hardware choices are edited here and applied together, because the radio restarts.
   let kind = $state<"sound" | "sdr" | "none">(app.settings.sdr ? "sdr" : app.settings.audioIn || app.settings.audioOut ? "sound" : "sound");
@@ -70,7 +68,7 @@
       <div class="now row">
         <div>
           <div class="label">Using</div>
-          <div class="big mono">{current}</div>
+          <div class="big">{current}</div>
           {#if app.metrics}<div class="faint small">{speedWords(app.metrics.netBps)}</div>{/if}
         </div>
         <div>
@@ -107,7 +105,7 @@
       <h2>Frequency</h2>
       <div class="row" style="margin-top: 8px">
         <div class="tabs">
-          {#each BANDS as b}
+          {#each BAND_TABS as b}
             <button class:on={app.settings.freqKhz === b.khz} onclick={() => app.saveSettings({ freqKhz: b.khz })}>{b.name}</button>
           {/each}
         </div>
@@ -160,15 +158,36 @@
   .main,
   .side {
     overflow: auto;
-    padding: 20px 24px;
+    padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 14px;
   }
   .side {
-    border-left: 1px solid var(--line);
-    background: var(--panel);
+    border-left: 1px solid var(--line-strong);
     position: relative;
+  }
+  .main section,
+  .side section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  /* Side groups carry their caption on the frame, like a group box, instead of a heading inside. */
+  .side section {
+    position: relative;
+    padding-top: 20px;
+    margin-top: 4px;
+  }
+  .side section > h2:first-child {
+    position: absolute;
+    top: -10px;
+    left: 10px;
+    padding: 0 7px;
+    font-size: var(--fs-md);
+    background: var(--bg);
+    color: var(--text);
   }
   .head {
     margin-bottom: 10px;
@@ -187,13 +206,13 @@
   }
   th {
     text-align: left;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 12px;
+    color: var(--muted);
     font-weight: 600;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--line);
+    padding: 4px 8px;
+    background: linear-gradient(var(--bar-top), var(--bar-bot));
+    border: 1px solid var(--line);
+    border-width: 1px 1px 1px 0;
   }
   td {
     padding: 6px 8px;

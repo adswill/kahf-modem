@@ -124,10 +124,11 @@
 
     // Frequency axis.
     ctx.fillStyle = css("--faint");
-    ctx.font = "12px ui-monospace, Menlo, monospace";
+    ctx.font = "11px Consolas, Menlo, monospace";
     ctx.textBaseline = "top";
     const tuned = app.settings.freqKhz;
-    for (let hz = 0; hz <= 4000; hz += 500) {
+    const labelStep = w < 560 ? 1000 : 500;
+    for (let hz = 0; hz <= 4000; hz += labelStep) {
       const px = x(hz);
       ctx.textAlign = hz === 0 ? "left" : hz === 4000 ? "right" : "center";
       ctx.fillText((tuned + hz / 1000).toFixed(1), px, plotH + wfH + 6);
