@@ -17,6 +17,7 @@
   let call = $state(app.settings.callsign);
   let loc = $state({ ...app.settings.location });
   let mic = $state(app.settings.micIn);
+  let speaker = $state(app.settings.speakerOut);
   let devices = $state<string[]>([]);
   let confirmReset = $state(false);
 
@@ -90,6 +91,14 @@
             {#each devices as d}<option value={d}>{d}</option>{/each}
           </select>
           <span class="hint">Pick your headset or computer microphone, not the radio interface.</span>
+        </label>
+        <label class="field" style="max-width: 380px">
+          <span class="t">Speakers for voice notes</span>
+          <select bind:value={speaker} onchange={() => app.saveSettings({ speakerOut: speaker })}>
+            <option value="">Computer default</option>
+            {#each devices as d}<option value={d}>{d}</option>{/each}
+          </select>
+          <span class="hint">Voice notes play here. Not the radio interface, or you will send the sound back out on the air.</span>
         </label>
       {:else if app.settingsTab === "look"}
         <h2>Look</h2>

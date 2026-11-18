@@ -15,6 +15,9 @@
   let recSeconds = $state(0);
   let recTimer = 0;
   let playing = $state("");
+  let playStart = $state(0);
+  let playNow = $state(0);
+  let playTimer = 0;
 
   const peer = $derived(normaliseCall(to));
   const problem = $derived(callProblem(to));
@@ -106,18 +109,41 @@
     await app.cancelRecording();
   }
 
+  function stopPlaying() {
+    clearInterval(playTimer);
+    playing = "";
+  }
+
+  /** Plays or stops a voice note. The bubble shows it: the pause button and a sweep across the wave. */
   async function play(m: Msg) {
     if (!m.attachment) return;
-    playing = playing === m.id ? "" : m.id;
-    if (playing) {
-      try {
-        await app.engine.playVoice(m.attachment.path ?? "");
-      } catch (e) {
-        app.toast(`Could not play it: ${e}`, "warn");
-      }
-      window.setTimeout(() => (playing = playing === m.id ? "" : playing), (m.attachment.seconds ?? 5) * 1000);
+    if (playing === m.id) {
+      stopPlaying();
+      await app.engine.stopPlayback().catch(() => {});
+      return;
     }
+    if (!m.attachment.path) {
+      app.toast("This voice note is not saved on this computer, so it cannot be played.", "warn");
+      return;
+    }
+    stopPlaying();
+    try {
+      await app.engine.playVoice(m.attachment.path);
+    } catch (e) {
+      app.toast(`Could not play it: ${e}`, "warn");
+      return;
+    }
+    playing = m.id;
+    playStart = Date.now();
+    playNow = playStart;
+    const total = (m.attachment.seconds ?? 5) * 1000;
+    playTimer = window.setInterval(() => {
+      playNow = Date.now();
+      if (playNow - playStart >= total + 300) stopPlaying();
+    }, 80);
   }
+
+  const playFraction = (m: Msg) => (playing === m.id ? Math.min(1, (playNow - playStart) / Math.max(1, (m.attachment?.seconds ?? 5) * 1000)) : 0);
 
   const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 </script>
@@ -223,8 +249,8 @@
               <button class="btn icon sm" onclick={() => play(m)} aria-label={playing === m.id ? "Pause" : "Play"}>
                 <Icon name={playing === m.id ? "pause" : "play"} size={14} />
               </button>
-              <Wave seed={m.id} progress={playing === m.id ? 1 : 0} />
-              <span class="mono small">{mmss(m.attachment.seconds ?? 0)}</span>
+              <Wave seed={m.id} progress={playFraction(m)} />
+              <span class="mono small">{playing === m.id ? `${mmss((playNow - playStart) / 1000)} / ` : ""}{mmss(m.attachment.seconds ?? 0)}</span>
             </div>
           {:else if m.attachment}
             <div class="file">

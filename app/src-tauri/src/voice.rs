@@ -139,7 +139,8 @@ impl Voice {
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot save the voice note: {e}"))?;
         let id = format!("clip-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
         std::fs::write(dir.join(format!("{id}.kvm")), &data).map_err(|e| format!("Cannot save the voice note: {e}"))?;
-        Ok(Some(json!({ "id": id, "seconds": (samples.len() as f32 / 800.0).round() / 10.0, "bytes": data.len() })))
+        let path = dir.join(format!("{id}.kvm"));
+        Ok(Some(json!({ "id": id, "seconds": (samples.len() as f32 / 800.0).round() / 10.0, "bytes": data.len(), "path": path.to_string_lossy() })))
     }
 
     pub fn cancel(&self) {
@@ -156,6 +157,15 @@ impl Voice {
             Ok(p)
         } else {
             Err("That voice note is gone.".into())
+        }
+    }
+
+    /// Stops the note that is playing, if any.
+    pub fn stop_play(&self) {
+        if let Ok(g) = self.play_stop.lock() {
+            if let Some(f) = g.as_ref() {
+                f.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -196,6 +206,58 @@ mod tests {
         let back = decode(&data).unwrap();
         assert_eq!(back.len(), 16000);
         assert!(back.iter().any(|v| v.abs() > 0.05), "the decoded note is silent");
+    }
+
+    /// A voiced sound (a 140 Hz pulse train through a few resonances, rising and falling in loudness
+    /// like a spoken word) must come back with the same length and the same loudness shape.
+    #[test]
+    fn a_spoken_like_sound_keeps_its_length_and_its_loudness_shape() {
+        let n = 8000 * 3;
+        let mut speech = vec![0f32; n];
+        for (i, s) in speech.iter_mut().enumerate() {
+            let t = i as f32 / 8000.0;
+            let env = ((t * std::f32::consts::PI / 1.5).sin()).abs();
+            let mut v = 0.0;
+            for h in 1..=20 {
+                let f = 140.0 * h as f32;
+                let res = 1.0 / (1.0 + ((f - 700.0) / 300.0).powi(2)) + 0.6 / (1.0 + ((f - 1800.0) / 400.0).powi(2));
+                v += res * (2.0 * std::f32::consts::PI * f * t).sin() / h as f32;
+            }
+            *s = 0.5 * env * v;
+        }
+        let data = encode(&speech);
+        // Three seconds are 75 frames of six bytes: 450 bytes, a few kilobytes on the air in a minute.
+        assert_eq!(data.len(), 4 + 75 * 6);
+        let back = decode(&data).unwrap();
+        assert_eq!(back.len(), n);
+        let frame = 320;
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let a: Vec<f32> = speech.chunks(frame).map(rms).collect();
+        let b: Vec<f32> = back.chunks(frame).map(rms).collect();
+        let (ma, mb) = (a.iter().sum::<f32>() / a.len() as f32, b.iter().sum::<f32>() / b.len() as f32);
+        let cov: f32 = a.iter().zip(&b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let va: f32 = a.iter().map(|x| (x - ma).powi(2)).sum();
+        let vb: f32 = b.iter().map(|y| (y - mb).powi(2)).sum();
+        let corr = cov / (va * vb).sqrt();
+        assert!(corr > 0.8, "the loudness shape is lost: correlation {corr}");
+        assert!(mb > 0.02, "the decoded note is nearly silent: {mb}");
+    }
+
+    /// What a recording does on disk and what the receiver does with the bytes.
+    #[test]
+    fn a_note_saved_to_disk_reads_back_the_same_and_plays_after_the_receiver_decodes_it() {
+        let dir = std::env::temp_dir().join(format!("kahf-voice-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone: Vec<f32> = (0..16000).map(|i| 0.3 * (i as f32 * 0.09).sin()).collect();
+        let path = dir.join("clip-1.kvm");
+        std::fs::write(&path, encode(&tone)).unwrap();
+        let sent = std::fs::read(&path).unwrap();
+        // Across the air a file arrives byte for byte; the receiver decodes the same bytes.
+        let heard = decode(&sent).unwrap();
+        assert_eq!(heard.len(), 16000);
+        assert_eq!(Voice::clip_path(&dir.join(".."), "x").is_err(), true);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

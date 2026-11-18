@@ -373,7 +373,13 @@ fn voice_cancel(state: State<Shared>) {
 
 #[tauri::command]
 fn voice_play(state: State<Shared>, path: String) -> Res<()> {
-    state.voice.play(std::path::Path::new(&path), None)
+    let speaker = settings::load(&state.data_dir)["speakerOut"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(String::from);
+    state.voice.play(std::path::Path::new(&path), speaker)
+}
+
+#[tauri::command]
+fn voice_stop_play(state: State<Shared>) {
+    state.voice.stop_play();
 }
 
 #[tauri::command]
@@ -538,6 +544,7 @@ pub fn run() {
             voice_stop,
             voice_cancel,
             voice_play,
+            voice_stop_play,
             voice_send,
             relay_status,
             relay_directory,

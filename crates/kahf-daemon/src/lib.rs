@@ -764,6 +764,9 @@ pub fn transmit_modulation(&self) -> &'static str {
         if let Some(why) = tx_refusal(&self.shared.flags) {
             return Err(why.into());
         }
+        if msgs.iter().any(|m| dest_of(m).trim().eq_ignore_ascii_case(&self.config.callsign)) {
+            return Err("That is your own callsign. Choose the station you want to reach.".into());
+        }
         let ids: Vec<u64> = msgs
             .iter()
             .map(|_| self.ids.fetch_add(1, Ordering::Relaxed))
@@ -1338,6 +1341,8 @@ fn burst_len_for(m: Modulation, n: usize) -> usize {
 const BURST_MAX: usize = 8;
 const ID_MODE_MASK: u8 = 0x1F;
 
+/// How long after a transmission the sound card may still be handing back our own signal.
+const ECHO_TAIL: Duration = Duration::from_millis(400);
 /// Default transmit audio level: half of full scale (minus 6 dB).
 const DEFAULT_TX_LEVEL_PCT: u8 = 50;
 /// The test tone: a steady 1 kHz sine, long enough to set the radio's drive by its ALC meter.
@@ -1794,6 +1799,9 @@ struct Worker {
     last_activity: Instant,
     /// Digests of messages already forwarded for others, so one is never forwarded twice.
     forwarded: VecDeque<u64>,
+    /// Audio that arrives until this time is our own transmission coming back (a virtual cable, a
+    /// leaky rig, the sound card's delay) and is thrown away unread.
+    rx_deaf_until: Option<Instant>,
     /// Who may transmit when: listen before talk, back-off, fair share (see `kahf_core::mac`).
     mac: Mac,
     /// A received burst is being tracked, so its end is reported to `mac`.
@@ -1948,6 +1956,7 @@ impl Worker {
             auto_initiated: false,
             last_activity: Instant::now(),
             forwarded: VecDeque::new(),
+            rx_deaf_until: None,
             mac: Mac::new(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)),
             rx_locked: false,
             adverts_seen: VecDeque::new(),
@@ -3212,6 +3221,13 @@ impl Worker {
 
     /// After a burst, the receive side starts clean: our own signal is not decoded.
     fn end_rx_gap(&mut self) {
+        // Everything captured while we were sending is our own signal: take it off the sound
+        // card unread, and keep discarding for a moment, because the sound card delays it.
+        if let Some(be) = self.backend.as_mut() {
+            let mut sink = Vec::new();
+            let _ = be.read_audio(&mut sink);
+        }
+        self.rx_deaf_until = Some(Instant::now() + ECHO_TAIL);
         self.rx_buf.clear();
         self.since_scan = 0;
         // A burst being waited for pointed into the audio just thrown away.
@@ -3228,6 +3244,13 @@ impl Worker {
     fn rx_step(&mut self) -> usize {
         if self.rx_retry_at.is_some_and(|t| Instant::now() < t) {
             return 0;
+        }
+        if self.rx_deaf_until.is_some_and(|t| Instant::now() < t) {
+            let mut sink = Vec::new();
+            if let Some(be) = self.backend.as_mut() {
+                let _ = be.read_audio(&mut sink);
+            }
+            return sink.len();
         }
         let mut fresh = Vec::new();
         let read = match self.backend.as_mut() {
@@ -3475,12 +3498,17 @@ impl Worker {
         match guard("session decode", || session::decode_signed(&self.rx_chunks)) {
             Ok(Some(signed)) => {
                 self.rx_chunks.clear();
+                // Our own message coming back (a cable, a leaky rig, someone repeating it) is not
+                // news: never show it, never forward it.
+                if sender_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
+                    self.log("Ignored a message of ours heard back on the air.");
+                    return;
+                }
                 let for_me = dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign);
                 if !for_me {
+                    // A relay passes it on. Nobody else shows it: a message belongs in the inbox
+                    // of the station it was written to, not of everyone who happens to hear it.
                     self.forward_third_party(&signed.message, signed.private);
-                }
-                // A private message is for its addressee's inbox only; other stations drop it.
-                if signed.private && !for_me {
                     return;
                 }
                 self.on_message(signed.message);
@@ -3614,6 +3642,101 @@ mod tests {
         fn tx_stop(&mut self) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    /// One shared channel for several stations: whatever one sends, every station hears, and so
+    /// does the sender itself (a virtual audio cable does exactly this).
+    struct Bus {
+        queues: Vec<Pipe>,
+    }
+
+    struct BusRadio {
+        me: usize,
+        bus: Arc<Bus>,
+    }
+
+    impl Backend for BusRadio {
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            out.extend(self.bus.queues[self.me].lock().unwrap().drain(..));
+            Ok(())
+        }
+
+        fn tx_start(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            for q in &self.bus.queues {
+                q.lock().unwrap().extend(samples[start..end].iter().copied());
+            }
+            Ok(())
+        }
+
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `calls.len()` engines on one bus, all listening, with automatic linking on.
+    fn bus_engines(tag: &str, calls: &[&str]) -> Vec<Engine> {
+        let bus = Arc::new(Bus { queues: calls.iter().map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect() });
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| {
+                let b = bus.clone();
+                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { me: i, bus: b.clone() }) as Box<dyn Backend>));
+                let mut e = Engine::spawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap();
+                e.listen().unwrap();
+                e.set_auto_link(true);
+                e.set_fixed_mode("KAMI-1c").unwrap();
+                e
+            })
+            .collect()
+    }
+
+    /// Runs the engines until `done` says so or `secs` pass, collecting every chat received:
+    /// `(receiver index, sender, text)`.
+    fn run_bus(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[(usize, String, String)]) -> bool) -> Vec<(usize, String, String)> {
+        let mut got: Vec<(usize, String, String)> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    if std::env::var_os("KAHF_TRACE").is_some() && !matches!(ev, Event::Spectrum(_) | Event::Metrics(_)) {
+                        eprintln!("[{:6.1}s] st{i}: {ev:?}", (Instant::now() + Duration::from_secs(secs)).duration_since(deadline).as_secs_f32());
+                    }
+                    if let Event::Message { from, text } = ev {
+                        got.push((i, from, text));
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        got
+    }
+
+    #[test]
+    fn one_message_over_an_echoing_channel_arrives_once() {
+        let mut e = bus_engines("echo-one", &["AA1AAA", "BB1BBB"]);
+        e[0].send_message("BB1BBB", "hello").unwrap();
+        let got = run_bus(&mut e, 120, |g| !g.is_empty());
+        assert_eq!(got, vec![(1, "AA1AAA".to_string(), "hello".to_string())]);
+    }
+
+    #[test]
+    fn several_messages_each_way_all_arrive_once_in_order_and_none_from_self() {
+        let mut e = bus_engines("echo-a", &["AA1AAA", "BB1BBB"]);
+        for i in 0..4 {
+            e[0].send_message("BB1BBB", &format!("a{i}")).unwrap();
+            e[1].send_message("AA1AAA", &format!("b{i}")).unwrap();
+        }
+        let got = run_bus(&mut e, 240, |g| g.len() >= 8);
+        let texts = |who: usize| got.iter().filter(|(i, _, _)| *i == who).map(|(_, f, t)| (f.clone(), t.clone())).collect::<Vec<_>>();
+        let want_b: Vec<(String, String)> = (0..4).map(|i| ("AA1AAA".to_string(), format!("a{i}"))).collect();
+        let want_a: Vec<(String, String)> = (0..4).map(|i| ("BB1BBB".to_string(), format!("b{i}"))).collect();
+        assert_eq!(texts(1), want_b, "what BB1BBB received");
+        assert_eq!(texts(0), want_a, "what AA1AAA received");
     }
 
     /// Output that takes 30 ms to accept each write, like a busy sound card.

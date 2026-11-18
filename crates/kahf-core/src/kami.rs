@@ -55,6 +55,13 @@ pub fn id_for(wb: usize) -> u8 {
     }
 }
 
+/// Shapes with `wb` at or above this carry training chips in their pilot slots. 9 means none:
+/// tracking works in the simulator (3 here) but broke the daemon end-to-end tests, so it is off
+/// until that is understood.
+const TRACK_MIN_WB: usize = 9;
+/// Training chips in one pilot group, at least.
+const TRAIN_MIN_CHIPS: usize = 64;
+
 /// Chips per second.
 pub const CHIP_RATE: f64 = 2000.0;
 /// Audio samples per chip.
@@ -226,6 +233,21 @@ impl Shape {
             p
         }
     }
+    /// Slots in one pilot group. Slow modes (long bursts, which outlast an HF channel) carry
+    /// known training chips in their pilot slots, at least `TRAIN_MIN_CHIPS` of them, so the
+    /// receiver can follow the channel through the burst. Fast modes keep the single all-ones
+    /// pilot slot.
+    pub const fn pilot_group(self) -> usize {
+        if self.wb >= TRACK_MIN_WB {
+            TRAIN_MIN_CHIPS.div_ceil(self.slot_chips())
+        } else {
+            1
+        }
+    }
+    /// True when the pilot slots carry training chips.
+    pub const fn tracked(self) -> bool {
+        self.wb >= TRACK_MIN_WB
+    }
     /// Raw coded bits per second while sending data slots.
     pub fn raw_bps(self) -> f64 {
         self.slot_bits() as f64 / self.chips() as f64 * CHIP_RATE
@@ -275,10 +297,10 @@ fn n_syms(n_bits: usize, sh: Shape) -> usize {
 }
 
 /// Total slots (pilots plus data) for `nsym` data symbols.
-fn n_slots(nsym: usize, pe: usize) -> usize {
+fn n_slots(nsym: usize, pe: usize, g: usize) -> usize {
     let (mut slot, mut count) = (0, 0);
     while count < nsym {
-        if slot % pe != 0 {
+        if slot % pe >= g {
             count += 1;
         }
         slot += 1;
@@ -292,7 +314,18 @@ fn n_data_slots(n_bits: usize, sh: Shape) -> usize {
 }
 
 fn n_chips(n_bits: usize, sh: Shape) -> usize {
-    sh.pre_chips() + n_slots(n_data_slots(n_bits, sh), sh.pilot_every()) * sh.slot_chips()
+    sh.pre_chips() + n_slots(n_data_slots(n_bits, sh), sh.pilot_every(), sh.pilot_group()) * sh.slot_chips()
+}
+
+/// The chips of one pilot group: all ones for the fast modes, a piece of the preamble's
+/// m-sequence (flat autocorrelation, so it measures the channel) for the tracked ones.
+fn train_pattern(sh: Shape) -> Vec<f64> {
+    let n = sh.pilot_group() * sh.slot_chips();
+    if sh.tracked() {
+        preamble().into_iter().take(n).collect()
+    } else {
+        vec![1.0; n]
+    }
 }
 
 /// Audio samples a frame of `n_bits` coded bits occupies for a plain Walsh size of `wb` bits.
@@ -436,9 +469,12 @@ pub fn modulate_frame_shape(coded: &[u8], sh: Shape) -> Vec<f32> {
     let mut cq = vec![0.0; sh.pre_chips()];
     let bit = |i: usize| coded.get(i).map_or(0, |b| (b & 1) as usize);
     let (mut done, mut slot, mut sym_i) = (0usize, 0usize, 0usize);
+    let g = sh.pilot_group();
+    let train = train_pattern(sh);
     while done < nd {
-        if slot % pe == 0 {
-            ci.extend(std::iter::repeat_n(1.0, sc));
+        if slot % pe < g {
+            let at = (slot % pe) * sc;
+            ci.extend((0..sc).map(|t| train[at + t]));
             cq.extend(std::iter::repeat_n(0.0, sc));
         } else {
             for _ in 0..sh.syms_per_slot() {
@@ -641,54 +677,93 @@ const EQ_POST: isize = 8;
 /// Equalizer reach either side of the centre, in chips.
 const EQ_HALF: isize = 8;
 
-/// Undo the echoes of a multipath channel (HF has them: 0.5 to 2 ms is ordinary, and one chip is
-/// 0.5 ms) before the Walsh correlation, which needs the chips of a slot to arrive unmixed.
-///
-/// The preamble is a known +-1 sequence with a flat autocorrelation, so correlating the received
-/// preamble with it at each delay gives the channel's impulse response, one complex tap per chip
-/// delay. From that a short linear MMSE equalizer is solved and run over the whole frame.
-/// Taps that cannot be told from the estimate's own noise are dropped; with only the main path
-/// left (any channel without echoes) the chips are returned untouched, so a plain noise channel
-/// behaves exactly as before.
+/// One known stretch of the frame: where it starts (in chips) and the +-1 chips sent there.
+struct Training {
+    start: usize,
+    pattern: Vec<f64>,
+}
+
+/// Fits a linear MMSE equalizer from one known stretch `r[t.start..]` of the received chips.
+/// The stretch is a +-1 sequence with a flat autocorrelation, so correlating what arrived with it
+/// at each delay gives the channel's impulse response, one complex tap per chip delay. `None`
+/// when the channel shows no echo worth undoing (any plain noise channel): the caller then leaves
+/// the chips alone, so such a channel behaves exactly as without an equalizer.
 #[allow(clippy::needless_range_loop)]
-fn equalise(r: &mut [C], pn: &[f64]) {
-    let p = pn.len();
-    if r.len() < p + 32 || p < 64 {
-        return;
+fn fit_equaliser(r: &[C], t: &Training) -> Option<Vec<C>> {
+    let p = t.pattern.len();
+    let pn = &t.pattern;
+    let margin = EQ_POST.max(EQ_PRE);
+    if (p as isize) < 4 * margin || t.start + p > r.len() {
+        return None;
     }
-    let at = |k: isize| -> Option<C> { (k >= 0 && (k as usize) < r.len()).then(|| r[k as usize]) };
-    // Channel taps h[d], d in -EQ_PRE..=EQ_POST: r[k] = sum_d h[d] p[k-d] + noise.
-    let n_taps = (EQ_PRE + EQ_POST + 1) as usize;
-    let mut h = vec![(0.0f64, 0.0f64); n_taps];
-    let span = (p as isize) - EQ_POST.max(EQ_PRE) - 1;
-    for (i, d) in (-EQ_PRE..=EQ_POST).enumerate() {
-        let (mut re, mut im) = (0.0f64, 0.0f64);
-        let mut cnt = 0.0f64;
-        for k in EQ_PRE.max(0)..span {
-            if let Some(v) = at(k + d) {
-                re += v.0 * pn[k as usize];
-                im += v.1 * pn[k as usize];
-                cnt += 1.0;
+    // Work on a copy of the stretch. A little frequency error left over from the preamble turns
+    // the phase during the stretch (a slow mode's stretch is a quarter of a second long), which
+    // spreads the correlation over other delays and looks like echoes; it is measured and taken
+    // out first.
+    let mut win: Vec<C> = r[t.start..t.start + p].to_vec();
+    let (k0, k1) = (margin, p as isize - margin);
+    let taps_of = |win: &[C]| -> Vec<C> {
+        let n_taps = (EQ_PRE + EQ_POST + 1) as usize;
+        let mut h = vec![(0.0f64, 0.0f64); n_taps];
+        for (i, d) in (-EQ_PRE..=EQ_POST).enumerate() {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            let mut cnt = 0.0f64;
+            for k in k0..k1 {
+                let j = k + d;
+                if j >= 0 && (j as usize) < win.len() {
+                    let v = win[j as usize];
+                    re += v.0 * pn[k as usize];
+                    im += v.1 * pn[k as usize];
+                    cnt += 1.0;
+                }
+            }
+            h[i] = (re / cnt.max(1.0), im / cnt.max(1.0));
+        }
+        h
+    };
+    let mut h = taps_of(&win);
+    let main = h.iter().enumerate().max_by(|a, b| (a.1 .0.hypot(a.1 .1)).total_cmp(&b.1 .0.hypot(b.1 .1))).map_or(0, |(i, _)| i);
+    let d0 = main as isize - EQ_PRE;
+    let mid = (k0 + k1) / 2;
+    let half = |from: isize, to: isize| -> C {
+        let (mut re, mut im) = (0.0, 0.0);
+        for k in from..to {
+            let j = (k + d0) as usize;
+            if j < win.len() {
+                re += win[j].0 * pn[k as usize];
+                im += win[j].1 * pn[k as usize];
             }
         }
-        h[i] = (re / cnt.max(1.0), im / cnt.max(1.0));
+        (re, im)
+    };
+    let (c1, c2) = (half(k0, mid), half(mid, k1));
+    let sep = (k1 - k0) as f64 / 2.0;
+    let omega = (c2.1 * c1.0 - c2.0 * c1.1).atan2(c2.0 * c1.0 + c2.1 * c1.1) / sep;
+    if omega.abs() * (p as f64) > 0.1 {
+        let centre = p as f64 / 2.0;
+        for (k, v) in win.iter_mut().enumerate() {
+            let th = -omega * (k as f64 - centre);
+            *v = cmul(*v, (th.cos(), th.sin()));
+        }
+        h = taps_of(&win);
     }
-    // Noise in the estimate: what the preamble leaves after the main taps are removed.
+    let at = |k: isize| -> Option<C> { (k >= 0 && (k as usize) < win.len()).then(|| win[k as usize]) };
     let (mut peak_i, mut peak_m) = (0usize, 0.0f64);
-    for (i, t) in h.iter().enumerate() {
-        let m = t.0 * t.0 + t.1 * t.1;
+    for (i, tap) in h.iter().enumerate() {
+        let m = tap.0 * tap.0 + tap.1 * tap.1;
         if m > peak_m {
             peak_m = m;
             peak_i = i;
         }
     }
     if peak_m <= 0.0 {
-        return;
+        return None;
     }
+    // Noise in the estimate: what the stretch leaves after the taps are removed.
     let mut resid = 0.0f64;
     let mut cnt = 0.0f64;
-    for k in (EQ_POST.max(EQ_PRE))..span {
-        let mut e = r[k as usize];
+    for k in k0..k1 {
+        let Some(mut e) = at(k) else { continue };
         for (i, d) in (-EQ_PRE..=EQ_POST).enumerate() {
             let kk = k - d;
             if kk >= 0 && (kk as usize) < p {
@@ -700,20 +775,22 @@ fn equalise(r: &mut [C], pn: &[f64]) {
         cnt += 1.0;
     }
     let sigma2 = if cnt > 0.0 { resid / cnt } else { 0.0 };
-    // Each tap's own estimation noise is about sigma2 / p; keep taps well above it.
-    let floor = 9.0 * sigma2 / p as f64;
+    // Each tap's own estimation noise is about sigma2 / n; a cut of an m-sequence also leaves
+    // sidelobes of about 1 / p in power at the other delays. An echo must clearly exceed both.
+    let n_eff = (k1 - k0).max(1) as f64;
+    // 20 times: with a dozen taps in each of fifty stretches a lower bar (9 times) lets a noise
+    // tap through now and then, and one false echo skews the filter at that stretch.
+    let floor = 20.0 * sigma2 / n_eff;
     let mut kept = 0;
-    for (i, t) in h.iter_mut().enumerate() {
-        // The preamble is a cut of an m-sequence, so even a clean channel leaves sidelobes of
-        // about 1 / p in power at the other delays: an echo must clearly exceed that.
-        if i != peak_i && t.0 * t.0 + t.1 * t.1 < floor.max(6.0 / p as f64 * peak_m) {
-            *t = (0.0, 0.0);
+    for (i, tap) in h.iter_mut().enumerate() {
+        if i != peak_i && tap.0 * tap.0 + tap.1 * tap.1 < floor.max(6.0 / p as f64 * peak_m) {
+            *tap = (0.0, 0.0);
         } else if i != peak_i {
             kept += 1;
         }
     }
     if kept == 0 {
-        return;
+        return None;
     }
     // Linear MMSE equalizer w[m], m in -EQ_HALF..=EQ_HALF, so that sum_m w[m] h[j-m] ~ delta[j].
     let nw = (2 * EQ_HALF + 1) as usize;
@@ -761,36 +838,66 @@ fn equalise(r: &mut [C], pn: &[f64]) {
         let d = a[col][col];
         let dn = d.0 * d.0 + d.1 * d.1;
         if dn < 1e-18 {
-            return;
+            return None;
         }
         for row in 0..nw {
             if row != col {
                 let f = cmul(a[row][col], (d.0 / dn, -d.1 / dn));
                 for c in col..=nw {
-                    let t = cmul(f, a[col][c]);
-                    a[row][c] = (a[row][c].0 - t.0, a[row][c].1 - t.1);
+                    let tt = cmul(f, a[col][c]);
+                    a[row][c] = (a[row][c].0 - tt.0, a[row][c].1 - tt.1);
                 }
             }
         }
     }
-    let w: Vec<C> = (0..nw)
-        .map(|i| {
-            let d = a[i][i];
-            let dn = d.0 * d.0 + d.1 * d.1;
-            cmul(a[i][nw], (d.0 / dn, -d.1 / dn))
-        })
-        .collect();
+    Some(
+        (0..nw)
+            .map(|i| {
+                let d = a[i][i];
+                let dn = d.0 * d.0 + d.1 * d.1;
+                cmul(a[i][nw], (d.0 / dn, -d.1 / dn))
+            })
+            .collect(),
+    )
+}
+
+/// Undo the echoes of a multipath channel (HF has them: 0.5 to 2 ms is ordinary, and one chip is
+/// 0.5 ms) before the Walsh correlation, which needs the chips of a slot to arrive unmixed, and
+/// follow the channel as it changes. An equalizer is fitted at the preamble and at every
+/// training stretch of the frame; between two of them the filter is blended linearly with chip
+/// position. A stretch that shows no echo counts as a plain pass-through, and when none shows
+/// one the chips are returned untouched.
+fn equalise(r: &mut [C], stretches: &[Training]) {
+    let fits: Vec<(f64, Option<Vec<C>>)> =
+        stretches.iter().map(|t| (t.start as f64 + t.pattern.len() as f64 / 2.0, fit_equaliser(r, t))).collect();
+    if fits.iter().all(|(_, w)| w.is_none()) {
+        return;
+    }
+    let nw = (2 * EQ_HALF + 1) as usize;
+    let identity: Vec<C> = (0..nw).map(|i| if i as isize == EQ_HALF { (1.0, 0.0) } else { (0.0, 0.0) }).collect();
+    let taps: Vec<&Vec<C>> = fits.iter().map(|(_, w)| w.as_ref().unwrap_or(&identity)).collect();
     let src = r.to_vec();
+    let mut seg = 0usize;
     for (k, out) in r.iter_mut().enumerate() {
+        let kf = k as f64;
+        while seg + 1 < fits.len() && fits[seg + 1].0 <= kf {
+            seg += 1;
+        }
+        let (w0, w1, t) = if seg + 1 >= fits.len() || kf <= fits[seg].0 {
+            (taps[seg.min(taps.len() - 1)], taps[seg.min(taps.len() - 1)], 0.0)
+        } else {
+            (taps[seg], taps[seg + 1], (kf - fits[seg].0) / (fits[seg + 1].0 - fits[seg].0))
+        };
         let (mut re, mut im) = (0.0, 0.0);
-        for (i, wi) in w.iter().enumerate() {
-            let m = i as isize - EQ_HALF;
-            let idx = k as isize - m;
-            if idx >= 0 && (idx as usize) < src.len() {
-                let v = cmul(*wi, src[idx as usize]);
-                re += v.0;
-                im += v.1;
+        for i in 0..nw {
+            let idx = k as isize - (i as isize - EQ_HALF);
+            if idx < 0 || idx as usize >= src.len() {
+                continue;
             }
+            let w = ((1.0 - t) * w0[i].0 + t * w1[i].0, (1.0 - t) * w0[i].1 + t * w1[i].1);
+            let v = cmul(w, src[idx as usize]);
+            re += v.0;
+            im += v.1;
         }
         *out = (re, im);
     }
@@ -846,27 +953,41 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
         let th = -2.0 * PI * fbest.1 * k as f64 / CHIP_RATE;
         *v = cmul(*v, (th.cos(), th.sin()));
     }
-    equalise(&mut r, pn);
     let sc = sh.slot_chips();
     let pre = sh.pre_chips();
-    let block = |slot: usize| &r[pre + slot * sc..pre + (slot + 1) * sc];
-
-    // Pilots: phase and amplitude per pilot slot.
     let nsym = n_syms(n_bits, sh);
     let pe = sh.pilot_every();
-    let slots = n_slots(n_data_slots(n_bits, sh), pe);
+    let g = sh.pilot_group();
+    let slots = n_slots(n_data_slots(n_bits, sh), pe, g);
+    let train = train_pattern(sh);
+    // Equalizer: from the preamble, and for the slow modes from every training stretch too.
+    let mut stretches = vec![Training { start: 0, pattern: pn.to_vec() }];
+    if sh.tracked() {
+        for s0 in (0..slots).step_by(pe) {
+            if pre + (s0 + g) * sc <= r.len() {
+                stretches.push(Training { start: pre + s0 * sc, pattern: train.clone() });
+            }
+        }
+    }
+    equalise(&mut r, &stretches);
+    let block = |slot: usize| &r[pre + slot * sc..pre + (slot + 1) * sc];
+
+    // Pilots: phase and amplitude per pilot group (known chips, so correlate with them).
     let mut pil_slots = Vec::new();
     let mut pil_phase: Vec<f64> = Vec::new();
     let mut pil_amp: Vec<f64> = Vec::new();
     for s in (0..slots).step_by(pe) {
         let (mut re, mut im) = (0.0, 0.0);
-        for v in block(s) {
-            re += v.0;
-            im += v.1;
+        for (i, slot) in (s..s + g).enumerate() {
+            for (t, v) in block(slot).iter().enumerate() {
+                let pt = train[i * sc + t];
+                re += v.0 * pt;
+                im += v.1 * pt;
+            }
         }
-        pil_slots.push(s as f64);
+        pil_slots.push(s as f64 + (g as f64 - 1.0) / 2.0);
         pil_phase.push(im.atan2(re));
-        pil_amp.push((re * re + im * im).sqrt() / sc as f64);
+        pil_amp.push((re * re + im * im).sqrt() / (g * sc) as f64);
     }
     for i in 1..pil_phase.len() {
         while pil_phase[i] - pil_phase[i - 1] > PI {
@@ -896,10 +1017,14 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
     for (i, &ps) in pil_slots.iter().enumerate() {
         let (c, sn) = ((-pil_phase[i]).cos(), (-pil_phase[i]).sin());
         let amp = pil_amp[i].max(1e-9);
-        for v in block(ps as usize) {
-            let im = (v.0 * sn + v.1 * c) / amp;
-            q += im * im;
-            qn += 1;
+        let first = (ps - (g as f64 - 1.0) / 2.0).round() as usize;
+        for (gi, slot) in (first..first + g).enumerate() {
+            for (t, v) in block(slot).iter().enumerate() {
+                let pt = train[gi * sc + t];
+                let im = (v.0 * pt * sn + v.1 * pt * c) / amp;
+                q += im * im;
+                qn += 1;
+            }
         }
     }
     let sigma2 = if qn > 0 { (q / qn as f64).max(1e-4) } else { 1.0 };
@@ -908,7 +1033,7 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
     let syms: Vec<(usize, f64)> =
         (0..nvals).map(|v| (v >> sh.lb, gray_amp(v & ((1 << sh.lb) - 1), sh.lb))).collect();
     let mut llr = Vec::with_capacity(nsym * sh.slot_bits());
-    for s in (0..slots).filter(|s| s % pe != 0) {
+    for s in (0..slots).filter(|s| s % pe >= g) {
         let ph = interp(&pil_phase, s as f64);
         let amp = interp(&pil_amp, s as f64).max(1e-9);
         let (c, sn) = ((-ph).cos(), (-ph).sin());
@@ -1100,6 +1225,28 @@ mod tests {
         let llr = demodulate_frame_shape(&pad(&tx, 77), coded.len(), SHAPE_8H).expect("8H not found");
         let hard: Vec<u8> = llr.iter().map(|&l| u8::from(l < 0.0)).collect();
         assert_eq!(hard, coded);
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_matrix() {
+        let mut rng = Rng(777);
+        for (wb, snr) in [(2usize, 14.0), (5, 6.0), (8, 0.0), (5, -6.0), (8, -12.0)] {
+            for (f, &hz) in [-40.0f64, 7.7, 25.0, 55.0].iter().enumerate() {
+                let sh = Shape::walsh(wb);
+                let d = data(f);
+                let coded = ldpc::encode(&frame::build_payload_as(&d, id_for(wb)));
+                let tx = modulate_frame_shape(&coded, sh);
+                let sigma = noise_rms(&tx, snr);
+                let mut rx = shift(&pad(&tx, 50 + f * 23), hz);
+                for v in rx.iter_mut() {
+                    *v += (sigma * rng.gauss()) as f32;
+                }
+                let llr = demodulate_frame_shape(&rx, coded.len(), sh);
+                let ok = llr.and_then(|l| ldpc::decode(&l, 50)).and_then(|b| frame::parse_payload_id(&b)) == Some((d, id_for(wb)));
+                println!("wb {wb} snr {snr} hz {hz}: {}", if ok { "ok" } else { "FAIL" });
+            }
+        }
     }
 
     #[test]

@@ -86,6 +86,8 @@ export interface VoiceClip {
   seconds: number;
   /** Size once compressed, in bytes. */
   bytes: number;
+  /** Where the note is saved on this computer, so it can be played back. */
+  path?: string;
 }
 
 export interface RelayHop {
@@ -166,6 +168,8 @@ export interface Settings {
   rig: { model: number | null; name: string; port: string; baud: number };
   /** Where voice notes are recorded: a sound device name, empty for the computer's microphone. */
   micIn: string;
+  /** Speakers for playing voice notes. Empty: the system's default output. */
+  speakerOut: string;
   /** Tuned frequency in kHz. */
   freqKhz: number;
   /** Transmit audio level, percent of full scale. Lower is safer for everyone on the channel. */
@@ -226,6 +230,7 @@ export interface Engine {
   stopVoice(): Promise<VoiceClip | null>;
   cancelVoice(): Promise<void>;
   playVoice(path: string): Promise<void>;
+  stopPlayback(): Promise<void>;
   sendVoice(id: string, to: string, clip: VoiceClip): Promise<void>;
   relayStatus(): Promise<RelayStatus>;
   /** Relays this station knows, nearest first. `refresh` asks the server (needs the internet). */

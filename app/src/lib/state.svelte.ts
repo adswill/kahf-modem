@@ -309,7 +309,7 @@ class AppState {
     const peer = normaliseCall(to);
     if (!peer || callProblem(peer) || !this.canSend()) return;
     const id = this.newId();
-    const attachment: Attachment = { kind: "voice", name: "Voice note", size: clip.bytes, seconds: clip.seconds, done: 0 };
+    const attachment: Attachment = { kind: "voice", name: "Voice note", size: clip.bytes, seconds: clip.seconds, path: clip.path, done: 0 };
     this.addOut({ id, peer, dir: "out", text: "", at: Date.now(), kind: "chat", state: "queued", read: true, attachment });
     try {
       await this.engine.sendVoice(id, peer, clip);
@@ -526,7 +526,7 @@ class AppState {
             {
               id: `in-file-${Date.now()}-${this.messages.length}`, peer: e.from, dir: "in", text: "", at: Date.now(), kind: "chat",
               read: this.page === "chats",
-              attachment: { kind: voice ? "voice" : "file", name: voice ? "Voice note" : e.name, size: e.total, path: e.path, done: e.total },
+              attachment: { kind: voice ? "voice" : "file", name: voice ? "Voice note" : e.name, size: e.total, path: e.path, done: e.total, ...(voice ? { seconds: Math.max(1, Math.round(((e.total - 4) / 150) * 10) / 10) } : {}) },
             },
           ];
           this.persistMessages();

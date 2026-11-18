@@ -248,6 +248,8 @@ export class MockEngine implements Engine {
 
   async playVoice(_path: string): Promise<void> {}
 
+  async stopPlayback(): Promise<void> {}
+
   async sendVoice(id: string, to: string, clip: VoiceClip): Promise<void> {
     this.sendAs(id, to, 4000, clip.bytes);
   }

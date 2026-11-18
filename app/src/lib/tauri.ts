@@ -82,6 +82,9 @@ export class TauriEngine implements Engine {
   cancelVoice() {
     return invoke<void>("voice_cancel");
   }
+  stopPlayback() {
+    return invoke<void>("voice_stop_play");
+  }
   playVoice(path: string) {
     return invoke<void>("voice_play", { path });
   }

@@ -16,6 +16,7 @@ export const defaultSettings = (): Settings => ({
   relayHints: [],
   rig: { model: null, name: "", port: "", baud: 19200 },
   micIn: "",
+  speakerOut: "",
   freqKhz: 14103,
   txLevel: 50,
   setupDone: false,
