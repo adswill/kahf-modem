@@ -25,6 +25,8 @@ use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 mod backbone;
 mod clock;
+#[allow(dead_code)]
+mod push;
 pub use clock::Clock;
 use backbone::{Backbone, BbHandle, BbJob, BbResult, Queued};
 use kahf_core::mac::{Class, Mac};
