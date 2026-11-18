@@ -35,7 +35,8 @@ export function clock(ms: number): string {
 }
 
 export function mhz(khz: number): string {
-  return `${(khz / 1000).toFixed(3)} MHz`;
+  // 17 m dials have up to two decimals of kHz (10 Hz steps): show them all.
+  return `${(khz / 1000).toFixed(5)} MHz`;
 }
 
 /** What a mode name means in a sentence. */

@@ -6,10 +6,10 @@
   import AudioPicker from "../components/AudioPicker.svelte";
   import RigPicker from "../components/RigPicker.svelte";
   import Tip from "../components/Tip.svelte";
-  import { BANDS } from "../lib/bands";
+  import { BANDS, roleWords } from "../lib/bands";
 
-  // The tabs below keep the long-standing order: 20 m first.
-  const BAND_TABS = [...BANDS].reverse();
+  // 17 m only: the 12 lanes, lowest frequency first.
+  const BAND_TABS = BANDS;
 
   // The hardware choices are edited here and applied together, because the radio restarts.
   let kind = $state<"sound" | "sdr" | "none">(app.settings.sdr ? "sdr" : app.settings.audioIn || app.settings.audioOut ? "sound" : "sound");
@@ -106,12 +106,12 @@
       <div class="row" style="margin-top: 8px">
         <div class="tabs">
           {#each BAND_TABS as b}
-            <button class:on={app.settings.freqKhz === b.khz} onclick={() => app.saveSettings({ freqKhz: b.khz })}>{b.name}</button>
+            <button class:on={Math.abs(app.settings.freqKhz - b.khz) < 0.001} title="{roleWords(b.role)} {b.name}" onclick={() => app.saveSettings({ freqKhz: b.khz })}>{b.name}</button>
           {/each}
         </div>
         <span class="mono">{mhz(app.settings.freqKhz)}</span>
       </div>
-      <p class="faint small" style="margin-top: 6px">Everyone meets on the same frequency. Change it only if your group agreed on another.</p>
+      <p class="faint small" style="margin-top: 6px">KAHF uses 17 metres only (18.111 to 18.120 MHz), in 12 narrow lanes. C1 and C2 are where operators call. R1 to R8 are the relay lanes. X1 and X2 are spare. The frequency shown is the radio's USB dial setting, not the lane centre. Stay on C1 unless your group agreed on another lane.</p>
     </section>
 
     <section>

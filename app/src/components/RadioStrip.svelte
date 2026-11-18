@@ -2,13 +2,15 @@
   // The front panel: always on screen, so the person always knows what the radio is doing.
   // The dial in the middle is the one place to change channel without leaving the screen.
   import { app } from "../lib/state.svelte";
-  import { BANDS, bandIndex } from "../lib/bands";
+  import { BANDS, bandIndex, roleWords } from "../lib/bands";
   import Icon from "./Icon.svelte";
 
   const khz = $derived(app.settings.freqKhz);
   const current = $derived(bandIndex(khz));
-  const whole = $derived(Math.floor(khz / 1000));
-  const frac = $derived(String(khz % 1000).padStart(3, "0"));
+  // The dial reads in whole hertz: 18.11344 MHz. Lane dials are multiples of 10 Hz, so five decimals say it all.
+  const hz = $derived(Math.round(khz * 1000));
+  const whole = $derived(Math.floor(hz / 1_000_000));
+  const frac = $derived(String(hz % 1_000_000).padStart(6, "0").slice(0, 5));
   // Digits of the readout, each its own rolling column. The tens place stays blank below 10 MHz.
   const digits = $derived([Math.floor(whole / 10), whole % 10, ...frac.split("").map(Number)]);
   const bars = 16;
@@ -18,7 +20,7 @@
   let preview = $state<number | null>(null);
   let ruler = $state<HTMLElement | null>(null);
   const locked = $derived(app.transmitting);
-  const needle = $derived(preview ?? (current >= 0 ? current : 1));
+  const needle = $derived(preview ?? (current >= 0 ? current : 5));
 
   function indexAt(clientX: number): number {
     if (!ruler) return needle;
@@ -47,7 +49,7 @@
     app.saveSettings({ freqKhz: BANDS[i].khz });
   }
   function key(e: KeyboardEvent) {
-    const at = current >= 0 ? current : 1;
+    const at = current >= 0 ? current : 5;
     if (e.key === "ArrowLeft" || e.key === "ArrowDown") tune(at - 1);
     else if (e.key === "ArrowRight" || e.key === "ArrowUp") tune(at + 1);
     else return;
@@ -57,7 +59,7 @@
   function wheel(e: WheelEvent) {
     if (document.activeElement !== e.currentTarget) return;
     e.preventDefault();
-    tune((current >= 0 ? current : 1) + (e.deltaY + e.deltaX > 0 ? 1 : -1));
+    tune((current >= 0 ? current : 5) + (e.deltaY + e.deltaX > 0 ? 1 : -1));
   }
 </script>
 
@@ -78,11 +80,11 @@
       bind:this={ruler}
       role="slider"
       tabindex="0"
-      aria-label="Channel"
+      aria-label="17 m lane"
       aria-valuemin={0}
       aria-valuemax={BANDS.length - 1}
       aria-valuenow={needle}
-      aria-valuetext={BANDS[needle].name}
+      aria-valuetext="17 m lane {BANDS[needle].name}"
       aria-disabled={locked}
       title={locked ? "The radio is sending. Wait before changing channel." : "Drag, click or use the arrow keys to change channel"}
       onpointerdown={down}
@@ -94,7 +96,7 @@
       onwheel={wheel}
     >
       {#each BANDS as b, i}
-        <span class="tick" class:on={i === needle}><i></i><b>{b.name}</b></span>
+        <span class="tick" class:on={i === needle} title="17 m {roleWords(b.role)} {b.name}"><i></i><b>{b.name}</b></span>
       {/each}
       <span class="needle" style:--at={needle} class:drag={preview !== null}></span>
     </div>
@@ -204,7 +206,7 @@
   .ruler {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(12, 1fr);
     padding-top: 6px;
     border-top: 1px solid var(--line);
     cursor: ew-resize;
@@ -221,7 +223,7 @@
     align-items: center;
     gap: 1px;
     color: var(--faint);
-    font-size: 11px;
+    font-size: 10px;
     line-height: 1.1;
   }
   .tick i {
@@ -233,12 +235,12 @@
     color: var(--text);
     font-weight: 600;
   }
-  /* One third of the ruler wide, so it can slide by whole cells; the mark is its centre line. */
+  /* One lane of 12 wide, so it can slide by whole cells; the mark is its centre line. */
   .needle {
     position: absolute;
     top: 0;
     left: 0;
-    width: 33.3333%;
+    width: 8.3333%;
     height: 11px;
     display: flex;
     justify-content: center;

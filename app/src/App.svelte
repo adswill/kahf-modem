@@ -105,7 +105,7 @@
       <footer class="statusbar">
         <span class="cell grow">{app.status.title}</span>
         <span class="cell">Station <b class="call">{app.settings.callsign || "listening only"}</b></span>
-        <span class="cell mono">{(app.settings.freqKhz / 1000).toFixed(3)} MHz</span>
+        <span class="cell mono">{(app.settings.freqKhz / 1000).toFixed(5)} MHz</span>
         {#if app.engine.demo}<span class="cell demo">Demo: pretend radio</span>{/if}
       </footer>
     </div>

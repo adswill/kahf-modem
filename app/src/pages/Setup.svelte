@@ -8,6 +8,7 @@
   import LocationEditor from "../components/LocationEditor.svelte";
   import Spectrum from "../components/Spectrum.svelte";
   import Icon from "../components/Icon.svelte";
+  import { DEFAULT_LANE } from "../lib/bands";
 
   // A copy of the settings that only becomes real when the person finishes.
   let draft = $state({ ...app.settings, location: { ...app.settings.location }, rig: { ...app.settings.rig } });
@@ -17,11 +18,8 @@
   let previewing = $state(false);
 
   const STEPS = ["You", "Radio", "Channel", "Place", "Ready"];
-  const BANDS = [
-    { khz: 14103, name: "20 metres", note: "Most active. Best by day, reaches across continents." },
-    { khz: 7103, name: "40 metres", note: "Good in the evening and at night, medium distances." },
-    { khz: 3603, name: "80 metres", note: "Night-time and short distances, such as inside one country." },
-  ];
+  // 17 m only. A new station starts on lane C1, the first calling lane, where operators listen.
+  const LANE = DEFAULT_LANE;
 
   const call = $derived(normaliseCall(draft.callsign));
   const callMsg = $derived(callProblem(draft.callsign));
@@ -106,13 +104,11 @@
       <RigPicker bind:value={draft.rig} />
     {:else if step === 2}
       <h1>Where do you listen?</h1>
-      <p class="muted">KAHF stations meet on one frequency, like a meeting place. You can change it any time.</p>
-      {#each BANDS as b}
-        <button class="pick" class:on={draft.freqKhz === b.khz} onclick={() => (draft.freqKhz = b.khz)}>
-          <span class="dot"></span>
-          <span><b>{b.name} <span class="mono faint">{(b.khz / 1000).toFixed(3)} MHz</span></b><span class="s">{b.note}</span></span>
-        </button>
-      {/each}
+      <p class="muted">KAHF uses one band, 17 metres (18.111 to 18.120 MHz). You can change lane later on the Radio screen.</p>
+      <button class="pick on" onclick={() => (draft.freqKhz = LANE.khz)}>
+        <span class="dot"></span>
+        <span><b>17 metres, lane {LANE.name} <span class="mono faint">{(LANE.khz / 1000).toFixed(5)} MHz</span></b><span class="s">Set your radio's dial (USB) to this frequency. Best by day over long distances, roughly 1000 to 4000 km, and mostly closed at night.</span></span>
+      </button>
     {:else if step === 3}
       <h1>Do you want to be on the map?</h1>
       <p class="muted">The public map at kahf.dev shows stations that choose to share where they are. <b>It is off unless you turn it on.</b></p>
@@ -124,7 +120,7 @@
         <dt>Callsign</dt><dd class="call">{haveLicence ? call : "listening only"}</dd>
         <dt>Sound</dt><dd>{kind === "sound" ? "Sound card" : kind === "sdr" ? "SDR receiver" : "none yet"}</dd>
         <dt>Radio control</dt><dd>{draft.rig.model !== null ? draft.rig.name : "off"}</dd>
-        <dt>Frequency</dt><dd class="mono">{(draft.freqKhz / 1000).toFixed(3)} MHz</dd>
+        <dt>Frequency</dt><dd class="mono">{(draft.freqKhz / 1000).toFixed(5)} MHz, 17 m</dd>
         <dt>Map</dt><dd>{draft.location.mode === "off" ? "not shared" : draft.location.mode === "area" ? "a circle" : "exact position"}</dd>
       </dl>
       <div class="row opt"><div class="grow"><h3>Connect by itself</h3><p class="muted small">When you send, KAHF reaches the station, sends it and hangs up.</p></div>

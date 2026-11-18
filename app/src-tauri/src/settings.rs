@@ -43,13 +43,30 @@ pub fn shared_position(v: &Value) -> Option<(f64, f64)> {
 /// Callsign used when the person only listens: the engine needs some valid name.
 const LISTEN_ONLY_CALL: &str = "NOCALL1";
 
+/// KAHF is 17 m only. A new station starts on lane C1 (dial 18113.44 kHz).
+pub const DEFAULT_LANE_KHZ: f64 = 18_113.44;
+
+/// A saved frequency that is a 17 m lane dial stays; anything else (a 20, 40 or 80 m setting
+/// from an older version, or none) becomes lane C1.
+pub fn lane_khz(saved: Option<f64>) -> f64 {
+    let lanes = kahf_core::lanes::BandTable::builtin_r1();
+    let ok = |khz: f64| {
+        lanes.bands[0].lanes.iter().any(|l| (l.dial_hz as f64 / 1000.0 - khz).abs() < 0.001)
+    };
+    match saved {
+        Some(k) if ok(k) => k,
+        _ => DEFAULT_LANE_KHZ,
+    }
+}
+
 pub struct EngineSettings {
     call: String,
     audio_in: String,
     audio_out: String,
     rig: String,
     sdr: String,
-    pub freq_khz: u64,
+    /// The radio's USB dial in kHz, on 17 m (a 17 m lane; see kahf-core `lanes`).
+    pub freq_khz: f64,
     /// Transmit audio level, percent of full scale.
     pub tx_level: u8,
     pub listen_only: bool,
@@ -70,7 +87,7 @@ impl EngineSettings {
             audio_out: text("audioOut"),
             rig: text("rigctld"),
             sdr: text("sdr"),
-            freq_khz: v.get("freqKhz").and_then(Value::as_u64).unwrap_or(14_103),
+            freq_khz: lane_khz(v.get("freqKhz").and_then(Value::as_f64)),
             tx_level: v.get("txLevel").and_then(Value::as_u64).unwrap_or(50).clamp(5, 100) as u8,
             listen_only: flag("listenOnly", false),
             auto_link: flag("autoLink", true),
@@ -112,14 +129,14 @@ impl EngineSettings {
         (!self.rig.is_empty()).then(|| self.rig.clone())
     }
 
-    /// "hackrf@14103000" or "rtlsdr@14103000" for the receiver the person chose, if any.
+    /// "hackrf@18113440" or "rtlsdr@18113440" for the receiver the person chose, if any.
     pub fn sdr_spec(&self) -> Option<String> {
         let driver = match self.sdr.to_lowercase().as_str() {
             s if s.starts_with("hackrf") => "hackrf",
             s if s.starts_with("rtl") => "rtlsdr",
             _ => return None,
         };
-        Some(format!("{driver}@{}", self.freq_khz * 1000))
+        Some(format!("{driver}@{}", (self.freq_khz * 1000.0).round() as u64))
     }
 }
 
@@ -131,13 +148,13 @@ mod tests {
     #[test]
     fn reads_the_fields_the_engine_needs() {
         let s = EngineSettings::from_json(&json!({
-            "callsign": " ka1abc ", "audioIn": "USB Audio", "sdr": "HackRF", "freqKhz": 7103,
+            "callsign": " ka1abc ", "audioIn": "USB Audio", "sdr": "HackRF", "freqKhz": 18110.64,
             "listenOnly": true, "autoLink": false, "autoMode": false, "fixedMode": "KAMI-64"
         }));
         assert_eq!(s.callsign(), "KA1ABC");
         assert_eq!(s.audio_in().as_deref(), Some("USB Audio"));
         assert_eq!(s.audio_out(), None);
-        assert_eq!(s.sdr_spec().as_deref(), Some("hackrf@7103000"));
+        assert_eq!(s.sdr_spec().as_deref(), Some("hackrf@18110640"));
         assert!(s.listen_only && !s.auto_link && !s.auto_mode);
         assert_eq!(s.fixed_mode, "KAMI-64");
     }
@@ -156,7 +173,7 @@ mod tests {
         let s = EngineSettings::from_json(&json!({}));
         assert_eq!(s.callsign(), "NOCALL1");
         assert!(s.auto_link && s.auto_mode && !s.listen_only);
-        assert_eq!(s.freq_khz, 14_103);
+        assert_eq!(s.freq_khz, DEFAULT_LANE_KHZ);
         assert_eq!(s.sdr_spec(), None);
     }
 
@@ -180,5 +197,18 @@ mod tests {
         assert_eq!(shared_position(&v("precise")), Some((25.2, 55.27)));
         assert_eq!(shared_position(&serde_json::json!({})), None);
         assert_eq!(shared_position(&serde_json::json!({ "location": { "mode": "precise", "lat": null, "lon": null } })), None);
+    }
+
+    #[test]
+    fn only_17_m_lane_dials_are_kept_and_old_bands_become_lane_c1() {
+        for old in [14_103.0, 7_103.0, 3_603.0] {
+            assert_eq!(lane_khz(Some(old)), DEFAULT_LANE_KHZ);
+        }
+        assert_eq!(lane_khz(None), DEFAULT_LANE_KHZ);
+        assert_eq!(lane_khz(Some(18_110.64)), 18_110.64);
+        // The lane centre is not a dial: it is not kept.
+        assert_eq!(lane_khz(Some(18_111.44)), DEFAULT_LANE_KHZ);
+        let s = EngineSettings::from_json(&json!({ "freqKhz": 14103 }));
+        assert_eq!(s.freq_khz, DEFAULT_LANE_KHZ);
     }
 }

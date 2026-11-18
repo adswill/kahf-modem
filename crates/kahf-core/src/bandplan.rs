@@ -311,26 +311,19 @@ pub struct Segment {
     pub upper_hz: u64,
 }
 
-/// Segments KAHF uses by default, IARU Region 1, ascending order.
+/// The segment KAHF uses: 17 m only, 18.111 to 18.120 MHz (IARU Region 1: "all modes, digimodes,
+/// automatically controlled data stations", 2700 Hz). Read from the IARU Region 1 HF band plan
+/// effective 16 Oct 2020; the engine still refuses to transmit by it until the owner marks the
+/// table verified (see `lanes.rs`).
 ///
-/// SOURCE NOTE: these values come from the 2002-era IARU Region 1 band plan text.
-/// The owner must confirm them against the current IARU Region 1 document before release.
-///
-/// Left out on purpose:
-/// - 14.070 to 14.100 MHz (digital beacons) and 14.230 MHz (SSTV and FAX calling).
-/// - 30 m: its only digital segment is 500 Hz wide, too narrow for KAHF's 2.4 kHz signal.
-pub static KAHF_SEGMENTS: &[Segment] = &[
-    Segment {
-        name: "40 m, 7.040 to 7.045 MHz",
-        lower_hz: 7_040_000,
-        upper_hz: 7_045_000,
-    },
-    Segment {
-        name: "20 m, 14.101 to 14.112 MHz",
-        lower_hz: 14_101_000,
-        upper_hz: 14_112_000,
-    },
-];
+/// Left out on purpose: 18.109 to 18.111 MHz (International Beacon Project) and everything below
+/// 18.111 MHz (FT8, FT4, WSPR and narrow digimodes). The 12 narrow lanes inside this segment are
+/// in `lanes.rs`.
+pub static KAHF_SEGMENTS: &[Segment] = &[Segment {
+    name: "17 m, 18.111 to 18.120 MHz",
+    lower_hz: 18_111_000,
+    upper_hz: 18_120_000,
+}];
 
 /// Name of the KAHF segment that holds the whole channel, or `None`.
 ///
@@ -353,8 +346,8 @@ pub fn tuning_warning(centre_hz: u64, width_hz: u64) -> Option<String> {
     match allowed_segment(centre_hz, width_hz) {
         Some(_) => None,
         None => Some(
-            "This tuning is outside the planned KAHF segments (14.101 to 14.112 MHz and \
-             7.040 to 7.045 MHz). Check the band plan before you transmit."
+            "This tuning is outside the KAHF segment (17 m, 18.111 to 18.120 MHz). \
+             Check the band plan before you transmit."
                 .to_string(),
         ),
     }
@@ -425,45 +418,44 @@ mod tests {
         assert_eq!(check(52_500_000, Region::Region2), Check::InBand { band: "6m" });
     }
 
-    const N20: &str = "20 m, 14.101 to 14.112 MHz";
-    const N40: &str = "40 m, 7.040 to 7.045 MHz";
+    const N17: &str = "17 m, 18.111 to 18.120 MHz";
 
     #[test]
-    fn segment_20m_lower_edge_inclusive() {
-        // Centre 14_102_350 with 2.7 kHz width: lower edge is exactly 14_101_000.
-        assert_eq!(allowed_segment(14_102_350, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
-        assert_eq!(allowed_segment(14_102_349, KAHF_CHANNEL_WIDTH_HZ), None);
+    fn segment_17m_lower_edge_inclusive() {
+        // Centre 18_112_350 with 2.7 kHz width: lower edge is exactly 18_111_000.
+        assert_eq!(allowed_segment(18_112_350, KAHF_CHANNEL_WIDTH_HZ), Some(N17));
+        assert_eq!(allowed_segment(18_112_349, KAHF_CHANNEL_WIDTH_HZ), None);
     }
 
     #[test]
-    fn segment_20m_upper_edge_inclusive() {
-        // Centre 14_110_650: upper edge is exactly 14_112_000.
-        assert_eq!(allowed_segment(14_110_650, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
-        assert_eq!(allowed_segment(14_110_651, KAHF_CHANNEL_WIDTH_HZ), None);
+    fn segment_17m_upper_edge_inclusive() {
+        // Centre 18_118_650: upper edge is exactly 18_120_000.
+        assert_eq!(allowed_segment(18_118_650, KAHF_CHANNEL_WIDTH_HZ), Some(N17));
+        assert_eq!(allowed_segment(18_118_651, KAHF_CHANNEL_WIDTH_HZ), None);
     }
 
     #[test]
-    fn segment_40m_edges() {
-        assert_eq!(allowed_segment(7_041_350, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
-        assert_eq!(allowed_segment(7_041_349, KAHF_CHANNEL_WIDTH_HZ), None);
-        assert_eq!(allowed_segment(7_043_650, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
-        assert_eq!(allowed_segment(7_043_651, KAHF_CHANNEL_WIDTH_HZ), None);
+    fn old_20m_and_40m_segments_are_gone() {
+        assert_eq!(allowed_segment(14_105_050, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(allowed_segment(7_041_350, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(KAHF_SEGMENTS.len(), 1);
     }
 
     #[test]
     fn channel_must_fit_fully_not_just_its_centre() {
-        // Centre inside 20 m but the lower half of the channel is below 14.101 MHz.
-        assert_eq!(allowed_segment(14_101_500, KAHF_CHANNEL_WIDTH_HZ), None);
+        // Centre inside 17 m but the lower half of the channel is below 18.111 MHz.
+        assert_eq!(allowed_segment(18_111_500, KAHF_CHANNEL_WIDTH_HZ), None);
         // Centre inside the segment, width larger than the segment is not allowed.
-        assert_eq!(allowed_segment(14_106_000, 12_000), None);
+        assert_eq!(allowed_segment(18_115_000, 12_000), None);
     }
 
     #[test]
     fn beacons_sstv_and_30m_are_not_allowed() {
-        assert_eq!(allowed_segment(14_085_000, KAHF_CHANNEL_WIDTH_HZ), None); // beacons
+        assert_eq!(allowed_segment(18_110_000, 480), None); // IBP beacons, 18.109 to 18.111
+        assert_eq!(allowed_segment(18_103_000, 480), None); // FT8
+        assert_eq!(allowed_segment(18_130_000, 480), None); // SSB QRP, above the data segment
         assert_eq!(allowed_segment(14_230_000, KAHF_CHANNEL_WIDTH_HZ), None); // SSTV and FAX
         assert_eq!(allowed_segment(10_120_000, KAHF_CHANNEL_WIDTH_HZ), None); // 30 m
-        assert_eq!(allowed_segment(14_200_000, KAHF_CHANNEL_WIDTH_HZ), None);
     }
 
     #[test]
@@ -474,9 +466,9 @@ mod tests {
 
     #[test]
     fn tuning_warning_is_only_a_warning() {
-        assert_eq!(tuning_warning(14_105_050, KAHF_CHANNEL_WIDTH_HZ), None);
-        let w = tuning_warning(14_230_000, KAHF_CHANNEL_WIDTH_HZ).expect("warning expected");
-        assert!(w.contains("outside the planned"));
+        assert_eq!(tuning_warning(18_115_050, KAHF_CHANNEL_WIDTH_HZ), None);
+        let w = tuning_warning(14_105_050, KAHF_CHANNEL_WIDTH_HZ).expect("warning expected");
+        assert!(w.contains("outside the KAHF segment"));
         assert!(!w.contains("refused"));
     }
 }

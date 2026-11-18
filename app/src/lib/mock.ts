@@ -86,7 +86,7 @@ export class MockEngine implements Engine {
       }),
     );
     this.later(30000, () =>
-      this.emit({ type: "message", from: "KA1ABC", text: "Welcome to the network! Good to hear you on 20 metres.", at: Date.now() }),
+      this.emit({ type: "message", from: "KA1ABC", text: "Welcome to the network! Good to hear you on 17 metres.", at: Date.now() }),
     );
   }
 

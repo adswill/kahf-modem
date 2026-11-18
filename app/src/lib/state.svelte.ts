@@ -3,6 +3,7 @@
 
 import { callProblem, normaliseCall, validCall } from "./callsign";
 import { defaultSettings } from "./defaults";
+import { laneKhzOrDefault } from "./bands";
 import { FILE_LIMIT_BYTES } from "./format";
 import { makeEngine } from "./engine";
 import type {
@@ -163,6 +164,8 @@ class AppState {
 
   async init() {
     this.settings = await this.engine.loadSettings();
+    // KAHF is 17 m only: a frequency saved by an older version (20, 40 or 80 m) becomes lane C1.
+    this.settings.freqKhz = laneKhzOrDefault(this.settings.freqKhz);
     this.messages = load<Msg[]>(MSG_STORE, []);
     this.mail = load<MailItem[]>(MAIL_STORE, []);
     this.heard = load<Heard[]>(HEARD_STORE, []);

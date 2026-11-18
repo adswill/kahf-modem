@@ -82,7 +82,7 @@ describe("words for people", () => {
     expect(timeAgo(0, 30_000)).toBe("30 seconds ago");
     expect(timeAgo(0, 90_000)).toBe("2 minutes ago");
     expect(timeAgo(0, 3_600_000)).toBe("1 hour ago");
-    expect(mhz(14103)).toBe("14.103 MHz");
+    expect(mhz(18113.44)).toBe("18.11344 MHz");
     expect(modeExplained("KAMI-1d")).toMatch(/Fastest/);
   });
 });

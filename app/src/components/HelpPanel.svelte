@@ -61,7 +61,7 @@
       id: "channel",
       title: "Channels and the band",
       body: [
-        "The band is a stretch of frequencies. A channel is a slice of it. KAHF uses one channel about 2.4 kHz wide. On the Radio screen that is the shaded area. Bright lines outside it are other users of the band, which is normal.",
+        "The band is a stretch of frequencies. KAHF uses only 17 metres (18.111 to 18.120 MHz), cut into 12 narrow lanes. A lane is a slice of the band about 480 Hz wide. On the Radio screen the shaded area is the signal. Bright lines outside it are other users of the band, which is normal.",
       ],
     },
     {
@@ -109,7 +109,7 @@
       body: [
         "Callsign: your unique name on the air, issued with your amateur licence.",
         "Station: one person's KAHF setup. Relay: a station that passes messages on for others.",
-        "Band: a range of frequencies, like 20 metres (14 MHz). Channel: a 2.7 kHz slice of a band.",
+        "Band: a range of frequencies. KAHF uses only 17 metres (18 MHz). Lane: a narrow 480 Hz slice of the band; there are 12.",
         "SNR: signal-to-noise ratio, in dB. KAMI: the way KAHF turns data into sound.",
         "Waterfall: the scrolling picture on the Radio screen. Time runs down, brighter is stronger.",
         "Grid square: a short code, like JN45, that names an area of the Earth.",

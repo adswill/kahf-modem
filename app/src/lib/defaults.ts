@@ -17,7 +17,7 @@ export const defaultSettings = (): Settings => ({
   rig: { model: null, name: "", port: "", baud: 19200 },
   micIn: "",
   speakerOut: "",
-  freqKhz: 14103,
+  freqKhz: 18113.44, // 17 m, lane C1 (the first calling lane)
   txLevel: 50,
   setupDone: false,
   tourDone: false,
