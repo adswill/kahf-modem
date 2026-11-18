@@ -295,8 +295,8 @@ ${beforeScript}
 /** The kahf.dev home page. */
 export function renderHome() {
   return shell(
-    "KAHF: radio messaging and file transfer for HF and VHF",
-    "KAHF sends messages, mail and files between amateur radio stations over HF and VHF, with ordinary radios or SDRs.",
+    "KAHF: radio messaging and file transfer for HF",
+    "KAHF sends messages, mail and files between amateur radio stations over HF, with ordinary radios or SDRs.",
     "home",
     homeBody(),
     HOME_SCRIPT,

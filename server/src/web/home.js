@@ -56,7 +56,7 @@ export function homeBody() {
 <div class="wrap">
 <div class="hero">
 <p class="label">KAHF</p>
-<h1 id="top-title">KAHF sends messages, mail and files between amateur radio stations over HF and VHF.</h1>
+<h1 id="top-title">KAHF sends messages, mail and files between amateur radio stations over HF.</h1>
 <p class="status"><a href="/map">Open the live map</a></p>
 </div>
 </div>

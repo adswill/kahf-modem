@@ -36,7 +36,7 @@ const EXTERNAL = /https?:\/\/|\/\/[a-z0-9.-]+\.[a-z]{2,}|<script[^>]*\bsrc=|<lin
 
 test("home page has the statement, what it does, how it travels and downloads", () => {
   const html = renderHome();
-  assert.match(html, /<h1[^>]*>KAHF sends messages, mail and files between amateur radio stations over HF and VHF\.<\/h1>/);
+  assert.match(html, /<h1[^>]*>KAHF sends messages, mail and files between amateur radio stations over HF\.<\/h1>/);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
   assert.match(html, /id="what"/);
   assert.match(html, /id="how"/);
