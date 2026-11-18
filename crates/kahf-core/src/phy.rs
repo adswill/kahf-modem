@@ -76,8 +76,8 @@ impl Modulation {
 /// faster at the same SNR.
 pub const LADDER: [(Modulation, f32); 11] = [
     (Modulation::Kami1d, 14.0),
-    (Modulation::Kami1c, 11.0),
-    (Modulation::Kami1b, 6.5),
+    (Modulation::Kami1c, 10.0),
+    (Modulation::Kami1b, 5.8),
     (Modulation::Kami1a, 0.8),
     (Modulation::Kami4, -0.8),
     (Modulation::Kami8, -1.3),
