@@ -4,7 +4,7 @@ Draft for lawyer review. Not legal advice. Do not publish until a lawyer has che
 
 ## 1. What is shared on the public map
 
-If you keep the default Precise setting, your exact position is shown on the public map at kahf.dev. You can choose Area, which shows a circle without coordinates, or Off, which shows nothing. You can change this at any time in Settings.
+If you choose the Precise setting (the default is Off), your exact position is shown on the public map at kahf.dev. You can choose Area, which shows a circle without coordinates, or Off, which shows nothing. You can change this at any time in Settings.
 
 ## 2. What the server stores
 

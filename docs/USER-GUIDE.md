@@ -218,8 +218,8 @@ sent. The map is not in the desktop app. **Coming later.**
 ## 11. Internet relay
 
 Internet relay would let a message travel over the internet when a station cannot be reached on
-air. It is **off by default**. The engine has the switch for it, but the internet gateway is not
-available yet, so it cannot be turned on in this build. **Coming later.**
+air. The engine has this switch on by default, but the internet gateway is not available yet, so
+nothing is sent over the internet, and the desktop app has no setting for it. **Coming later.**
 
 When a message cannot reach its station on air, the status and event log say:
 
@@ -246,7 +246,7 @@ The signature does not:
 - prove who is at the keyboard.
 - prove that the sender is honest or that the message is true.
 
-The desktop app does not sign or check messages yet. **Coming later.**
+The engine signs mail by default when the station has a key, and labels verified mail "Signed by". The desktop app has no setting for it yet. **Coming later.**
 
 ## 13. Private messages are not encryption
 
@@ -271,7 +271,7 @@ There are two kinds of update prompt in the code:
 A message shown while a required update is pending says:
 **A required update is pending. Install it before you transmit.**
 
-The update prompt is not yet connected to the desktop window. The Settings line says
+The update prompt is not yet connected to the desktop window. The Settings line in the alternative kahf-ui screen says
 **Update checks are not connected yet.** **Coming later.**
 
 ## 15. Troubleshooting
