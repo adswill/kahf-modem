@@ -306,6 +306,7 @@ pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: 
         phy::Modulation::Kami32 => kahf_core::kami::ID,
         phy::Modulation::Kami16 => kahf_core::kami::ID16,
         phy::Modulation::Kami8 => kahf_core::kami::ID8,
+        phy::Modulation::Kami8H => kahf_core::kami::ID8H,
     };
     const PAYLOAD_BYTES: usize = 36;
     let errors = (0..frames)

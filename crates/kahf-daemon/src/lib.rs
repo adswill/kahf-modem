@@ -320,7 +320,8 @@ impl Engine {
             1 => "KAMI-16",
             2 => "KAMI-8",
             3 => "QPSK",
-            4 => "16QAM",
+            4 => "KAMI-8H",
+            5 => "16QAM",
             _ => "64QAM",
         }
     }
@@ -1018,17 +1019,19 @@ fn sdr_iq_range(x: &[f32], m0: usize, m1: usize) -> Vec<(f32, f32)> {
 
 /// The modulation ladder, lowest rung first: the transmit level indexes this list.
 /// The id carried in the frame is fixed per mode (`mod_id`), so the order here is free.
-const MODULATIONS: [Modulation; 6] = [
+const MODULATIONS: [Modulation; 7] = [
     Modulation::Kami32,
     Modulation::Kami16,
     Modulation::Kami8,
     Modulation::Qpsk,
+    Modulation::Kami8H,
     Modulation::Qam16,
     Modulation::Qam64,
 ];
 
 /// The KAMI modes, longest frame first. They share one preamble, so one search finds any of them.
-const KAMI_MODES: [Modulation; 3] = [Modulation::Kami32, Modulation::Kami16, Modulation::Kami8];
+const KAMI_MODES: [Modulation; 4] =
+    [Modulation::Kami32, Modulation::Kami16, Modulation::Kami8, Modulation::Kami8H];
 
 /// Wire id of a modulation, in the frame's id field. QPSK, 16QAM and 64QAM keep 0, 1 and 2.
 fn mod_id(m: Modulation) -> u8 {
@@ -1039,6 +1042,7 @@ fn mod_id(m: Modulation) -> u8 {
         Modulation::Kami32 => kahf_core::kami::ID,
         Modulation::Kami16 => kahf_core::kami::ID16,
         Modulation::Kami8 => kahf_core::kami::ID8,
+        Modulation::Kami8H => kahf_core::kami::ID8H,
     }
 }
 
@@ -1055,10 +1059,10 @@ fn frame_template() -> &'static [f32] {
 /// Samples of one zero-payload frame in the given modulation.
 /// Searches `audio` for one whole KAMI frame of any size. Returns where it ends and its payload.
 fn kami_scan(audio: &[f32]) -> Option<(usize, Vec<u8>)> {
-    let sizes: Vec<usize> = KAMI_MODES.iter().filter_map(|m| m.kami_bps()).collect();
+    let sizes: Vec<kahf_core::kami::Shape> = KAMI_MODES.iter().filter_map(|m| m.kami_shape()).collect();
     let (start, tries) = kahf_core::kami::locate_and_demodulate_multi(audio, ldpc::N, &sizes)?;
-    tries.into_iter().find_map(|(bps, llr)| {
-        let m = *KAMI_MODES.iter().find(|m| m.kami_bps() == Some(bps))?;
+    tries.into_iter().find_map(|(sh, llr)| {
+        let m = *KAMI_MODES.iter().find(|m| m.kami_shape() == Some(sh))?;
         let info = ldpc::decode(&llr, LDPC_ITER)?;
         let (data, id) = frame::parse_payload_id(&info)?;
         (id == mod_id(m)).then_some((start + frame_len_for(m), data))
@@ -2531,7 +2535,7 @@ impl Worker {
             // waiting for the longest one.
             let mut found = None;
             for &m in &MODULATIONS {
-                if m.kami_bps().is_some() {
+                if m.kami_shape().is_some() {
                     continue; // found by its own search, not by the OFDM preamble
                 }
                 let len = frame_len_for(m);

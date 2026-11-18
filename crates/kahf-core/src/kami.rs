@@ -29,6 +29,10 @@ pub const BPS: usize = 5;
 /// Frame ids of the other Walsh sizes: KAMI-16 (4 bits per 16 chips) and KAMI-8 (3 bits per 8 chips).
 pub const ID16: u8 = 4;
 pub const ID8: u8 = 5;
+/// Frame id of KAMI-8H: 8-chip Walsh words with four amplitude levels, 5 bits per symbol.
+pub const ID8H: u8 = 6;
+/// Symbol shape of KAMI-8H.
+pub const SHAPE_8H: Shape = Shape { wb: 3, lb: 2 };
 
 /// Frame-layer id for a Walsh size of `bps` bits per symbol (3, 4 or 5).
 pub fn id_for(bps: usize) -> u8 {
@@ -134,8 +138,53 @@ pub fn preamble() -> Vec<f64> {
         .collect()
 }
 
-fn n_syms(n_bits: usize, bps: usize) -> usize {
-    n_bits.div_ceil(bps)
+/// Symbol shape: `wb` bits pick one of `1 << wb` Walsh rows (so `1 << wb` chips per symbol);
+/// `lb` more bits pick one of `1 << lb` amplitude levels (Gray coded, sign-preserving).
+/// `lb == 0` is plain KAMI: the symbol has no amplitude information.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    pub wb: usize,
+    pub lb: usize,
+}
+
+impl Shape {
+    /// Plain Walsh signalling with `wb` bits per symbol.
+    pub const fn walsh(wb: usize) -> Shape {
+        Shape { wb, lb: 0 }
+    }
+    /// Coded bits carried by one symbol.
+    pub const fn bits(self) -> usize {
+        self.wb + self.lb
+    }
+    /// Chips per symbol.
+    pub const fn chips(self) -> usize {
+        1 << self.wb
+    }
+}
+
+/// Amplitude of level index `li` of `1 << lb` levels: odd integers scaled to mean square 1.
+fn level_amp(li: usize, lb: usize) -> f64 {
+    let nl = 1usize << lb;
+    if nl == 1 {
+        return 1.0;
+    }
+    let ms: f64 = (0..nl).map(|i| (2.0 * i as f64 - (nl as f64 - 1.0)).powi(2)).sum::<f64>() / nl as f64;
+    (2.0 * li as f64 - (nl as f64 - 1.0)) / ms.sqrt()
+}
+
+/// Amplitude for the Gray-coded level bits `g`.
+fn gray_amp(g: usize, lb: usize) -> f64 {
+    let mut i = g;
+    let mut sh = g >> 1;
+    while sh != 0 {
+        i ^= sh;
+        sh >>= 1;
+    }
+    level_amp(i, lb)
+}
+
+fn n_syms(n_bits: usize, sh: Shape) -> usize {
+    n_bits.div_ceil(sh.bits())
 }
 
 /// Total slots (pilots plus data) for `nsym` data symbols.
@@ -152,12 +201,17 @@ fn n_slots(nsym: usize) -> usize {
 
 /// Number of audio samples a frame of `n_bits` coded bits occupies.
 pub fn frame_len(n_bits: usize) -> usize {
-    frame_len_bps(n_bits, BPS)
+    frame_len_shape(n_bits, Shape::walsh(BPS))
 }
 
 /// `frame_len` for a Walsh size of `bps` bits per symbol.
 pub fn frame_len_bps(n_bits: usize, bps: usize) -> usize {
-    PRE + n_slots(n_syms(n_bits, bps)) * (1 << bps)
+    frame_len_shape(n_bits, Shape::walsh(bps))
+}
+
+/// `frame_len` for any symbol shape.
+pub fn frame_len_shape(n_bits: usize, sh: Shape) -> usize {
+    PRE + n_slots(n_syms(n_bits, sh)) * sh.chips()
 }
 
 /// Map coded bits (0/1) to audio samples: preamble, then pilots and Walsh symbols.
@@ -167,24 +221,38 @@ pub fn modulate_frame(coded: &[u8]) -> Vec<f32> {
 
 /// `modulate_frame` for a Walsh size of `bps` bits per symbol.
 pub fn modulate_frame_bps(coded: &[u8], bps: usize) -> Vec<f32> {
-    let nsym = n_syms(coded.len(), bps);
+    modulate_frame_shape(coded, Shape::walsh(bps))
+}
+
+/// `modulate_frame` for any symbol shape. Pilots stay at amplitude 1 (the mean level); the
+/// whole frame is scaled so the largest level stays at PEAK.
+pub fn modulate_frame_shape(coded: &[u8], sh: Shape) -> Vec<f32> {
+    let nsym = n_syms(coded.len(), sh);
     let mut chips = preamble();
-    let ones = vec![1.0f64; 1 << bps];
+    let ones = vec![1.0f64; sh.chips()];
+    let top = level_amp((1 << sh.lb) - 1, sh.lb).max(1.0);
+    let bit = |i: usize| coded.get(i).map_or(0, |b| (b & 1) as usize);
     let (mut sym_i, mut slot) = (0usize, 0usize);
     while sym_i < nsym {
         if slot % PILOT_EVERY == 0 {
             chips.extend_from_slice(&ones);
         } else {
+            let base = sym_i * sh.bits();
             let mut idx = 0usize;
-            for j in 0..bps {
-                idx = (idx << 1) | coded.get(sym_i * bps + j).map_or(0, |b| (b & 1) as usize);
+            for j in 0..sh.wb {
+                idx = (idx << 1) | bit(base + j);
             }
-            chips.extend_from_slice(&walsh_bps(idx, bps));
+            let mut g = 0usize;
+            for j in 0..sh.lb {
+                g = (g << 1) | bit(base + sh.wb + j);
+            }
+            let amp = gray_amp(g, sh.lb);
+            chips.extend(walsh_bps(idx, sh.wb).iter().map(|&w| w * amp));
             sym_i += 1;
         }
         slot += 1;
     }
-    chips.iter().map(|&v| (v * PEAK) as f32).collect()
+    chips.iter().map(|&v| (v * PEAK / top) as f32).collect()
 }
 
 /// Find the frame in `samples`, return `n_bits` coded-bit LLRs (positive = 0), or None.
@@ -205,12 +273,22 @@ pub fn locate_and_demodulate(samples: &[f32], n_bits: usize) -> Option<(usize, V
 
 /// `locate_and_demodulate` for a Walsh size of `bps` bits per symbol.
 pub fn locate_and_demodulate_bps(samples: &[f32], n_bits: usize, bps: usize) -> Option<(usize, Vec<f32>)> {
-    let (start, mut all) = locate_and_demodulate_multi(samples, n_bits, &[bps])?;
+    locate_and_demodulate_shape(samples, n_bits, Shape::walsh(bps))
+}
+
+/// `locate_and_demodulate` for any symbol shape.
+pub fn locate_and_demodulate_shape(samples: &[f32], n_bits: usize, sh: Shape) -> Option<(usize, Vec<f32>)> {
+    let (start, mut all) = locate_and_demodulate_multi(samples, n_bits, &[sh])?;
     Some((start, all.pop()?.1))
 }
 
-/// LLRs of one frame under one Walsh size: `(bits per symbol, llrs)`.
-pub type SizeLlrs = (usize, Vec<f32>);
+/// `demodulate_frame` for any symbol shape.
+pub fn demodulate_frame_shape(samples: &[f32], n_bits: usize, sh: Shape) -> Option<Vec<f32>> {
+    locate_and_demodulate_shape(samples, n_bits, sh).map(|(_, llr)| llr)
+}
+
+/// LLRs of one frame under one symbol shape.
+pub type SizeLlrs = (Shape, Vec<f32>);
 
 /// Find one frame whose size is any of `sizes` (all share the preamble) and demodulate it
 /// under each size, returning the start and the LLRs per size, in the order of `sizes`.
@@ -218,9 +296,9 @@ pub type SizeLlrs = (usize, Vec<f32>);
 pub fn locate_and_demodulate_multi(
     samples: &[f32],
     n_bits: usize,
-    sizes: &[usize],
+    sizes: &[Shape],
 ) -> Option<(usize, Vec<SizeLlrs>)> {
-    let total = sizes.iter().map(|&b| frame_len_bps(n_bits, b)).min()?;
+    let total = sizes.iter().map(|&b| frame_len_shape(n_bits, b)).min()?;
     if n_bits == 0 || samples.len() < total {
         return None;
     }
@@ -271,11 +349,11 @@ pub fn locate_and_demodulate_multi(
     }
     let start = best.1;
     let mut out = Vec::new();
-    for &bps in sizes {
-        let len = frame_len_bps(n_bits, bps);
+    for &sh in sizes {
+        let len = frame_len_shape(n_bits, sh);
         if start + len <= x.len() {
-            if let Some(llr) = demod_at(&x[start..start + len], &p, best.2, n_bits, bps) {
-                out.push((bps, llr));
+            if let Some(llr) = demod_at(&x[start..start + len], &p, best.2, n_bits, sh) {
+                out.push((sh, llr));
             }
         }
     }
@@ -283,8 +361,8 @@ pub fn locate_and_demodulate_multi(
 }
 
 /// Demodulate the frame that starts at `rx[0]`, given the coarse frequency estimate `coarse`.
-fn demod_at(rx: &[f64], p: &[f64], coarse: f64, n_bits: usize, bps: usize) -> Option<Vec<f32>> {
-    let l = 1usize << bps;
+fn demod_at(rx: &[f64], p: &[f64], coarse: f64, n_bits: usize, sh: Shape) -> Option<Vec<f32>> {
+    let l = sh.chips();
     let a = analytic(rx);
 
     // Fine frequency pass around the coarse estimate.
@@ -316,7 +394,7 @@ fn demod_at(rx: &[f64], p: &[f64], coarse: f64, n_bits: usize, bps: usize) -> Op
     };
 
     // Pilots: phase and amplitude per pilot slot.
-    let nsym = n_syms(n_bits, bps);
+    let nsym = n_syms(n_bits, sh);
     let slots = n_slots(nsym);
     let mut pil_slots = Vec::new();
     let mut pil_phase: Vec<f64> = Vec::new();
@@ -351,8 +429,12 @@ fn demod_at(rx: &[f64], p: &[f64], coarse: f64, n_bits: usize, bps: usize) -> Op
         v[k] + t * (v[k + 1] - v[k])
     };
 
-    let rows: Vec<Vec<f64>> = (0..l).map(|k| walsh_bps(k, bps)).collect();
-    let mut llr = Vec::with_capacity(nsym * bps);
+    let rows: Vec<Vec<f64>> = (0..l).map(|k| walsh_bps(k, sh.wb)).collect();
+    // Every symbol value (word bits then level bits) with its Walsh row and amplitude.
+    let nvals = 1usize << sh.bits();
+    let syms: Vec<(usize, f64)> =
+        (0..nvals).map(|v| (v >> sh.lb, gray_amp(v & ((1 << sh.lb) - 1), sh.lb))).collect();
+    let mut llr = Vec::with_capacity(nsym * sh.bits());
     for s in (0..slots).filter(|s| s % PILOT_EVERY != 0) {
         let ph = interp(&pil_phase, s as f64);
         let amp = interp(&pil_amp, s as f64).max(1e-6);
@@ -360,13 +442,15 @@ fn demod_at(rx: &[f64], p: &[f64], coarse: f64, n_bits: usize, bps: usize) -> Op
         let real: Vec<f64> = block(s).iter().map(|&v| (v.0 * c - v.1 * sn) / amp).collect();
         let corr: Vec<f64> =
             rows.iter().map(|r| real.iter().zip(r).map(|(x, y)| x * y).sum()).collect();
-        for bit in (0..bps).rev() {
+        // Max-log metric of every symbol value; plain Walsh reduces to the row correlation.
+        let metric: Vec<f64> = syms.iter().map(|&(w, a)| 2.0 * a * corr[w] - a * a * l as f64).collect();
+        for bit in (0..sh.bits()).rev() {
             let (mut b0, mut b1) = (f64::MIN, f64::MIN);
-            for (r, &cv) in corr.iter().enumerate() {
-                if (r >> bit) & 1 == 0 {
-                    b0 = b0.max(cv)
+            for (v, &m) in metric.iter().enumerate() {
+                if (v >> bit) & 1 == 0 {
+                    b0 = b0.max(m)
                 } else {
-                    b1 = b1.max(cv)
+                    b1 = b1.max(m)
                 }
             }
             llr.push(((b0 - b1) * amp * amp) as f32);
@@ -507,22 +591,26 @@ mod tests {
     #[test]
     fn smaller_walsh_sizes_roundtrip_and_are_found_together() {
         let mut rng = Rng(4242);
-        for (bps, id) in [(4usize, ID16), (3, ID8), (5, ID)] {
+        let shapes = [Shape::walsh(5), Shape::walsh(4), Shape::walsh(3), SHAPE_8H];
+        let ids = [ID, ID16, ID8, ID8H];
+        for (k, &sh) in shapes.iter().enumerate() {
             for f in 0..3 {
-                let d = data(f + bps);
-                let coded = ldpc::encode(&frame::build_payload_as(&d, id));
-                let tx = modulate_frame_bps(&coded, bps);
-                assert_eq!(tx.len(), frame_len_bps(coded.len(), bps));
+                let d = data(f + k);
+                let coded = ldpc::encode(&frame::build_payload_as(&d, ids[k]));
+                let tx = modulate_frame_shape(&coded, sh);
+                assert_eq!(tx.len(), frame_len_shape(coded.len(), sh));
+                assert!(tx.iter().all(|v| v.abs() <= PEAK as f32 + 1e-6), "clipping");
                 let mut rx = shift(&pad(&tx, 90 + f * 41), 18.0);
                 for v in rx.iter_mut() {
-                    *v += (0.5 * PEAK * rng.gauss()) as f32; // about +6 dB
+                    *v += (0.4 * PEAK * rng.gauss()) as f32; // about +8 dB
                 }
-                let (_, tries) = locate_and_demodulate_multi(&rx, coded.len(), &[5, 4, 3]).expect("frame not found");
-                let (_, llr) = tries.iter().find(|(b, _)| *b == bps).expect("size demodulated");
+                let (_, tries) = locate_and_demodulate_multi(&rx, coded.len(), &shapes).expect("frame not found");
+                let (_, llr) = tries.iter().find(|(b, _)| *b == sh).expect("shape demodulated");
                 let bits = ldpc::decode(llr, 50).expect("decodes");
-                assert_eq!(frame::parse_payload_id(&bits), Some((d, id)), "bps {bps} frame {f}");
+                assert_eq!(frame::parse_payload_id(&bits), Some((d, ids[k])), "shape {sh:?} frame {f}");
             }
         }
         assert!(frame_len_bps(648, 3) < frame_len_bps(648, 4) && frame_len_bps(648, 4) < frame_len(648));
+        assert!(frame_len_shape(648, SHAPE_8H) < frame_len_bps(648, 3));
     }
 }

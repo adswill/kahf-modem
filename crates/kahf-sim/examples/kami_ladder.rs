@@ -8,6 +8,7 @@ fn main() {
         ("KAMI-32", Modulation::Kami32, vec![-6.0f32, -5.0, -4.0, -2.0, 0.0]),
         ("KAMI-16", Modulation::Kami16, vec![-5.0, -4.0, -3.0, -2.0, -1.0, 0.0]),
         ("KAMI-8", Modulation::Kami8, vec![-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0]),
+        ("KAMI-8H", Modulation::Kami8H, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
         ("QPSK", Modulation::Qpsk, vec![-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
     ] {
         for snr in snrs {
