@@ -93,6 +93,74 @@ pub fn from_lane(audio: &[f32], centre_hz: f64) -> Vec<f32> {
     mix(&low, SLOW_CARRIER, FS / SLOW as f64).iter().map(|c| c.0 as f32).collect()
 }
 
+/// The lane receiver as a stream: audio comes in as it arrives from the sound card, the KAMI
+/// stream goes out (one fifth as many samples, about 50 ms later). Gives the same samples as
+/// `from_lane` on the whole recording; it is what the engine feeds its preamble search.
+pub struct LaneRx {
+    centre: f64,
+    taps: Vec<f64>,
+    /// Mixed-down input not yet fully used: the sample at absolute index `base` first.
+    buf: std::collections::VecDeque<C>,
+    base: usize,
+    /// Absolute index of the next input sample to mix.
+    n_in: usize,
+    /// Absolute index of the next output sample.
+    n_out: usize,
+}
+
+const RX_TAPS: usize = 801;
+
+impl LaneRx {
+    pub fn new(centre_hz: f64) -> Self {
+        LaneRx { centre: centre_hz, taps: lowpass(CUTOFF_HZ, FS, RX_TAPS), buf: Default::default(), base: 0, n_in: 0, n_out: 0 }
+    }
+
+    /// Forgets everything heard so far (after our own transmission, the audio is thrown away).
+    pub fn reset(&mut self) {
+        self.buf.clear();
+        self.base = 0;
+        self.n_in = 0;
+        self.n_out = 0;
+    }
+
+    /// Adds received audio and returns the KAMI stream samples that are complete now.
+    pub fn process(&mut self, audio: &[f32]) -> Vec<f32> {
+        for v in audio {
+            let p = 2.0 * PI * -self.centre * self.n_in as f64 / FS;
+            let (s, c) = p.sin_cos();
+            self.buf.push_back(C(*v as f64 * c, *v as f64 * s));
+            self.n_in += 1;
+        }
+        let half = RX_TAPS / 2;
+        let mut out = Vec::new();
+        // Output i uses the mixed input around absolute index 5 i, `half` either side.
+        while self.n_out * SLOW + half < self.n_in {
+            let centre = self.n_out * SLOW;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (k, hk) in self.taps.iter().enumerate() {
+                // Same sum as `filt`: input at centre + half - k.
+                let idx = (centre + half) as isize - k as isize;
+                if idx >= self.base as isize {
+                    let c = self.buf[idx as usize - self.base];
+                    re += hk * c.0;
+                    im += hk * c.1;
+                }
+            }
+            let p = 2.0 * PI * SLOW_CARRIER * self.n_out as f64 / (FS / SLOW as f64);
+            let (s, c) = p.sin_cos();
+            out.push((re * c - im * s) as f32);
+            self.n_out += 1;
+            // Inputs older than the next output's reach are not needed again.
+            let keep_from = (self.n_out * SLOW + half).saturating_sub(RX_TAPS - 1);
+            while self.base < keep_from && !self.buf.is_empty() {
+                self.buf.pop_front();
+                self.base += 1;
+            }
+        }
+        out
+    }
+}
+
 /// Power spectrum (dB, relative to the largest bin) of `x` at the given frequencies, by direct
 /// Hann-windowed DFT. Small inputs only.
 pub fn psd_db(x: &[f32], freqs: &[f64]) -> Vec<f64> {
@@ -134,6 +202,33 @@ mod tests {
         let (start, hz, tau) = kami::find_preamble(&rx)?;
         let (_, llr) = kami::demodulate_at(&rx, start, hz, tau, ldpc::N, &[sh]).into_iter().next()?;
         ldpc::decode(&llr, 50)
+    }
+
+    #[test]
+    fn the_streaming_receiver_matches_the_whole_recording() {
+        let air = kami::modulate_frame_shape(&ldpc::encode(&info(9)), Shape::walsh(5));
+        let mut audio = vec![0f32; 3000];
+        audio.extend(to_lane(&air, 2200.0));
+        audio.extend(vec![0f32; 3000]);
+        let whole = from_lane(&audio, 2200.0);
+        let mut rx = LaneRx::new(2200.0);
+        let mut got = Vec::new();
+        let mut at = 0;
+        let mut size = 137;
+        while at < audio.len() {
+            let end = (at + size).min(audio.len());
+            got.extend(rx.process(&audio[at..end]));
+            at = end;
+            size = (size * 7 + 91) % 1500 + 1;
+        }
+        assert!(whole.len() - got.len() <= RX_TAPS / SLOW / 2 + 2, "{} vs {}", got.len(), whole.len());
+        let worst = got.iter().zip(&whole).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-3, "streaming differs by {worst}");
+        // And a frame is found and decoded in the streamed samples.
+        let (start, hz, tau) = kami::find_preamble(&got).expect("no preamble in the stream");
+        let sh = Shape::walsh(5);
+        let (_, llr) = kami::demodulate_at(&got, start, hz, tau, ldpc::N, &[sh]).into_iter().next().unwrap();
+        assert_eq!(ldpc::decode(&llr, 50), Some(info(9)));
     }
 
     #[test]

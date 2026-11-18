@@ -118,9 +118,11 @@ fn rig_stop(state: State<Shared>) {
 
 #[tauri::command]
 fn engine_modes() -> Value {
+    const SLOW: u32 = kahf_core::narrow::SLOW as u32;
     json!(kahf_core::kami::mode_table()
         .iter()
-        .map(|m| json!({ "name": m.name, "needSnr": m.need_snr, "rawBps": m.raw_bps, "netBps": m.net_bps }))
+        // 17 m lanes: every burst is five times slower than the plain modem (kahf-core `narrow`).
+        .map(|m| json!({ "name": m.name, "needSnr": m.need_snr, "rawBps": m.raw_bps / SLOW, "netBps": m.net_bps / SLOW }))
         .collect::<Vec<_>>())
 }
 

@@ -274,10 +274,10 @@ impl Worker {
                 self.dg.burst = burst;
                 self.dg.answered.clear();
                 self.push_burst(&frames);
-                let air = burst_len_for(MODULATIONS[self.tx_level as usize], n) as f64 / RATE as f64;
+                let air = burst_len_for(MODULATIONS[self.tx_level as usize], n) as f64 / RATE as f64 * self.slow() as f64;
                 // Own transmit time (it may wait behind another burst), then every answer in turn.
                 let peers = self.dg_burst_peers().len() as u32;
-                let wait = Duration::from_secs_f64(air + 1.0) + DG_ACK_WAIT + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
+                let wait = Duration::from_secs_f64(air + 1.0) + DG_ACK_WAIT * self.slow() + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
                 self.dg.deadline = Some(self.clock.now() + wait);
             }
             Err(e) => {
@@ -464,7 +464,7 @@ impl Worker {
 
     /// How long one acknowledgement is on the air at the present speed (one codeword and its preamble).
     fn dg_ack_air(&self) -> Duration {
-        Duration::from_secs_f64(burst_len_for(MODULATIONS[self.tx_level as usize], 1) as f64 / RATE as f64)
+        Duration::from_secs_f64(burst_len_for(MODULATIONS[self.tx_level as usize], 1) as f64 / RATE as f64 * self.slow() as f64)
     }
 
     /// Puts acknowledgements whose time has come on the control queue (sent as answers).

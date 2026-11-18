@@ -25,6 +25,7 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::lanes::{self as laneplan, BandTable};
+use kahf_core::narrow;
 use kahf_core::lanesense::{Class as LaneClass, LaneSense, Quarantine};
 use kahf_core::ldpc;
 mod backbone;
@@ -304,8 +305,9 @@ struct TxPolicy {
     table: BandTable,
     dial_hz: Option<u64>,
     test_table: bool,
-    /// Audio span (Hz) the modem fills; the gate checks the occupied span from it.
-    audio_span: (u64, u64),
+    /// Audio span (Hz) the modem fills, when a test or the lane plan overrides it. Normally `None`:
+    /// a lane dial means lane mode (1260 to 1740 Hz), anything else the wide modem.
+    audio_span: Option<(u64, u64)>,
 }
 
 impl Flags {
@@ -327,7 +329,7 @@ impl Flags {
             internet_relay: AtomicBool::new(true),
             third_party_relay: AtomicBool::new(true),
             relay_timeout_ms: AtomicU64::new(RELAY_TIMEOUT_MS),
-            policy: Mutex::new(TxPolicy { table: BandTable::builtin_r1(), dial_hz: None, test_table: false, audio_span: TX_AUDIO_SPAN_HZ }),
+            policy: Mutex::new(TxPolicy { table: BandTable::builtin_r1(), dial_hz: None, test_table: false, audio_span: None }),
             bench_radio: AtomicBool::new(false),
             radio_known: AtomicBool::new(false),
             radio_dial_hz: AtomicU64::new(0),
@@ -352,6 +354,55 @@ const GATE_NO_DIAL: &str = "Transmit is off: KAHF does not know the radio's dial
 const GATE_NOT_A_LANE: &str = "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
 const GATE_OUTSIDE: &str = "Transmit is off: the signal would not fit inside the lane.";
 const GATE_TEST_REAL: &str = "The test table is on, but this is a real radio. Transmit is off.";
+
+/// The receive state of one lane: its filter and the burst search state. The worker keeps the
+/// own lane's state in its own fields and a second calling lane's here; `swap_rx` exchanges them
+/// so the same decoder serves both (one sound card hears C1 and C2 at once, MESH-SPEC 8.4).
+struct RxLane {
+    lane_rx: narrow::LaneRx,
+    rx_buf: Vec<f32>,
+    since_kami: usize,
+    kami_at: Option<(usize, f64, f64)>,
+    kami_seen: Option<Instant>,
+    kami_refined: bool,
+    kami_tried: usize,
+    kami_mode: Option<Modulation>,
+    kami_next: usize,
+    kami_total: usize,
+    kami_front: bool,
+    rx_locked: bool,
+    harq: kahf_core::harq::Harq,
+    /// Audio frequency of the lane's centre (Hz), for the filter.
+    audio_hz: f64,
+    /// Lane number.
+    k: u8,
+}
+
+impl RxLane {
+    fn new(audio_hz: f64, k: u8) -> Self {
+        RxLane {
+            lane_rx: narrow::LaneRx::new(audio_hz),
+            rx_buf: Vec::new(),
+            since_kami: 0,
+            kami_at: None,
+            kami_seen: None,
+            kami_refined: false,
+            kami_tried: 0,
+            kami_mode: None,
+            kami_next: 0,
+            kami_total: 0,
+            kami_front: true,
+            rx_locked: false,
+            harq: Default::default(),
+            audio_hz,
+            k,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = RxLane::new(self.audio_hz, self.k);
+    }
+}
 
 /// One whole-segment report: the lanes the receiver covers and how far over its noise floor
 /// each was (dB, 0 when quiet), 12 numbers at most, no audio (MESH-SPEC 5.5).
@@ -402,9 +453,8 @@ impl LaneWatch {
     }
 }
 
-/// Audio span the modem fills today, in Hz (the wide KAMI carriers). The lane mode (480 Hz)
-/// replaces this when it is in the engine.
-const TX_AUDIO_SPAN_HZ: (u64, u64) = (312, 2_690);
+/// Audio span of a lane signal: 480 Hz around 1500 Hz.
+const LANE_AUDIO_SPAN_HZ: (u64, u64) = (1_260, 1_740);
 
 /// The transmit gate (MESH-SPEC I7): every transmission must pass `lanes::permit_tx` against
 /// the band table with the dial the radio is really on. Returns why not, or `None`.
@@ -429,7 +479,8 @@ fn gate_refusal(f: &Flags) -> Option<&'static str> {
     let Some(lane) = band.lanes.iter().find(|l| l.dial_hz == dial) else {
         return Some(GATE_NOT_A_LANE);
     };
-    match p.table.permit_tx("17m", lane.k, lane.k, dial, p.audio_span.0, p.audio_span.1) {
+    let span = p.audio_span.unwrap_or(LANE_AUDIO_SPAN_HZ);
+    match p.table.permit_tx("17m", lane.k, lane.k, dial, span.0, span.1) {
         Ok(()) => None,
         Err(laneplan::Violation::PlanNotVerified) => Some(GATE_UNVERIFIED),
         Err(_) => Some(GATE_OUTSIDE),
@@ -553,9 +604,9 @@ impl Engine {
         lock(&self.shared.flags.policy).dial_hz = dial_hz;
     }
 
-    /// The audio span the modem fills, in Hz (the lane mode sets 1260 to 1740).
+    /// Overrides the audio span the modem fills, in Hz (normally the lane mode's 1260 to 1740).
     pub fn set_tx_audio_span(&self, lo_hz: u64, hi_hz: u64) {
-        lock(&self.shared.flags.policy).audio_span = (lo_hz, hi_hz);
+        lock(&self.shared.flags.policy).audio_span = Some((lo_hz, hi_hz));
     }
 
     /// Test table: lets a bench radio (in-memory or BlackHole) transmit while the band table is
@@ -1940,6 +1991,11 @@ struct Worker {
     quarantine: Quarantine,
     /// Chat as bundle frames without a link (`datagram.rs`).
     dg: DgState,
+    /// Lane mode (MESH-SPEC 2.4): while the radio is on a lane dial, bursts are sent as 480 Hz
+    /// lane audio and received through this filter, five times slower than the plain modem.
+    lane_rx: Option<narrow::LaneRx>,
+    /// The other calling lane, heard at the same time while the radio is on C1 or C2.
+    second: Option<RxLane>,
     /// Next whole-segment occupancy report, on the worker clock (ms).
     occupancy_due_ms: u64,
     /// Channel plan for transmit selection (plan 2.2).
@@ -2135,6 +2191,8 @@ impl Worker {
             lanes: None,
             quarantine: Quarantine::default(),
             dg: DgState::new(&config.callsign),
+            lane_rx: None,
+            second: None,
             occupancy_due_ms: OCCUPANCY_PERIOD_MS,
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
@@ -2325,7 +2383,7 @@ impl Worker {
 
     fn connect(&mut self, peer: &str) -> Result<(), String> {
         self.ensure_radio()?;
-        self.link.set_air_ms((burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64);
+        self.link.set_air_ms((burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
         let actions = guard("link connect", || self.link.connect(peer))?;
         self.log(format!("calling {peer}"));
         self.apply(actions);
@@ -2807,6 +2865,64 @@ impl Worker {
         (0.0..RATE as f64 / 2.0).contains(&off).then_some(off as f32)
     }
 
+    /// How many times slower than the plain modem a burst is on the air: 5 in lane mode.
+    fn slow(&self) -> u32 {
+        if self.lane_rx.is_some() {
+            narrow::SLOW as u32
+        } else {
+            1
+        }
+    }
+
+    /// Clears the receive state after our own burst, or when the mode changes.
+    fn reset_kami(&mut self) {
+        self.rx_buf.clear();
+        self.since_scan = 0;
+        self.kami_at = None;
+        self.kami_seen = None;
+        self.kami_refined = false;
+        self.kami_mode = None;
+        self.kami_next = 0;
+        self.kami_total = 0;
+        self.kami_front = true;
+        if let Some(l) = self.lane_rx.as_mut() {
+            l.reset();
+        }
+        if let Some(s) = self.second.as_mut() {
+            s.reset();
+        }
+    }
+
+    /// Exchanges the receive state in the worker's fields with a lane's.
+    fn swap_rx(&mut self, o: &mut RxLane) {
+        std::mem::swap(&mut self.rx_buf, &mut o.rx_buf);
+        std::mem::swap(&mut self.since_kami, &mut o.since_kami);
+        std::mem::swap(&mut self.kami_at, &mut o.kami_at);
+        std::mem::swap(&mut self.kami_seen, &mut o.kami_seen);
+        std::mem::swap(&mut self.kami_refined, &mut o.kami_refined);
+        std::mem::swap(&mut self.kami_tried, &mut o.kami_tried);
+        std::mem::swap(&mut self.kami_mode, &mut o.kami_mode);
+        std::mem::swap(&mut self.kami_next, &mut o.kami_next);
+        std::mem::swap(&mut self.kami_total, &mut o.kami_total);
+        std::mem::swap(&mut self.kami_front, &mut o.kami_front);
+        std::mem::swap(&mut self.rx_locked, &mut o.rx_locked);
+        std::mem::swap(&mut self.harq, &mut o.harq);
+    }
+
+    /// Feeds the second lane its audio and looks for frames in it.
+    fn second_lane_step(&mut self, fresh: &[f32], scan: bool) {
+        let Some(mut st) = self.second.take() else { return };
+        let stream = st.lane_rx.process(fresh);
+        st.rx_buf.extend_from_slice(&stream);
+        st.since_kami += stream.len();
+        if scan {
+            self.swap_rx(&mut st);
+            self.decode_frames();
+            self.swap_rx(&mut st);
+        }
+        self.second = Some(st);
+    }
+
     /// The dial the radio is on, if known.
     fn current_dial(&self) -> Option<u64> {
         let f = &self.shared.flags;
@@ -2819,6 +2935,19 @@ impl Worker {
         let dial = self.current_dial();
         if self.lanes.as_ref().map(|w| w.dial_hz) != dial {
             self.lanes = dial.and_then(|d| LaneWatch::new(&lock(&self.shared.flags.policy).table, d));
+            // On a lane dial our lane sits at 1500 Hz of audio.
+            self.lane_rx = self.lanes.as_ref().map(|_| narrow::LaneRx::new(laneplan::AUDIO_CENTRE_HZ as f64));
+            // On a calling lane the other calling lane is heard too, if its audio is in range.
+            self.second = dial.and_then(|d| {
+                let table = lock(&self.shared.flags.policy);
+                let band = table.table.band("17m")?;
+                let own = band.lanes.iter().find(|l| l.dial_hz == d)?;
+                (own.role == laneplan::Role::Calling).then_some(())?;
+                let other = band.lanes_with(laneplan::Role::Calling).find(|l| l.k != own.k)?;
+                let audio = other.centre_hz as f64 - d as f64;
+                (300.0..=RATE as f64 / 2.0 - 300.0).contains(&audio).then(|| RxLane::new(audio, other.k))
+            });
+            self.reset_kami();
         }
         let Some(w) = self.lanes.as_mut() else { return };
         w.sense.push(fresh);
@@ -2867,9 +2996,10 @@ impl Worker {
         }
         let (lo, hi) = (w.own.saturating_sub(1), (w.own + 1).min(w.ks.len() - 1));
         for j in lo..=hi {
-            // An answer follows the other station's burst on this very lane, which is still
-            // in the last half second of level: only the neighbours are judged then.
-            if answer && j == w.own {
+            // An answer follows the other station's burst on this very lane (or on the other
+            // calling lane we listen to), which is still in the last half second of level:
+            // only the other neighbours are judged then.
+            if answer && (j == w.own || self.second.as_ref().is_some_and(|s2| s2.k == w.ks[j])) {
                 continue;
             }
             if let Some(over) = w.sense.over_db(j) {
@@ -3254,7 +3384,7 @@ impl Worker {
     fn rx_provisional(&self) -> bool {
         self.kami_at.is_some()
             && self.kami_mode.is_none()
-            && self.kami_seen.is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD)
+            && self.kami_seen.is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD * self.slow())
     }
 
     fn tick_link(&mut self) {
@@ -3416,7 +3546,7 @@ impl Worker {
     fn emit_status(&self) {
         let m = self.link.metrics();
         let mode = MODULATIONS[self.tx_level as usize];
-        let net_bps = (8.0 * 324.0 * RATE as f64 / burst_len_for(mode, 8).max(1) as f64) as u32;
+        let net_bps = (8.0 * 324.0 * RATE as f64 / (burst_len_for(mode, 8).max(1) as f64 * self.slow() as f64)) as u32;
         self.emit(Event::Metrics(LinkStatus {
             mode: mode_name(mode),
             auto: self.shared.flags.auto_mode.load(Ordering::SeqCst),
@@ -3438,7 +3568,7 @@ impl Worker {
         let m = MODULATIONS[self.tx_level as usize];
         // Weak mode: the most robust KAMI mode, for stations that cannot answer.
         let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) { Modulation::Kami256 } else { m };
-        self.link.set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64);
+        self.link.set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
         self.shared
             .flags
             .tx_level_shown
@@ -3449,6 +3579,13 @@ impl Worker {
         }
         match built {
             Ok(mut samples) => {
+                if self.lane_rx.is_some() {
+                    // Lane mode: the plain modem's audio, slowed to a 480 Hz signal on our lane.
+                    // The silences at the ends stay short.
+                    let end = samples.len().saturating_sub(TAIL_SILENCE).max(LEAD_SILENCE);
+                    let lane = narrow::to_lane(&samples[LEAD_SILENCE.min(end)..end], laneplan::AUDIO_CENTRE_HZ as f64);
+                    samples = [vec![0f32; LEAD_SILENCE], lane, vec![0f32; TAIL_SILENCE]].concat();
+                }
                 let gain = self.shared.flags.tx_level_pct.load(Ordering::SeqCst) as f32 / 100.0;
                 for s in samples.iter_mut() {
                     *s *= gain;
@@ -3564,16 +3701,8 @@ impl Worker {
             let _ = be.read_audio(&mut sink);
         }
         self.rx_deaf_until = Some(self.clock.now() + ECHO_TAIL);
-        self.rx_buf.clear();
-        self.since_scan = 0;
         // A burst being waited for pointed into the audio just thrown away.
-        self.kami_at = None;
-        self.kami_seen = None;
-        self.kami_refined = false;
-        self.kami_mode = None;
-        self.kami_next = 0;
-        self.kami_total = 0;
-        self.kami_front = true;
+        self.reset_kami();
         self.spec = Analyser::new(SPEC_FFT, RATE as f32);
     }
 
@@ -3604,10 +3733,15 @@ impl Worker {
             return 0;
         }
         let n = fresh.len();
-        self.rx_buf.extend_from_slice(&fresh);
-
         self.sense.push(&fresh);
+        // Lane mode: the receive buffer holds the lane's KAMI stream, one fifth as long.
         self.lane_feed(&fresh);
+        let stream = match self.lane_rx.as_mut() {
+            Some(l) => l.process(&fresh),
+            None => fresh.clone(),
+        };
+        let n_stream = stream.len();
+        self.rx_buf.extend_from_slice(&stream);
         self.spec.push(&fresh);
         let now = self.clock.now();
         if now >= self.spec_due {
@@ -3621,11 +3755,13 @@ impl Worker {
         }
 
         self.since_scan += n;
-        self.since_kami += n;
-        if self.since_scan >= SCAN_HOP {
+        self.since_kami += n_stream;
+        let scan = self.since_scan >= SCAN_HOP;
+        if scan {
             self.since_scan = 0;
             self.decode_frames();
         }
+        self.second_lane_step(&fresh, scan);
         n
     }
 
@@ -3642,7 +3778,8 @@ impl Worker {
     /// audio has arrived for any KAMI mode. Consumed frames leave the buffer.
     fn decode_frames(&mut self) {
         let tl = kahf_core::kami::preamble_len();
-        let window = KAMI_STEP + 2 * tl;
+        let step = KAMI_STEP / self.slow() as usize;
+        let window = step + 2 * tl;
         loop {
             if let Some((start, hz, tau)) = self.kami_at {
                 if self.finish_kami(start, hz, tau) {
@@ -3651,7 +3788,7 @@ impl Worker {
                 // A false preamble (noise, the tail of our own echo) must not hide the real
                 // burst behind it for as long as the longest mode: while the mode is still
                 // unknown, keep looking at the audio that arrived after it.
-                if self.kami_mode.is_none() && self.since_kami >= KAMI_STEP {
+                if self.kami_mode.is_none() && self.since_kami >= step {
                     let len = self.rx_buf.len();
                     let from = (start + tl).min(len);
                     let mut at = len.saturating_sub(self.since_kami + tl).max(from);
@@ -3679,7 +3816,7 @@ impl Worker {
                 }
                 return;
             }
-            if !self.kami_front && self.since_kami < KAMI_STEP {
+            if !self.kami_front && self.since_kami < step {
                 return;
             }
             // Scan from the front of the buffer in overlapping windows, so a frame is found
@@ -5253,7 +5390,6 @@ mod tests {
     fn gate_unverified_table_refuses_a_real_radio_and_never_keys_ptt() {
         let (mut e, keyed) = gate_station("gate-unverified", false);
         e.set_dial_hz(Some(C1_DIAL_HZ));
-        e.set_tx_audio_span(1260, 1740);
         assert!(!fire(&e, &keyed), "PTT keyed on an unverified table");
         let (mode, why) = e.tx_gate();
         assert_eq!(mode, "off");
@@ -5266,7 +5402,6 @@ mod tests {
         let (e, keyed) = gate_station("gate-verified", false);
         e.set_band_table(verified());
         e.set_dial_hz(Some(C1_DIAL_HZ));
-        e.set_tx_audio_span(1260, 1740);
         assert_eq!(e.tx_gate().0, "real");
         assert!(fire(&e, &keyed), "a lane signal on the lane dial was refused");
     }
@@ -5275,7 +5410,6 @@ mod tests {
     fn gate_refuses_the_dial_trap_and_an_unknown_dial() {
         let (e, keyed) = gate_station("gate-trap", false);
         e.set_band_table(verified());
-        e.set_tx_audio_span(1260, 1740);
         // The lane's centre typed as the dial lands 1.5 kHz too high.
         e.set_dial_hz(Some(C1_CENTRE_HZ));
         assert_eq!(e.tx_gate().1, GATE_NOT_A_LANE);
@@ -5293,7 +5427,8 @@ mod tests {
         let (e, keyed) = gate_station("gate-wide", false);
         e.set_band_table(verified());
         e.set_dial_hz(Some(C1_DIAL_HZ));
-        // The wide KAMI (312 to 2690 Hz of audio) does not fit one 480 Hz lane.
+        // The plain wide KAMI (312 to 2690 Hz of audio) does not fit one 480 Hz lane.
+        e.set_tx_audio_span(312, 2_690);
         assert_eq!(e.tx_gate().1, GATE_OUTSIDE);
         assert!(!fire(&e, &keyed));
     }
@@ -5318,7 +5453,6 @@ mod tests {
         let (e, keyed) = gate_station("gate-late", false);
         e.set_band_table(verified());
         e.set_dial_hz(Some(C1_DIAL_HZ));
-        e.set_tx_audio_span(1260, 1740);
         assert!(fire(&e, &keyed));
         e.set_band_table(BandTable::builtin_r1());
         assert!(!fire(&e, &keyed));
@@ -5335,6 +5469,17 @@ mod tests {
     /// As `bus_engines`, with the radios on the C1 lane dial so that lane sensing is on, and the
     /// bus returned so a test can put interferers on it.
     fn lane_engines(tag: &str, calls: &[&str]) -> (Vec<Engine>, Arc<Bus>) {
+        lane_engines_at(tag, calls, C1_DIAL_HZ)
+    }
+
+    /// As `lane_engines`, with the radios on the lane whose USB dial is `dial_hz`.
+    fn lane_engines_at(tag: &str, calls: &[&str], dial_hz: u64) -> (Vec<Engine>, Arc<Bus>) {
+        let each: Vec<(&str, u64)> = calls.iter().map(|c| (*c, dial_hz)).collect();
+        lane_engines_each(tag, &each)
+    }
+
+    /// As `lane_engines`, each station on its own lane dial.
+    fn lane_engines_each(tag: &str, calls: &[(&str, u64)]) -> (Vec<Engine>, Arc<Bus>) {
         // A real receiver always hears some noise: a bus of exact zeros has a floor of minus
         // infinity and would make every leak look like a strong signal.
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
@@ -5349,12 +5494,12 @@ mod tests {
         clock.join_thread();
         let engines = calls
             .iter()
-            .map(|call| {
+            .map(|(call, dial_hz)| {
                 let (b, c) = (bus.clone(), clock.clone());
                 let start = clock.now();
                 let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { bus: b.clone(), clock: c.clone(), start, delivered: 0, tx_base: 0 }) as Box<dyn Backend>));
                 let mut e = Engine::spawn_with_clock(config(call, temp_dir(&format!("{tag}-{call}"))), factory, clock.clone()).unwrap();
-                e.set_dial_hz(Some(C1_DIAL_HZ));
+                e.set_dial_hz(Some(*dial_hz));
                 e.listen().unwrap();
                 e.set_auto_link(true);
                 e.set_fixed_mode("KAMI-1c").unwrap();
@@ -5605,6 +5750,117 @@ mod tests {
         w.dg_burst_end();
         assert!(messages_seen(&w).is_empty());
         assert_eq!(w.dg.waiting_acks(), 0, "B must not answer a burst that is not for it");
+    }
+
+    // ---- lane mode (WP4) -----------------------------------------------------------------------
+
+    #[test]
+    fn a_chat_arrives_on_every_one_of_the_twelve_lanes() {
+        let table = BandTable::builtin_r1();
+        for lane in &table.bands[0].lanes {
+            let (mut e, _bus) = lane_engines_at(&format!("lane-all-{}", lane.k), &["AA1AAA", "BB1BBB"], lane.dial_hz);
+            send_at(&mut e, 5);
+            let (_, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+            assert_eq!(got.len(), 1, "no message on lane {} (dial {} Hz)", lane.k, lane.dial_hz);
+            assert_eq!(got[0].2, "hello");
+        }
+    }
+
+    #[test]
+    fn a_lane_burst_on_the_air_stays_inside_its_lane_and_is_five_times_slower() {
+        let (mut e, bus) = lane_engines("lane-width", &["AA1AAA", "BB1BBB"]);
+        send_at(&mut e, 5);
+        let (starts, got) = run_lane(&mut e, 200, |g| !g.is_empty());
+        assert_eq!(got.len(), 1);
+        let line = bus.line.lock().unwrap();
+        // The first transmission: where the line is far above the background noise (0.002). The
+        // answer comes later, so stop at the first long quiet stretch.
+        let start = line.iter().position(|v| v.abs() > 0.008).expect("nothing sent");
+        let mut end = start;
+        let mut quiet = 0;
+        for (i, v) in line.iter().enumerate().skip(start) {
+            if v.abs() > 0.008 {
+                end = i;
+                quiet = 0;
+            } else {
+                quiet += 1;
+                if quiet > RATE as usize / 2 {
+                    break;
+                }
+            }
+        }
+        let air = (end - start) as f64 / RATE as f64;
+        // Five times as long as the plain modem's burst for the same number of codewords.
+        let plain: Vec<f64> = (1..=2).map(|n| burst_len_for(Modulation::Kami1c, n) as f64 / RATE as f64).collect();
+        assert!(
+            plain.iter().any(|p| (air / 5.0 - p).abs() < 0.12 * p),
+            "lane burst of {air:.2} s is not five times a plain burst of {plain:?} s"
+        );
+        let freqs: Vec<f64> = (0..=300).map(|k| 10.0 * k as f64).collect();
+        let db = narrow::psd_db(&line[start + RATE as usize / 4..end], &freqs);
+        let outside = freqs.iter().zip(&db).filter(|(f, _)| (**f - 1500.0).abs() > 240.0).map(|(_, d)| *d).fold(f64::MIN, f64::max);
+        assert!(outside < -26.0, "level outside the lane reaches {outside:.1} dB");
+        assert!(!starts.is_empty());
+    }
+
+    /// A chat from AA1AAA to BB1BBB as the audio of one lane burst centred at `audio_hz`, ready to be
+    /// heard by BB1BBB's sound card (two seconds of silence first).
+    fn lane_burst_audio(text: &str, audio_hz: f64) -> Vec<f32> {
+        let msg = chat("AA1AAA", "BB1BBB", text);
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        let frames: Vec<Vec<u8>> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut body = vec![3u8];
+                body.extend_from_slice(c);
+                kahf_core::bundle::Frame {
+                    header: kahf_core::bundle::Header {
+                        kind: kahf_core::bundle::Kind::Message,
+                        flags: 0,
+                        hops: 0,
+                        next_hop: kahf_core::bundle::h24("BB1BBB"),
+                        source: kahf_core::bundle::h24("AA1AAA"),
+                        index: i as u8,
+                        count: chunks.len() as u8,
+                    },
+                    body,
+                }
+                .encode()
+                .unwrap()
+            })
+            .collect();
+        let plain = burst(&frames, Modulation::Kami1c).unwrap();
+        let lane = narrow::to_lane(&plain[LEAD_SILENCE..plain.len() - TAIL_SILENCE], audio_hz);
+        [vec![0f32; 2 * RATE as usize], lane, vec![0f32; 2 * RATE as usize]].concat()
+    }
+
+    /// BB1BBB on the radio dial `dial_hz`, hearing `audio` and nothing else. True when it shows the message.
+    fn hears(dial_hz: u64, audio: Vec<f32>, text: &str) -> bool {
+        let rx: Pipe = Arc::new(Mutex::new(audio.into()));
+        let tx: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut b = vspawn(config("BB1BBB", temp_dir(&format!("hears-{dial_hz}-{text}"))), fake_factory(rx, tx)).unwrap();
+        b.set_dial_hz(Some(dial_hz));
+        b.listen().unwrap();
+        wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if t == text), 60).is_some()
+    }
+
+    #[test]
+    fn a_station_on_c1_also_hears_a_burst_on_c2_and_one_on_c2_hears_c1() {
+        // C1 dial 18113.44 kHz: C1 at 1500 Hz of audio, C2 at 2200 Hz.
+        assert!(hears(18_113_440, lane_burst_audio("own lane", 1500.0), "own lane"), "own lane not heard");
+        assert!(hears(18_113_440, lane_burst_audio("other calling lane", 2200.0), "other calling lane"), "C2 not heard from C1");
+        // C2 dial 18114.14 kHz: C2 at 1500 Hz, C1 at 800 Hz.
+        assert!(hears(18_114_140, lane_burst_audio("c1 from c2", 800.0), "c1 from c2"), "C1 not heard from C2");
+    }
+
+    #[test]
+    fn a_station_hears_only_its_own_lane_and_the_other_calling_lane() {
+        // On a relay lane (R2, lane 1) nothing but its own lane is heard: a burst 700 Hz up is lane 2.
+        assert!(hears(18_110_640, lane_burst_audio("own", 1500.0), "own"));
+        assert!(!hears(18_110_640, lane_burst_audio("neighbour", 2200.0), "neighbour"), "a relay lane station heard a neighbour lane");
+        // On C1 a burst on the spare lane X2 (3 x 700 Hz up: 3600 Hz) is not a calling lane.
+        assert!(!hears(18_113_440, lane_burst_audio("spare", 3600.0), "spare"), "a calling lane station heard the spare lane");
     }
 
     #[test]

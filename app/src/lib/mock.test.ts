@@ -40,7 +40,7 @@ describe("demo engine", () => {
     await e.start(await e.loadSettings());
     await vi.advanceTimersByTimeAsync(3000);
     await e.send("m1", "KA1ABC", "hello", "chat");
-    await vi.advanceTimersByTimeAsync(20000);
+    await vi.advanceTimersByTimeAsync(60000);
     const types = seen.map((x) => x.type);
     expect(types).toContain("tx");
     expect(seen.some((x) => x.type === "sent" && x.id === "m1") || seen.some((x) => x.type === "failed" && x.id === "m1")).toBe(true);

@@ -101,7 +101,7 @@ describe("defaults", () => {
       expect(MODE_TABLE[i].needSnr).toBeGreaterThan(MODE_TABLE[i - 1].needSnr);
       expect(MODE_TABLE[i].netBps).toBeGreaterThan(MODE_TABLE[i - 1].netBps);
     }
-    expect(MODE_TABLE.at(-1)!.netBps).toBeGreaterThan(4000);
+    expect(MODE_TABLE.at(-1)!.netBps).toBeGreaterThan(1000);
   });
 });
 
