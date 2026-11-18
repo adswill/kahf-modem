@@ -7,8 +7,9 @@
   let {
     me = null,
     relays = [],
+    stations = [],
     height = 380,
-  }: { me?: { lat: number; lon: number } | null; relays?: RelayInfo[]; height?: number } = $props();
+  }: { me?: { lat: number; lon: number } | null; relays?: RelayInfo[]; stations?: { call: string; lat: number; lon: number }[]; height?: number } = $props();
 
   const TILE = 256;
   const SERVER = "https://kahf.dev/tiles";
@@ -105,6 +106,12 @@
         <span class="mono">{r.call}</span>
       </div>
     {/each}
+    {#each stations as s (s.call)}
+      {@const p = at(s.lat, s.lon)}
+      <div class="pin station" style:left={`${p.x}px`} style:top={`${p.y}px`} title={s.call}>
+        <span class="mono">{s.call}</span>
+      </div>
+    {/each}
     {#if me}
       {@const p = at(me.lat, me.lon)}
       <div class="pin me" style:left={`${p.x}px`} style:top={`${p.y}px`}><span class="mono">YOU</span></div>
@@ -178,6 +185,9 @@
     margin-top: 2px;
     background: var(--good);
     border: 2px solid var(--bg);
+  }
+  .pin.station::after {
+    background: var(--info, #6aa9ff);
   }
   .pin.me span {
     color: var(--accent-ink);

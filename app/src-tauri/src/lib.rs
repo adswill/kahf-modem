@@ -159,6 +159,7 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
         let calls: Vec<String> = hints.iter().filter_map(|x| x.as_str().map(String::from)).collect();
         engine.set_relay_hints(&calls);
     }
+    engine.set_location(settings::shared_position(&settings));
     engine.set_listen_only(s.listen_only);
     engine.set_auto_link(s.auto_link);
     if s.auto_mode {
@@ -190,19 +191,13 @@ fn engine_disconnect(state: State<Shared>) -> Res<()> {
 
 #[tauri::command]
 fn engine_send(state: State<Shared>, id: String, to: String, text: String, kind: String) -> Res<()> {
-    let before: Vec<u64> = with_engine(&state, |e| Ok(e.outbox_pending().iter().map(|p| p.0).collect()))?;
-    with_engine(&state, |e| match kind.as_str() {
-        "private" => e.send_message_private(&to, &text),
-        "urgent" => e.send_message(&to, &format!("URGENT: {text}")),
-        "signed" => e.send_mail(&to, "Message", &text, &[]).map(|_| ()),
-        _ => e.send_message(&to, &text),
+    let engine_id = with_engine(&state, |e| match kind.as_str() {
+        "private" => e.send_chat(&to, &text, true),
+        "urgent" => e.send_chat(&to, &format!("URGENT: {text}"), false),
+        "signed" => e.send_mail(&to, "Message", &text, &[]),
+        _ => e.send_chat(&to, &text, false),
     })?;
-    let after: Vec<u64> = with_engine(&state, |e| Ok(e.outbox_pending().iter().map(|p| p.0).collect()))?;
-    let mut pending = state.pending.lock().map_err(|e| e.to_string())?;
-    for engine_id in after.into_iter().filter(|p| !before.contains(p)) {
-        pending.push(Pending { ui_id: id.clone(), to: to.clone(), engine_id });
-    }
-    Ok(())
+    track(&state, &id, &to, engine_id)
 }
 
 #[tauri::command]
@@ -398,7 +393,11 @@ async fn relay_directory(state: State<'_, Shared>, refresh: bool) -> Res<Vec<Val
 
 #[tauri::command]
 fn engine_advertise(state: State<Shared>) -> Res<()> {
-    with_engine(&state, |e| e.advertise())
+    let pos = settings::shared_position(&settings::load(&state.data_dir));
+    with_engine(&state, |e| {
+        e.set_location(pos);
+        e.advertise()
+    })
 }
 
 #[tauri::command]

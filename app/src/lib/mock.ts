@@ -271,8 +271,8 @@ export class MockEngine implements Engine {
     this.emit({ type: "tx", state: "starting" });
     window.setTimeout(() => this.emit({ type: "tx", state: "done" }), 1500);
     // Pretend relays pass it on: stations further away answer a little later.
-    [["EA4FAR", 1], ["JA1XYZ", 2]].forEach(([call, hops], i) =>
-      window.setTimeout(() => this.emit({ type: "heard", heard: { call: String(call), snr: null, at: Date.now(), hops: Number(hops), relay: i === 0 } }), 2500 + i * 1800));
+    [["EA4FAR", 1, 40.4, -3.7], ["JA1XYZ", 2, 35.7, 139.7]].forEach(([call, hops, lat, lon], i) =>
+      window.setTimeout(() => this.emit({ type: "heard", heard: { call: String(call), snr: null, at: Date.now(), hops: Number(hops), relay: i === 0, lat: Number(lat), lon: Number(lon) } }), 2500 + i * 1800));
   }
 
   async rigAvailable(): Promise<boolean> {

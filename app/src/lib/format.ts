@@ -50,3 +50,22 @@ export function modeExplained(name: string): string {
   if (n === "1d") return "Fastest. Needs an excellent signal.";
   return "";
 }
+
+/** The most one transfer may hold. Keep in step with `MAX_ATTACHMENT_BYTES` in the engine. */
+export const FILE_LIMIT_BYTES = 100 * 1024;
+
+/** Seconds a transfer of `bytes` takes at `netBps` of useful speed, with room for the
+ * acknowledgements and the gaps while the other station answers. */
+export function transferSeconds(bytes: number, netBps: number): number {
+  return (bytes * 8 * 1.3) / Math.max(20, netBps);
+}
+
+/** "about 3 minutes", "about 1 hour 20 minutes". */
+export function durationWords(seconds: number): string {
+  if (seconds < 90) return `about ${Math.max(5, Math.round(seconds / 5) * 5)} seconds`;
+  const min = Math.round(seconds / 60);
+  if (min < 60) return `about ${min} minute${min === 1 ? "" : "s"}`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `about ${h} hour${h === 1 ? "" : "s"}${m >= 5 ? ` ${m} minutes` : ""}`;
+}

@@ -76,7 +76,8 @@
       app.toast("Choose who to send it to first.", "warn");
       return;
     }
-    for (const f of await app.engine.pickFiles()) await app.sendFile(peer, f);
+    const picked = await app.engine.pickFiles();
+    if (picked.length) app.askSendFiles(peer, picked);
   }
 
   async function record() {

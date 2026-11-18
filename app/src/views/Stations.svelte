@@ -26,7 +26,7 @@
       <button class="btn sm" onclick={() => app.refreshRelayDirectory(true)}>Refresh from kahf.dev</button>
       <button class="btn sm quiet" onclick={() => window.open("https://kahf.dev/map", "_blank")}>Open the website map</button>
     </div>
-    <MapView {me} relays={app.relays} height={340} />
+    <MapView {me} relays={app.relays} stations={app.heard.flatMap((h) => (h.lat != null && h.lon != null && !app.relays.some((r) => r.call === h.call) ? [{ call: h.call, lat: h.lat, lon: h.lon }] : []))} height={340} />
     {#if !me}
       <p class="faint small">Your own position is not shown because you are not sharing a location. <button class="lnk" onclick={() => app.openSettings("location")}>Change that</button></p>
     {/if}

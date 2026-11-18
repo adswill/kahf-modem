@@ -27,6 +27,19 @@ pub fn save(dir: &Path, settings: &Value) -> Result<(), String> {
     fs::rename(&tmp, dir.join(FILE)).map_err(|e| format!("Cannot save the settings: {e}"))
 }
 
+/// The position this station may put in its announcements, following the person's privacy
+/// choice: nothing when off, the middle of its one-degree square for "area", or to the nearest
+/// hundredth of a degree (about a kilometre) for "precise".
+pub fn shared_position(v: &Value) -> Option<(f64, f64)> {
+    let loc = v.get("location")?;
+    let (lat, lon) = (loc.get("lat")?.as_f64()?, loc.get("lon")?.as_f64()?);
+    match loc.get("mode")?.as_str()? {
+        "precise" => Some(((lat * 100.0).round() / 100.0, (lon * 100.0).round() / 100.0)),
+        "area" => Some((lat.floor() + 0.5, lon.floor() + 0.5)),
+        _ => None,
+    }
+}
+
 /// Callsign used when the person only listens: the engine needs some valid name.
 const LISTEN_ONLY_CALL: &str = "NOCALL1";
 
@@ -154,5 +167,15 @@ mod tests {
         fs::write(dir.join(FILE), "not json").unwrap();
         assert_eq!(load(&dir), json!({}));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn announcements_follow_the_privacy_choice() {
+        let v = |mode: &str| serde_json::json!({ "location": { "mode": mode, "lat": 25.2048, "lon": 55.2708 } });
+        assert_eq!(shared_position(&v("off")), None);
+        assert_eq!(shared_position(&v("area")), Some((25.5, 55.5)));
+        assert_eq!(shared_position(&v("precise")), Some((25.2, 55.27)));
+        assert_eq!(shared_position(&serde_json::json!({})), None);
+        assert_eq!(shared_position(&serde_json::json!({ "location": { "mode": "precise", "lat": null, "lon": null } })), None);
     }
 }

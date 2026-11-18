@@ -62,7 +62,7 @@ pub enum Action {
     Deliver(Vec<u8>),
     StateChanged(LinkState),
     /// A station announced itself (no link needed). Relays pass it on while `ttl` lasts.
-    Advert { call: String, ttl: u8, seq: u8, flags: u8 },
+    Advert { call: String, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)> },
     /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
     Metrics(LinkMetrics),
 }
@@ -221,9 +221,9 @@ impl Link {
             Some(&TAG_DATA) => self.on_data(payload),
             Some(&TAG_ACK) => self.on_ack(payload),
             Some(&TAG_ADVERT) => match decode_advert(payload) {
-                Some((call, ttl, seq, flags)) if call != self.callsign && valid_callsign(&call) => {
+                Some((call, ttl, seq, flags, loc)) if call != self.callsign && valid_callsign(&call) => {
                     self.note_heard(&call);
-                    vec![Action::Advert { call, ttl, seq, flags }]
+                    vec![Action::Advert { call, ttl, seq, flags, loc }]
                 }
                 _ => Vec::new(),
             },
@@ -243,6 +243,20 @@ impl Link {
         let mut out = Vec::new();
         self.pump(&mut out);
         out
+    }
+
+    /// A burst has finished going out at `now_ms`. The wait for its answer starts now, not when
+    /// it was queued: a slow channel or a long burst must not look like a lost frame, and
+    /// resending while the other station is still answering collides with its reply.
+    pub fn tx_finished(&mut self, now_ms: u64) {
+        self.clock = self.clock.max(now_ms);
+        let data_deadline = now_ms + DATA_TIMEOUT_MS + self.air_extra;
+        for f in self.slots.iter_mut().flatten() {
+            f.deadline = f.deadline.max(data_deadline);
+        }
+        if matches!(self.state, LinkState::Connecting { .. }) {
+            self.hs_deadline = self.hs_deadline.max(now_ms + CONNECT_TIMEOUT_MS + self.air_extra);
+        }
     }
 
     /// Advance the clock to `now_ms`: retransmit handshake and DATA frames whose timers
@@ -636,24 +650,40 @@ fn valid_callsign(c: &str) -> bool {
 
 /// Advert flag: the announcing station runs a relay.
 pub const ADVERT_RELAY: u8 = 1;
+/// Advert flag: four bytes of position follow the callsign (hundredths of a degree).
+pub const ADVERT_LOCATION: u8 = 2;
 /// How many more relays an advert may be passed through.
 pub const ADVERT_TTL: u8 = 4;
 
 /// An announcement of a station, for everyone who can hear it: tag, hops left, sequence number,
 /// flags, callsign.
-pub fn encode_advert(call: &str, ttl: u8, seq: u8, flags: u8) -> Vec<u8> {
+pub fn encode_advert(call: &str, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)>) -> Vec<u8> {
+    let flags = if loc.is_some() { flags | ADVERT_LOCATION } else { flags & !ADVERT_LOCATION };
     let mut v = vec![TAG_ADVERT, ttl, seq, flags, call.len() as u8];
     v.extend_from_slice(call.as_bytes());
+    if let Some((lat, lon)) = loc {
+        v.extend_from_slice(&((lat * 100.0).round().clamp(-9000.0, 9000.0) as i16).to_be_bytes());
+        v.extend_from_slice(&((lon * 100.0).round().clamp(-18000.0, 18000.0) as i16).to_be_bytes());
+    }
     v
 }
 
-fn decode_advert(p: &[u8]) -> Option<(String, u8, u8, u8)> {
+type DecodedAdvert = (String, u8, u8, u8, Option<(f32, f32)>);
+
+fn decode_advert(p: &[u8]) -> Option<DecodedAdvert> {
     let n = *p.get(4)? as usize;
-    if n == 0 || n > MAX_CALLSIGN || p.len() != 5 + n {
+    let flags = *p.get(3)?;
+    let extra = if flags & ADVERT_LOCATION != 0 { 4 } else { 0 };
+    if n == 0 || n > MAX_CALLSIGN || p.len() != 5 + n + extra {
         return None;
     }
-    let call = String::from_utf8(p[5..].to_vec()).ok()?;
-    Some((call, p[1], p[2], p[3]))
+    let call = String::from_utf8(p[5..5 + n].to_vec()).ok()?;
+    let loc = (extra == 4).then(|| {
+        let lat = i16::from_be_bytes([p[5 + n], p[6 + n]]) as f32 / 100.0;
+        let lon = i16::from_be_bytes([p[7 + n], p[8 + n]]) as f32 / 100.0;
+        (lat, lon)
+    });
+    Some((call, p[1], p[2], flags, loc))
 }
 
 fn encode_hs(tag: u8, from: &str, to: &str) -> Vec<u8> {
@@ -1072,11 +1102,18 @@ mod advert_tests {
     #[test]
     fn an_advert_is_heard_without_a_link() {
         let mut l = Link::new("KB2BRV");
-        let acts = l.on_receive(&encode_advert("KA1ALF", 3, 7, ADVERT_RELAY));
-        assert_eq!(acts, vec![Action::Advert { call: "KA1ALF".into(), ttl: 3, seq: 7, flags: ADVERT_RELAY }]);
-        assert_eq!(l.take_heard(), vec!["KA1ALF".to_string()]);
+        let acts = l.on_receive(&encode_advert("KA1ALF", 3, 7, ADVERT_RELAY, Some((25.2, 55.27))));
+        assert_eq!(
+            acts,
+            vec![Action::Advert {
+                call: "KA1ALF".into(), ttl: 3, seq: 7, flags: ADVERT_RELAY | ADVERT_LOCATION, loc: Some((25.2, 55.27))
+            }]
+        );
+        let plain = l.on_receive(&encode_advert("KC3CCC", 1, 2, 0, None));
+        assert!(matches!(&plain[0], Action::Advert { loc: None, .. }));
+        assert_eq!(l.take_heard(), vec!["KA1ALF".to_string(), "KC3CCC".to_string()]);
         // Our own advert coming back, and nonsense, do nothing.
-        assert!(l.on_receive(&encode_advert("KB2BRV", 3, 7, 0)).is_empty());
+        assert!(l.on_receive(&encode_advert("KB2BRV", 3, 7, 0, None)).is_empty());
         assert!(l.on_receive(&[TAG_ADVERT, 1, 1, 0, 9, b'x']).is_empty());
     }
 }

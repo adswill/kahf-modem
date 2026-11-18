@@ -32,6 +32,9 @@ export interface Heard {
   hops?: number;
   /** The announcing station runs a relay. */
   relay?: boolean;
+  /** Where the station said it is, when it chose to say. */
+  lat?: number | null;
+  lon?: number | null;
 }
 
 export type MessageKind = "chat" | "private" | "urgent" | "signed";

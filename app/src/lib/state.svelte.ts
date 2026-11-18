@@ -3,6 +3,7 @@
 
 import { callProblem, normaliseCall, validCall } from "./callsign";
 import { defaultSettings } from "./defaults";
+import { FILE_LIMIT_BYTES } from "./format";
 import { makeEngine } from "./engine";
 import type {
   Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile,
@@ -268,6 +269,29 @@ class AppState {
     }
   }
 
+  /** Files waiting for the person to confirm, after the warning about time and hops. */
+  pendingFiles = $state<{ to: string; files: PickedFile[] } | null>(null);
+
+  /** The speed to base estimates on: the live link when there is one, else the starting speed. */
+  get estimateBps(): number {
+    return this.metrics?.netBps ?? 284;
+  }
+
+  /** Checks the limit, then asks the person to confirm. */
+  askSendFiles(to: string, files: PickedFile[]) {
+    const ok = files.filter((f) => f.size <= FILE_LIMIT_BYTES);
+    if (ok.length < files.length) {
+      this.toast(`Files over ${sizeWords(FILE_LIMIT_BYTES)} cannot be sent: radio is too slow for them. Zip or shrink the file, or send it another way.`, "warn");
+    }
+    if (ok.length) this.pendingFiles = { to, files: ok };
+  }
+
+  async confirmFiles() {
+    const p = this.pendingFiles;
+    this.pendingFiles = null;
+    if (p) for (const f of p.files) await this.sendFile(p.to, f);
+  }
+
   async sendFile(to: string, file: PickedFile) {
     const peer = normaliseCall(to);
     if (!peer || callProblem(peer) || !this.canSend()) return;
@@ -497,8 +521,11 @@ class AppState {
         break;
       }
       case "heard": {
+        const old = this.heard.find((h) => h.call === e.heard.call);
         const rest = this.heard.filter((h) => h.call !== e.heard.call);
-        this.heard = [e.heard, ...rest].slice(0, 80);
+        // A plain "heard" must not wipe what an announcement told us about the station.
+        const merged = { ...e.heard, lat: e.heard.lat ?? old?.lat, lon: e.heard.lon ?? old?.lon, relay: e.heard.relay ?? old?.relay };
+        this.heard = [merged, ...rest].slice(0, 80);
         save(HEARD_STORE, this.heard);
         break;
       }

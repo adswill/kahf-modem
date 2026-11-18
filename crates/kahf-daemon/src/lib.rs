@@ -23,7 +23,7 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
-use kahf_core::link::{encode_advert, Action, Link, LinkState, ADVERT_RELAY, ADVERT_TTL};
+use kahf_core::link::{encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::Modulation;
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -86,6 +86,8 @@ pub enum Event {
         call: String,
         hops: u8,
         relay: bool,
+        /// Where the station said it is (latitude, longitude), when it chose to say.
+        loc: Option<(f32, f32)>,
     },
     /// A mail arrived, with its text, and was saved in the inbox.
     MailReceived {
@@ -221,6 +223,8 @@ struct Shared {
     relay: Mutex<Option<Relay>>,
     /// Relay stations to try, in order, when a station is not reached on air.
     relay_hints: Mutex<Vec<String>>,
+    /// Where this station says it is in its announcements. None: it does not say.
+    location: Mutex<Option<(f32, f32)>>,
     /// Forwards sent by this station as a relay (plan 4).
     relay_stats: Mutex<Stats>,
     /// One entry per forward, keyed by the public message id.
@@ -354,6 +358,12 @@ impl Engine {
         }
         self.shared.flags.operator_link.store(true, Ordering::SeqCst);
         self.send_cmd(Cmd::Connect { peer })
+    }
+
+    /// The position to put in announcements (latitude, longitude), or None to say nothing.
+    /// The caller decides how exact it is; the engine sends it as given, to a hundredth of a degree.
+    pub fn set_location(&self, loc: Option<(f64, f64)>) {
+        *lock(&self.shared.location) = loc.map(|(a, b)| (a as f32, b as f32));
     }
 
     /// Tells everyone in range that this station exists. Relays pass it on, so stations beyond
@@ -541,6 +551,22 @@ pub fn transmit_modulation(&self) -> &'static str {
     }
 
     /// Queues a chat message. Text starting with "URGENT:" goes out first.
+    /// Queues a chat and returns its outbox id, so the caller can follow it. `private` keeps it
+    /// for the addressee's inbox only.
+    pub fn send_chat(&mut self, to: &str, text: &str, private: bool) -> Result<u64, String> {
+        check_to(to)?;
+        if text.is_empty() {
+            return Err("empty message".into());
+        }
+        let msg = Message::Chat {
+            from: self.config.callsign.clone(),
+            to: to.trim().to_string(),
+            text: text.to_string(),
+        };
+        let ids = self.queue_with(vec![msg], private)?;
+        ids.first().copied().ok_or_else(|| STOPPED.to_string())
+    }
+
     pub fn send_message(&mut self, to: &str, text: &str) -> Result<(), String> {
         check_to(to)?;
         if text.is_empty() {
@@ -583,6 +609,14 @@ pub fn transmit_modulation(&self) -> &'static str {
             .iter()
             .map(|p| read_attachment(p))
             .collect::<Result<Vec<_>, String>>()?;
+        let total: usize = files.iter().map(|(_, d)| d.len()).sum();
+        if total > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "The attachments are {} kB together. The limit is {} kB.",
+                total / 1024,
+                MAX_ATTACHMENT_BYTES / 1024
+            ));
+        }
         let names = files.iter().map(|(n, _)| n.clone()).collect();
         let to = to.trim().to_string();
         let from = self.config.callsign.clone();
@@ -659,6 +693,7 @@ pub fn transmit_modulation(&self) -> &'static str {
             key_error: Mutex::new(key_error),
             relay: Mutex::new(None),
             relay_hints: Mutex::new(Vec::new()),
+            location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
         });
@@ -732,11 +767,22 @@ fn check_to(to: &str) -> Result<(), String> {
     }
 }
 
+/// The most one file or mail may carry. Radio is slow: this is already about 8 minutes at 1.7 kbit/s.
+pub const MAX_ATTACHMENT_BYTES: usize = 100 * 1024;
+
 fn read_attachment(path: &Path) -> Result<(String, Vec<u8>), String> {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .ok_or_else(|| format!("{} has no file name", path.display()))?;
+    let size = fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?.len() as usize;
+    if size > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{name} is {} kB. Files over {} kB cannot be sent over the radio: it would take far too long.",
+            size / 1024,
+            MAX_ATTACHMENT_BYTES / 1024
+        ));
+    }
     let data = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ok((name, data))
 }
@@ -1939,7 +1985,7 @@ impl Worker {
 
     fn connect(&mut self, peer: &str) -> Result<(), String> {
         self.ensure_radio()?;
-        self.link.set_air_ms((burst_len_for(MODULATIONS[self.tx_level as usize], 4) * 1000 / RATE as usize) as u64);
+        self.link.set_air_ms((burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64);
         let actions = guard("link connect", || self.link.connect(peer))?;
         self.log(format!("calling {peer}"));
         self.apply(actions);
@@ -2115,6 +2161,10 @@ impl Worker {
         let flags = &self.shared.flags;
         let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station);
         if !(is_relay && flags.relay_running.load(Ordering::SeqCst) && flags.third_party_relay.load(Ordering::SeqCst)) {
+            return;
+        }
+        // Files go direct. A relay holds no files for others: they are too big for its air time.
+        if matches!(msg, Message::File { .. }) {
             return;
         }
         let digest = {
@@ -2587,12 +2637,13 @@ impl Worker {
         let relay = self.shared.flags.relay_running.load(Ordering::SeqCst);
         let flags = if relay { ADVERT_RELAY } else { 0 };
         self.adverts_seen.push_back((self.callsign.clone(), self.advert_seq));
-        self.control.push_back(vec![encode_advert(&self.callsign, ADVERT_TTL, self.advert_seq, flags)]);
+        let loc = *lock(&self.shared.location);
+        self.control.push_back(vec![encode_advert(&self.callsign, ADVERT_TTL, self.advert_seq, flags, loc)]);
         self.log("Announcing this station on the air.");
     }
 
     /// Another station's advert: tell the operator, and pass it on when this is a running relay.
-    fn on_advert(&mut self, call: String, ttl: u8, seq: u8, flags: u8) {
+    fn on_advert(&mut self, call: String, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)>) {
         if self.adverts_seen.iter().any(|(c, s)| *c == call && *s == seq) {
             return;
         }
@@ -2600,12 +2651,12 @@ impl Worker {
         if self.adverts_seen.len() > 256 {
             self.adverts_seen.pop_front();
         }
-        self.emit(Event::Advert { call: call.clone(), hops: ADVERT_TTL.saturating_sub(ttl), relay: flags & ADVERT_RELAY != 0 });
+        self.emit(Event::Advert { call: call.clone(), hops: ADVERT_TTL.saturating_sub(ttl), relay: flags & ADVERT_RELAY != 0, loc });
         let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station)
             && self.shared.flags.relay_running.load(Ordering::SeqCst);
         if is_relay && ttl > 0 && tx_refusal(&self.shared.flags).is_none() {
             self.log(format!("Passing on the announcement of {call}."));
-            self.control.push_back(vec![encode_advert(&call, ttl - 1, seq, flags)]);
+            self.control.push_back(vec![encode_advert(&call, ttl - 1, seq, flags & !ADVERT_LOCATION, loc)]);
         }
     }
 
@@ -2618,7 +2669,7 @@ impl Worker {
             match action {
                 Action::Transmit(payload) => frames.push(payload),
                 Action::Deliver(chunk) => self.deliver(chunk),
-                Action::Advert { call, ttl, seq, flags } => self.on_advert(call, ttl, seq, flags),
+                Action::Advert { call, ttl, seq, flags, loc } => self.on_advert(call, ttl, seq, flags, loc),
                 Action::StateChanged(state) => {
                     self.on_link_state(&state);
                     self.emit(Event::Link(state));
@@ -2664,7 +2715,8 @@ impl Worker {
                 let want = ladder_level(snr);
                 next = match fer {
                     Some(f) if f >= 8 => cur.saturating_sub(1).min(want),
-                    Some(f) if f >= 2 => want.min(cur),
+                    // Some loss: climb only one rung at a time.
+                    Some(f) if f >= 2 => want.min(cur + 1),
                     _ => want,
                 };
             }
@@ -2703,7 +2755,7 @@ impl Worker {
         let m = MODULATIONS[self.tx_level as usize];
         // Weak mode: the most robust KAMI mode, for stations that cannot answer.
         let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) { Modulation::Kami256 } else { m };
-        self.link.set_air_ms((burst_len_for(m, 4) * 1000 / RATE as usize) as u64);
+        self.link.set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64);
         self.shared
             .flags
             .tx_level_shown
@@ -2776,6 +2828,8 @@ impl Worker {
                 let secs = job.samples.len() as f64 / RATE as f64;
                 self.stop_radio_tx();
                 self.end_rx_gap();
+                let now = self.now_ms();
+                self.link.tx_finished(now);
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -4226,6 +4280,7 @@ mod tests {
             key_error: Mutex::new(None),
             relay: Mutex::new(None),
             relay_hints: Mutex::new(Vec::new()),
+            location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
         });
@@ -4653,24 +4708,51 @@ mod tests {
     #[test]
     fn adverts_are_shown_once_and_only_a_running_relay_passes_them_on() {
         let mut w = bare_worker("advert-plain", "AA1AAA");
-        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0);
-        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0);
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
         let shown: Vec<_> = lock(&w.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
-        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 0, relay: false }]);
+        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 0, relay: false, loc: None }]);
         assert!(w.control.is_empty(), "a plain station passed an advert on");
 
         let mut r = bare_worker("advert-relay", "RR1RRR");
         *lock(&r.shared.relay) =
             Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
         r.shared.flags.relay_running.store(true, Ordering::SeqCst);
-        r.on_advert("BB1BBB".into(), 3, 9, ADVERT_RELAY);
+        r.on_advert("BB1BBB".into(), 3, 9, ADVERT_RELAY, Some((25.2, 55.27)));
         let shown: Vec<_> = lock(&r.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
-        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 1, relay: true }]);
+        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 1, relay: true, loc: Some((25.2, 55.27)) }]);
         assert_eq!(r.control.len(), 1);
-        assert_eq!(r.control[0], vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY)]);
+        assert_eq!(r.control[0], vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY, Some((25.2, 55.27)))]);
         // The last hop is shown but not passed on.
-        r.on_advert("CC1CCC".into(), 0, 1, 0);
+        r.on_advert("CC1CCC".into(), 0, 1, 0, None);
         assert_eq!(r.control.len(), 1);
+    }
+
+    #[test]
+    fn attachments_over_the_limit_are_refused_with_a_plain_reason() {
+        let dir = temp_dir("attach-limit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![0u8; MAX_ATTACHMENT_BYTES + 1]).unwrap();
+        let err = read_attachment(&big).unwrap_err();
+        assert!(err.contains("big.bin") && err.contains("kB"), "{err}");
+        let ok = dir.join("ok.bin");
+        std::fs::write(&ok, vec![0u8; 1000]).unwrap();
+        assert!(read_attachment(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_relay_does_not_pass_files_on() {
+        let mut r = bare_worker("no-file-hops", "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
+        let file = Message::File { from: "AA1AAA".into(), to: "BB1BBB".into(), name: "x".into(), data: vec![1] };
+        r.forward_third_party(&file, false);
+        assert!(r.forwarded.is_empty(), "a file was queued for forwarding");
+        r.forward_third_party(&chat("AA1AAA", "BB1BBB", "hi"), false);
+        assert_eq!(r.forwarded.len(), 1, "a chat was not forwarded");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 <script lang="ts">
+  import FileNotice from "../components/FileNotice.svelte";
   import { app, sizeWords } from "../lib/state.svelte";
   import { callProblem, normaliseCall } from "../lib/callsign";
-  import { clock, timeAgo } from "../lib/format";
+  import { FILE_LIMIT_BYTES, clock, timeAgo } from "../lib/format";
   import type { MailItem, PickedFile } from "../lib/types";
   import Icon from "../components/Icon.svelte";
   import Tip from "../components/Tip.svelte";
@@ -23,7 +24,7 @@
   );
   const current = $derived<MailItem | undefined>(app.mail.find((m) => m.id === open));
   const problem = $derived(callProblem(to));
-  const ready = $derived(normaliseCall(to) !== "" && !problem && (body.trim() !== "" || files.length > 0) && !app.settings.listenOnly);
+  const ready = $derived(normaliseCall(to) !== "" && !problem && (body.trim() !== "" || files.length > 0) && files.reduce((n, f) => n + f.size, 0) <= FILE_LIMIT_BYTES && !app.settings.listenOnly);
 
   $effect(() => {
     if (current && current.dir === "in" && !current.read) app.markMailRead();
@@ -115,6 +116,7 @@
               <button class="btn quiet sm" onclick={() => (files = files.filter((_, j) => j !== i))}>Remove</button>
             </div>
           {/each}
+          <FileNotice {files} />
         </div>
         <div class="row">
           <button class="btn primary" onclick={send} disabled={!ready}><Icon name="send" size={14} /> Send mail</button>

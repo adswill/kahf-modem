@@ -5,6 +5,7 @@
   import Nav from "./components/Nav.svelte";
   import Toasts from "./components/Toasts.svelte";
   import Tour from "./components/Tour.svelte";
+  import FileConfirm from "./components/FileConfirm.svelte";
   import SettingsSheet from "./components/SettingsSheet.svelte";
   import HelpPanel from "./components/HelpPanel.svelte";
   import Welcome from "./pages/Welcome.svelte";
@@ -67,6 +68,7 @@
     {#if app.helpOpen}<HelpPanel />{/if}
   {/if}
   <Toasts />
+  <FileConfirm />
   {#if app.tourOpen}<Tour />{/if}
 {/if}
 

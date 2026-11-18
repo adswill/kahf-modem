@@ -21,21 +21,24 @@ fn main() {
     b.listen().unwrap();
     a.set_auto_link(true);
     b.set_auto_link(true);
-    b.send_message("KA1ALF", "hello over blackhole").unwrap();
+    a.send_message("KB2BRV", "hello over blackhole").unwrap();
+    let mut more = false;
     let t = Instant::now();
     let mut advertised = false;
-    while t.elapsed() < Duration::from_secs(30) {
-        if !advertised && t.elapsed() > Duration::from_secs(12) {
-            advertised = true;
-            a.advertise().unwrap();
+    while t.elapsed() < Duration::from_secs(45) {
+        if !more && t.elapsed() > Duration::from_secs(10) {
+            more = true;
+            a.send_message("KB2BRV", "second message").unwrap();
+            b.send_message("KA1ALF", "reply from b").unwrap();
         }
+        let _ = &mut advertised;
         for (n, e) in [("A", &mut a), ("B", &mut b)] {
             for ev in e.poll_events() {
                 if let kahf_daemon::Event::Spectrum(b) = &ev {
                     let m = b.iter().cloned().fold(f32::MIN, f32::max);
                     if m > -60.0 { println!("[{:5.1}s] {n}: spectrum peak {m:.0} dB", t.elapsed().as_secs_f32()); }
                 } else {
-                    println!("[{:5.1}s] {n}: {ev:?}", t.elapsed().as_secs_f32());
+                    println!("[{:5.1}s] {n}: {ev:?} pending={}", t.elapsed().as_secs_f32(), e.outbox_pending().len());
                 }
             }
         }

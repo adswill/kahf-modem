@@ -114,3 +114,18 @@ describe("start errors", () => {
     expect(explainStartError("something odd")).toMatch(/could not start/);
   });
 });
+
+import { FILE_LIMIT_BYTES, durationWords, transferSeconds } from "./format";
+
+describe("file transfer estimates", () => {
+  it("scales with size and speed", () => {
+    expect(transferSeconds(10_000, 1000)).toBeCloseTo(104, 0);
+    expect(transferSeconds(10_000, 10)).toBe(transferSeconds(10_000, 20));
+  });
+  it("says it in plain words", () => {
+    expect(durationWords(40)).toBe("about 40 seconds");
+    expect(durationWords(300)).toBe("about 5 minutes");
+    expect(durationWords(4800)).toBe("about 1 hour 20 minutes");
+    expect(FILE_LIMIT_BYTES).toBe(102400);
+  });
+});
