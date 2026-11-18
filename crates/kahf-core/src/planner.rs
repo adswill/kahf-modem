@@ -126,10 +126,10 @@ pub fn plan(epoch: u64, seed: u32, relays: &[RelayIn]) -> Plan {
             }
         }
         for &i in members.iter() {
-            if !lane_of.contains_key(&i) {
+            if let std::collections::btree_map::Entry::Vacant(e) = lane_of.entry(i) {
                 let l = (0..LANES).find(|l| !used[*l]).unwrap_or(0);
                 used[l] = true;
-                lane_of.insert(i, l);
+                e.insert(l);
             }
         }
         for &i in members.iter() {
