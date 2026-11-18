@@ -22,6 +22,7 @@ use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
+use kahf_core::lanes::{self as laneplan, BandTable};
 use kahf_core::ldpc;
 mod backbone;
 mod clock;
@@ -279,6 +280,27 @@ struct Flags {
     /// an SSB rig driven too hard splatters across neighbouring channels, which on a few shared
     /// HF frequencies spoils everyone's reception.
     tx_level_pct: AtomicU8,
+    /// What the transmit gate checks against: the band table, the radio's dial and the bench
+    /// switch (MESH-SPEC 5.1 I7 and 2.3).
+    policy: Mutex<TxPolicy>,
+    /// The open radio cannot reach an antenna (in-memory test radio, or BlackHole). Known once the radio is open.
+    bench_radio: AtomicBool,
+    /// The radio is open, so `bench_radio` and `radio_dial_hz` are known.
+    radio_known: AtomicBool,
+    /// Dial the radio itself reports (an SDR knows it), 0 when unknown.
+    radio_dial_hz: AtomicU64,
+}
+
+/// The transmit gate's settings. The built-in table is **not verified** (`plan_verified` is
+/// false and only the project owner changes that), so on a real radio the gate refuses every
+/// transmission. `test_table` lets a bench radio (in-memory or BlackHole) transmit for tests;
+/// it never opens a real radio.
+struct TxPolicy {
+    table: BandTable,
+    dial_hz: Option<u64>,
+    test_table: bool,
+    /// Audio span (Hz) the modem fills; the gate checks the occupied span from it.
+    audio_span: (u64, u64),
 }
 
 impl Flags {
@@ -300,6 +322,10 @@ impl Flags {
             internet_relay: AtomicBool::new(true),
             third_party_relay: AtomicBool::new(true),
             relay_timeout_ms: AtomicU64::new(RELAY_TIMEOUT_MS),
+            policy: Mutex::new(TxPolicy { table: BandTable::builtin_r1(), dial_hz: None, test_table: false, audio_span: TX_AUDIO_SPAN_HZ }),
+            bench_radio: AtomicBool::new(false),
+            radio_known: AtomicBool::new(false),
+            radio_dial_hz: AtomicU64::new(0),
         }
     }
 }
@@ -311,7 +337,47 @@ fn tx_refusal(f: &Flags) -> Option<&'static str> {
     } else if f.listen_only.load(Ordering::SeqCst) {
         Some(LISTEN_ONLY_TEXT)
     } else {
-        None
+        gate_refusal(f)
+    }
+}
+
+const GATE_UNVERIFIED: &str = "Transmit is off: the 17 m band table is not verified against the current band plan yet. Receiving works.";
+const GATE_NO_DIAL: &str = "Transmit is off: KAHF does not know the radio's dial frequency. Choose a lane on the Radio screen.";
+const GATE_NOT_A_LANE: &str = "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
+const GATE_OUTSIDE: &str = "Transmit is off: the signal would not fit inside the lane.";
+const GATE_TEST_REAL: &str = "The test table is on, but this is a real radio. Transmit is off.";
+
+/// Audio span the modem fills today, in Hz (the wide KAMI carriers). The lane mode (480 Hz)
+/// replaces this when it is in the engine.
+const TX_AUDIO_SPAN_HZ: (u64, u64) = (312, 2_690);
+
+/// The transmit gate (MESH-SPEC I7): every transmission must pass `lanes::permit_tx` against
+/// the band table with the dial the radio is really on. Returns why not, or `None`.
+/// While the radio is not open yet nothing is decided (the check repeats before every burst).
+fn gate_refusal(f: &Flags) -> Option<&'static str> {
+    if !f.radio_known.load(Ordering::SeqCst) {
+        return None;
+    }
+    let bench = f.bench_radio.load(Ordering::SeqCst);
+    let p = lock(&f.policy);
+    if p.test_table {
+        return if bench { None } else { Some(GATE_TEST_REAL) };
+    }
+    if !p.table.plan_verified {
+        return Some(GATE_UNVERIFIED);
+    }
+    let radio_dial = f.radio_dial_hz.load(Ordering::SeqCst);
+    let Some(dial) = p.dial_hz.or((radio_dial != 0).then_some(radio_dial)) else {
+        return Some(GATE_NO_DIAL);
+    };
+    let Some(band) = p.table.band("17m") else { return Some(GATE_OUTSIDE) };
+    let Some(lane) = band.lanes.iter().find(|l| l.dial_hz == dial) else {
+        return Some(GATE_NOT_A_LANE);
+    };
+    match p.table.permit_tx("17m", lane.k, lane.k, dial, p.audio_span.0, p.audio_span.1) {
+        Ok(()) => None,
+        Err(laneplan::Violation::PlanNotVerified) => Some(GATE_UNVERIFIED),
+        Err(_) => Some(GATE_OUTSIDE),
     }
 }
 
@@ -420,6 +486,40 @@ impl Engine {
     pub fn disconnect(&mut self) -> Result<(), String> {
         self.shared.flags.operator_link.store(false, Ordering::SeqCst);
         self.send_cmd(Cmd::Disconnect)
+    }
+
+    /// Replaces the band table the transmit gate checks against (a signed update, once there is one).
+    pub fn set_band_table(&self, table: BandTable) {
+        lock(&self.shared.flags.policy).table = table;
+    }
+
+    /// The USB dial the radio is on, in Hz (the app's lane setting). `None` = not known.
+    pub fn set_dial_hz(&self, dial_hz: Option<u64>) {
+        lock(&self.shared.flags.policy).dial_hz = dial_hz;
+    }
+
+    /// The audio span the modem fills, in Hz (the lane mode sets 1260 to 1740).
+    pub fn set_tx_audio_span(&self, lo_hz: u64, hi_hz: u64) {
+        lock(&self.shared.flags.policy).audio_span = (lo_hz, hi_hz);
+    }
+
+    /// Test table: lets a bench radio (in-memory or BlackHole) transmit while the band table is
+    /// unverified. It has no effect on a real radio, which stays refused.
+    pub fn set_test_table(&self, on: bool) {
+        lock(&self.shared.flags.policy).test_table = on;
+    }
+
+    /// What the transmit gate says now: `("real", "")` when a real radio may transmit,
+    /// `("bench", ..)` on the test table with a bench radio, else `("off", reason)`.
+    pub fn tx_gate(&self) -> (&'static str, String) {
+        let f = &self.shared.flags;
+        if let Some(why) = tx_refusal(f) {
+            return ("off", why.to_string());
+        }
+        if lock(&f.policy).test_table && f.bench_radio.load(Ordering::SeqCst) {
+            return ("bench", "Test table: bench radio only, nothing reaches an antenna.".to_string());
+        }
+        ("real", String::new())
     }
 
     /// Listen only (plan 0): while on, no transmit path runs. Receive keeps working.
@@ -747,6 +847,11 @@ pub fn transmit_modulation(&self) -> &'static str {
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
         });
+        // Daemon tests run on test radios: the bench table is on unless a test turns it off.
+        #[cfg(test)]
+        {
+            lock(&shared.flags.policy).test_table = true;
+        }
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
         let (worker_shared, worker_ids) = (shared.clone(), ids.clone());
@@ -919,6 +1024,15 @@ trait Backend {
     fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String>;
     /// End the transmission: PTT off, transmitter closed. Called after every `tx_start`.
     fn tx_stop(&mut self) -> Result<(), String>;
+    /// True when this radio can never reach an antenna (in-memory test radio, BlackHole).
+    /// Only such a radio may run on the test table.
+    fn is_bench(&self) -> bool {
+        false
+    }
+    /// The USB dial in Hz when the radio itself fixes it (an SDR), else `None`.
+    fn dial_hz(&self) -> Option<u64> {
+        None
+    }
 }
 
 fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
@@ -931,10 +1045,13 @@ fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
         Some(addr) => Some(Box::new(RigctldClient::connect(addr)?)),
         None => None,
     };
+    let named_blackhole = |n: &Option<String>| n.as_deref().is_some_and(|n| n.to_lowercase().contains("blackhole"));
+    let bench = cfg.rigctld.is_none() && named_blackhole(&cfg.audio_in) && named_blackhole(&cfg.audio_out);
     Ok(Box::new(AudioBackend {
         input: Some(input),
         output: Some(output),
         rig,
+        bench,
     }))
 }
 
@@ -950,9 +1067,15 @@ struct AudioBackend {
     input: Option<AudioIn>,
     output: Option<AudioOut>,
     rig: Option<Box<dyn RigControl>>,
+    /// Both audio devices are BlackHole and there is no rig control: nothing can radiate.
+    bench: bool,
 }
 
 impl Backend for AudioBackend {
+    fn is_bench(&self) -> bool {
+        self.bench
+    }
+
     fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
         let Some(input) = self.input.as_mut() else {
             return Ok(());
@@ -1043,6 +1166,10 @@ fn set_rx_gains(rx: &mut dyn RxRadio) -> Result<(), String> {
 }
 
 impl Backend for SdrBackend {
+    fn dial_hz(&self) -> Option<u64> {
+        Some(self.spec.freq_hz)
+    }
+
     fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
         if self.rx.is_none() {
             let mut rx = kahf_radio::open(&self.spec.radio)?;
@@ -2110,8 +2237,16 @@ impl Worker {
             return Ok(());
         }
         let backend = (self.factory)().map_err(|e| format!("cannot open radio: {e}"))?;
+        let flags = &self.shared.flags;
+        flags.bench_radio.store(backend.is_bench(), Ordering::SeqCst);
+        flags.radio_dial_hz.store(backend.dial_hz().unwrap_or(0), Ordering::SeqCst);
+        flags.radio_known.store(true, Ordering::SeqCst);
+        let test = lock(&flags.policy).test_table;
         self.backend = Some(backend);
         self.log("radio open");
+        if test && flags.bench_radio.load(Ordering::SeqCst) {
+            self.log("TEST TABLE ON: bench radio only. Nothing is sent to an antenna.");
+        }
         Ok(())
     }
 
@@ -3180,6 +3315,10 @@ impl Worker {
     fn tx_advance(&mut self, job: &mut TxJob) -> Result<TxStep, String> {
         let now = self.clock.now();
         let Some(started) = job.started else {
+            // Every burst passes the gate, whatever queued it.
+            if let Some(why) = tx_refusal(&self.shared.flags) {
+                return Err(why.to_string());
+            }
             self.radio()?.tx_start()?;
             job.started = Some(now);
             self.emit_tx(TxState::Starting);
@@ -3715,6 +3854,9 @@ mod tests {
     }
 
     impl Backend for FakeRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         /// Like a sound card: one second of audio per (virtual) second; silence where nothing was sent.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let due = (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize;
@@ -3767,6 +3909,9 @@ mod tests {
     }
 
     impl Backend for BusRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         /// Like a sound card: exactly one second of audio per second. Whatever was sent at
         /// that moment is in it, mixed with anything else sent then; otherwise silence.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
@@ -3874,6 +4019,9 @@ mod tests {
     }
 
     impl Backend for SlowOutputRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
             Ok(())
         }
@@ -3900,6 +4048,9 @@ mod tests {
     }
 
     impl Backend for ClockRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let due = (self.start.elapsed().as_secs_f64() * RATE as f64) as usize;
             for n in self.given..due {
@@ -4470,6 +4621,9 @@ mod tests {
     }
 
     impl Backend for NoisyRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let from = out.len();
             self.inner.read_audio(out)?;
@@ -4552,6 +4706,9 @@ mod tests {
     }
 
     impl Backend for MeshRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         /// One second of audio per (virtual) second: what the heard stations sent, added up, or silence.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let from = out.len();
@@ -4840,6 +4997,9 @@ mod tests {
     }
 
     impl Backend for PttCountingRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
             Ok(())
         }
@@ -4856,6 +5016,141 @@ mod tests {
         fn tx_stop(&mut self) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    /// Radio for the gate tests: counts PTT, and says whether it could reach an antenna.
+    struct GateRadio {
+        keyed: Arc<AtomicU64>,
+        bench: bool,
+    }
+
+    impl Backend for GateRadio {
+        fn is_bench(&self) -> bool {
+            self.bench
+        }
+        fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.keyed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn tx_write(&mut self, _samples: &[f32], _start: usize, _end: usize) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// An engine on a `GateRadio`, listening, with the test table switched off.
+    fn gate_station(tag: &str, bench: bool) -> (Engine, Arc<AtomicU64>) {
+        let keyed = Arc::new(AtomicU64::new(0));
+        let k = keyed.clone();
+        let factory: Factory =
+            Box::new(move || Ok(Box::new(GateRadio { keyed: k.clone(), bench }) as Box<dyn Backend>));
+        let mut e = vspawn(config("AA1AAA", temp_dir(tag)), factory).unwrap();
+        e.set_test_table(false);
+        e.listen().unwrap();
+        test_clock().sleep(Duration::from_millis(200));
+        (e, keyed)
+    }
+
+    fn fire(e: &Engine, keyed: &Arc<AtomicU64>) -> bool {
+        let before = keyed.load(Ordering::SeqCst);
+        e.test_burst(vec![0.5; 4000]).unwrap();
+        test_clock().sleep(Duration::from_millis(600));
+        keyed.load(Ordering::SeqCst) > before
+    }
+
+    fn verified() -> BandTable {
+        let mut t = BandTable::builtin_r1();
+        t.plan_verified = true;
+        t
+    }
+
+    const C1_DIAL_HZ: u64 = 18_113_440;
+    const C1_CENTRE_HZ: u64 = 18_114_940;
+
+    #[test]
+    fn gate_unverified_table_refuses_a_real_radio_and_never_keys_ptt() {
+        let (mut e, keyed) = gate_station("gate-unverified", false);
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        e.set_tx_audio_span(1260, 1740);
+        assert!(!fire(&e, &keyed), "PTT keyed on an unverified table");
+        let (mode, why) = e.tx_gate();
+        assert_eq!(mode, "off");
+        assert_eq!(why, GATE_UNVERIFIED);
+        assert_eq!(e.send_message("BB1BBB", "hi").unwrap_err(), GATE_UNVERIFIED);
+    }
+
+    #[test]
+    fn gate_verified_table_lets_a_lane_signal_on_the_right_dial_through() {
+        let (e, keyed) = gate_station("gate-verified", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        e.set_tx_audio_span(1260, 1740);
+        assert_eq!(e.tx_gate().0, "real");
+        assert!(fire(&e, &keyed), "a lane signal on the lane dial was refused");
+    }
+
+    #[test]
+    fn gate_refuses_the_dial_trap_and_an_unknown_dial() {
+        let (e, keyed) = gate_station("gate-trap", false);
+        e.set_band_table(verified());
+        e.set_tx_audio_span(1260, 1740);
+        // The lane's centre typed as the dial lands 1.5 kHz too high.
+        e.set_dial_hz(Some(C1_CENTRE_HZ));
+        assert_eq!(e.tx_gate().1, GATE_NOT_A_LANE);
+        assert!(!fire(&e, &keyed));
+        // 14.103 MHz (an old setting) is not a lane either.
+        e.set_dial_hz(Some(14_103_000));
+        assert_eq!(e.tx_gate().1, GATE_NOT_A_LANE);
+        e.set_dial_hz(None);
+        assert_eq!(e.tx_gate().1, GATE_NO_DIAL);
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn gate_refuses_a_signal_wider_than_the_lane() {
+        let (e, keyed) = gate_station("gate-wide", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        // The wide KAMI (312 to 2690 Hz of audio) does not fit one 480 Hz lane.
+        assert_eq!(e.tx_gate().1, GATE_OUTSIDE);
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn test_table_opens_only_a_bench_radio() {
+        let (real, keyed_real) = gate_station("gate-test-real", false);
+        real.set_test_table(true);
+        assert_eq!(real.tx_gate().1, GATE_TEST_REAL);
+        assert!(!fire(&real, &keyed_real), "the test table opened a real radio");
+
+        let (bench, keyed_bench) = gate_station("gate-test-bench", true);
+        assert_eq!(bench.tx_gate().0, "off", "a bench radio still needs the test table");
+        bench.set_test_table(true);
+        assert_eq!(bench.tx_gate().0, "bench");
+        assert!(fire(&bench, &keyed_bench));
+    }
+
+    #[test]
+    fn gate_checks_every_burst_not_only_the_queue() {
+        // A burst already queued when the table turns unverified must not go out.
+        let (e, keyed) = gate_station("gate-late", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        e.set_tx_audio_span(1260, 1740);
+        assert!(fire(&e, &keyed));
+        e.set_band_table(BandTable::builtin_r1());
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn an_sdr_knows_its_own_dial_and_a_blackhole_pair_is_a_bench() {
+        let spec = parse_sdr("hackrf@18113440").unwrap();
+        assert_eq!(SdrBackend::new(spec).dial_hz(), Some(C1_DIAL_HZ));
     }
 
     #[test]

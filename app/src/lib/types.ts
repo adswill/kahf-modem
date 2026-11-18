@@ -179,6 +179,11 @@ export interface Settings {
   theme: "dark" | "light";
 }
 
+export interface TxGate {
+  mode: "real" | "bench" | "off";
+  text: string;
+}
+
 export interface ModeInfo {
   name: string;
   /** SNR (dB) needed to lose under 5 percent of frames. */
@@ -250,4 +255,6 @@ export interface Engine {
   listAudioDevices(): Promise<string[]>;
   detectSdr(): Promise<string[]>;
   modes(): Promise<ModeInfo[]>;
+  /** Whether this station may transmit: real, bench (test table, no antenna) or off, with the reason. */
+  txGate(): Promise<TxGate>;
 }

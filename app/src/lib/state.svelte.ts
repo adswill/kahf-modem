@@ -7,7 +7,7 @@ import { laneKhzOrDefault } from "./bands";
 import { FILE_LIMIT_BYTES } from "./format";
 import { makeEngine } from "./engine";
 import type {
-  Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile,
+  Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile, TxGate,
   RelayInfo, RelayStatus, Settings, VoiceClip,
 } from "./types";
 
@@ -81,6 +81,8 @@ class AppState {
   mail = $state<MailItem[]>([]);
   metrics = $state<Metrics | null>(null);
   modes = $state<ModeInfo[]>([]);
+  /** Whether sending is allowed now (the transmit gate), refreshed every few seconds. */
+  txGate = $state<TxGate>({ mode: "off", text: "" });
   log = $state<{ at: number; text: string }[]>([]);
   spectrum = $state<number[]>([]);
   transmitting = $state(false);
@@ -179,6 +181,7 @@ class AppState {
       this.refreshRelayDirectory(false);
     }
     this.ready = true;
+    setInterval(() => void this.refreshGate(), 5000);
   }
 
   applyTheme() {
@@ -217,10 +220,19 @@ class AppState {
   }
 
   /** Starts the radio. Never throws: a problem becomes a sentence the person can act on. */
+  async refreshGate() {
+    try {
+      this.txGate = await this.engine.txGate();
+    } catch {
+      /* the engine is not running yet */
+    }
+  }
+
   async startEngine(): Promise<boolean> {
     try {
       await this.engine.start($state.snapshot(this.settings) as Settings);
       this.engineError = "";
+      await this.refreshGate();
       return true;
     } catch (e) {
       this.engineError = explainStartError(String(e));

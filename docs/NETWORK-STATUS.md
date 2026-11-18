@@ -95,3 +95,17 @@ Step 4 limits: ideal channel and ideal transmitter only (no radio non-linearity,
 | Docs | marked | NETWORK-CHANNELS, NETWORK-DESIGN and NETWORK-SCENARIOS carry a "background only" note. Old band names remain in history docs and in negative tests (they check that old bands are refused), by design |
 
 Not verified: the real Tauri window was not run in this package; nothing has been on a radio. Website text (`server/src/web/*`) and release notes are WP11.
+
+## WP1 transmit gate (2026-11-18, session E)
+
+| Item | State | Evidence |
+|---|---|---|
+| Gate on every burst | built, in the engine | `kahf-daemon/src/lib.rs`: `gate_refusal` runs `lanes::permit_tx` with the dial the radio is really on and the audio span the modem fills. It is checked in the main loop (a refusal holds transmit and logs once) and again in `tx_advance` before PTT, so no burst skips it |
+| Built-in table | still **not verified** | `plan_verified` stays false (owner only). On a real radio every transmission is refused with the text "Transmit is off: the 17 m band table is not verified ... Receiving works." Receiving is unchanged |
+| Dial trap | refused | tests: lane centre typed as dial, an old 14.103 MHz setting, and an unknown dial are all refused; the lane dial 18113.44 kHz passes (on a verified table and a lane-width signal) |
+| Today's modem is too wide | known limit, closed by WP4 | the engine still sends the wide KAMI (312 to 2690 Hz of audio). On a verified table it is refused as "would not fit inside the lane" until the lane mode is in the engine. So no real transmit is possible yet, on purpose |
+| Test table (bench mode) | built | `Engine::set_test_table(true)`, setting `"testTable": true`. It opens **only** a bench radio: in-memory test radios, or a sound card pair where both devices are named BlackHole and no rig control or SDR is set. A real radio with the test table on stays refused ("The test table is on, but this is a real radio"). Logged loudly when the radio opens, and the Radio screen shows an amber "TEST TABLE ON" notice. Default off |
+| App | wired | Tauri `engine_start` sets the dial from the lane setting and the test table from settings; command `engine_tx_gate`; the app polls it every 5 s and shows the reason (or the bench notice) on the Radio screen |
+| Tests | 7 new daemon tests (gate), 1 settings test | unverified refuses and never keys PTT; verified lane signal passes; dial trap and unknown dial; wide signal refused; test table opens bench only; every burst rechecked; an SDR reports its own dial |
+
+Decision (owner said "you decide"): the bench is defined by the device names (BlackHole) and the absence of rig control or an SDR, so the owner's two-instance bench works with `"testTable": true` in its settings files and no real sound card can use it. Not verified: the real Tauri window.

@@ -44,6 +44,13 @@
 
 <div class="view">
   <div class="main">
+    {#if app.txGate.mode === "bench"}
+      <section class="gate bench" role="status">
+        <b>TEST TABLE ON.</b> This is a bench radio: nothing reaches an antenna. A real radio never uses the test table.
+      </section>
+    {:else if app.txGate.mode === "off" && app.txGate.text}
+      <section class="gate off" role="status">{app.txGate.text}</section>
+    {/if}
     <section>
       <div class="head row">
         <h1>The channel</h1>
@@ -149,6 +156,9 @@
 </div>
 
 <style>
+  .gate { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border, #888); }
+  .gate.bench { border-color: #d29922; background: rgba(210, 153, 34, 0.14); }
+  .gate.off { border-color: #8b949e; background: rgba(139, 148, 158, 0.12); }
   .view {
     height: 100%;
     display: grid;

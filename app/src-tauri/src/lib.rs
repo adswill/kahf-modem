@@ -162,6 +162,9 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
     engine.set_tx_level(s.tx_level);
     engine.set_location(settings::shared_position(&settings));
     engine.set_listen_only(s.listen_only);
+    // The radio's USB dial is the lane setting; the transmit gate checks it against the band table.
+    engine.set_dial_hz(Some((s.freq_khz * 1000.0).round() as u64));
+    engine.set_test_table(s.test_table);
     engine.set_auto_link(s.auto_link);
     if s.auto_mode {
         engine.set_auto_mode(true);
@@ -170,6 +173,15 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
     }
     *state.engine.lock().map_err(|e| e.to_string())? = Some(engine);
     Ok(())
+}
+
+/// Whether this station may transmit now: `{ mode: "real" | "bench" | "off", text }`.
+#[tauri::command]
+fn engine_tx_gate(state: State<Shared>) -> Res<Value> {
+    with_engine(&state, |e| {
+        let (mode, text) = e.tx_gate();
+        Ok(json!({ "mode": mode, "text": text }))
+    })
 }
 
 fn with_engine<T>(state: &State<Shared>, f: impl FnOnce(&mut Engine) -> Res<T>) -> Res<T> {
@@ -521,6 +533,7 @@ pub fn run() {
             list_audio_devices,
             detect_sdr,
             engine_modes,
+            engine_tx_gate,
             rig_available,
             rig_models,
             rig_ports,

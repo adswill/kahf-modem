@@ -70,6 +70,9 @@ pub struct EngineSettings {
     /// Transmit audio level, percent of full scale.
     pub tx_level: u8,
     pub listen_only: bool,
+    /// Test table for a bench radio (BlackHole). Off unless the settings file says so. It never
+    /// opens a real radio; the engine checks that again.
+    pub test_table: bool,
     pub auto_link: bool,
     pub auto_mode: bool,
     pub fixed_mode: String,
@@ -90,6 +93,7 @@ impl EngineSettings {
             freq_khz: lane_khz(v.get("freqKhz").and_then(Value::as_f64)),
             tx_level: v.get("txLevel").and_then(Value::as_u64).unwrap_or(50).clamp(5, 100) as u8,
             listen_only: flag("listenOnly", false),
+            test_table: flag("testTable", false),
             auto_link: flag("autoLink", true),
             auto_mode: flag("autoMode", true),
             fixed_mode: {
@@ -166,6 +170,12 @@ mod tests {
         assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": 3073 } })).rig_choice, None);
         assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": null, "port": "x" } })).rig_choice, None);
         assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": 1, "port": "x" } })).rig_choice.unwrap().2, 19_200);
+    }
+
+    #[test]
+    fn the_test_table_is_off_unless_the_settings_say_so() {
+        assert!(!EngineSettings::from_json(&json!({})).test_table);
+        assert!(EngineSettings::from_json(&json!({ "testTable": true })).test_table);
     }
 
     #[test]

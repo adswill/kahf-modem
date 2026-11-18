@@ -4,7 +4,7 @@
 
 import { defaultSettings, MODE_TABLE } from "./defaults";
 import type {
-  Engine, EngineEvent, MessageKind, Metrics, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, VoiceClip,
+  Engine, EngineEvent, MessageKind, Metrics, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, VoiceClip,
 } from "./types";
 
 const STORE = "kahf.settings";
@@ -343,5 +343,8 @@ export class MockEngine implements Engine {
   }
   async modes(): Promise<ModeInfo[]> {
     return MODE_TABLE;
+  }
+  async txGate(): Promise<TxGate> {
+    return { mode: "bench", text: "Test table: bench radio only, nothing reaches an antenna." };
   }
 }
