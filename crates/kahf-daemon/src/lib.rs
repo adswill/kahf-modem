@@ -1250,7 +1250,7 @@ fn save_file(inbox: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
 
 /// Session chunks for one message as they go on air. The private bit is set when `private`.
 fn air_chunks(msg: &Message, private: bool) -> Result<Vec<Vec<u8>>, String> {
-    guard("session encode", || session::encode_signed(msg, None, private))
+    session::try_encode_signed(msg, None, private).map_err(|e| e.to_string())
 }
 
 fn kind_of(msg: &Message) -> &'static str {
