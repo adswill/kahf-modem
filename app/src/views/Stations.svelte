@@ -49,7 +49,9 @@
             <tr>
               <td class="call">{h.call}</td>
               <td>
-                {#if h.hops !== undefined && h.snr === null}
+                {#if h.relay && h.snr === null && h.hops === undefined}
+                  <span class="tag good">Relay</span> <span class="faint small">{h.online ? "online, reaches other areas" : "radio only"}</span>
+                {:else if h.hops !== undefined && h.snr === null}
                   <span class="tag">Announced</span> <span class="faint small">{h.hops === 0 ? "heard directly" : `through ${h.hops} relay${h.hops === 1 ? "" : "s"}`}</span>
                 {:else}
                   <span class="tag {q.tone}">{q.label}</span> {#if h.snr !== null}<span class="faint small mono">{h.snr} dB</span>{/if}

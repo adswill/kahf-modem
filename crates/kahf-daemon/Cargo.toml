@@ -9,6 +9,7 @@ kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
 kahf-radio = { path = "../kahf-radio" }
 kahf-log = { path = "../kahf-log" }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 kahf-sim = { path = "../kahf-sim" }

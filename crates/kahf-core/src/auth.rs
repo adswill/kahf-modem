@@ -35,6 +35,12 @@ pub struct StationKey {
     key: SigningKey,
 }
 
+impl Clone for StationKey {
+    fn clone(&self) -> Self {
+        Self::from_bytes(&self.secret())
+    }
+}
+
 impl StationKey {
     /// Generate a new random key from the OS random number generator.
     pub fn generate() -> Self {

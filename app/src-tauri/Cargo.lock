@@ -1962,6 +1962,7 @@ dependencies = [
  "kahf-log",
  "kahf-radio",
  "kahf-sdr",
+ "serde_json",
 ]
 
 [[package]]

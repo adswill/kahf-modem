@@ -250,7 +250,7 @@ fn map_share(state: State<Shared>) -> Res<String> {
 }
 
 #[tauri::command]
-fn engine_set_relay(state: State<Shared>, on: bool, licence_held: bool, terms_accepted: bool) -> Res<()> {
+fn engine_set_relay(app: AppHandle, state: State<Shared>, on: bool, licence_held: bool, terms_accepted: bool) -> Res<()> {
     // The relay works on the frequency the person listens on.
     let khz = EngineSettings::from_json(&settings::load(&state.data_dir)).freq_khz as f32;
     with_engine(&state, |e| {
@@ -258,9 +258,45 @@ fn engine_set_relay(state: State<Shared>, on: bool, licence_held: bool, terms_ac
             e.enable_relay(khz, licence_held, terms_accepted)
         } else {
             e.stop_relay();
+            e.set_backbone(None);
             Ok(())
         }
-    })
+    })?;
+    if on {
+        // Join the network over the internet in the background: register with the server, then
+        // let the engine carry messages through it. Without a shared area or without internet the
+        // relay still works on the radio side, and says so.
+        std::thread::spawn(move || {
+            let shared = app.state::<Shared>();
+            let v = settings::load(&shared.data_dir);
+            let note = |text: String| {
+                let _ = app.emit("engine", json!({ "type": "log", "text": text }));
+            };
+            let loc = &v["location"];
+            let (Some(lat), Some(lon)) = (loc["lat"].as_f64(), loc["lon"].as_f64()) else {
+                return note("Relay works on the radio only: enter your position in Settings to join the network.".into());
+            };
+            if loc["mode"].as_str().unwrap_or("off") == "off" {
+                return note("Relay works on the radio only: location sharing is off, so the network cannot list this relay.".into());
+            }
+            let s = EngineSettings::from_json(&v);
+            let Ok(key) = kahf_core::auth::load_or_create(&shared.data_dir) else {
+                return note("Relay works on the radio only: the station key could not be opened.".into());
+            };
+            match report::register_relay(&key, &s.callsign(), lat, lon) {
+                Ok(msg) => {
+                    if let Ok(mut g) = shared.engine.lock() {
+                        if let Some(e) = g.as_mut() {
+                            e.set_backbone(Some(report::SERVER));
+                        }
+                    }
+                    note(format!("{msg} Messages for stations out of range now travel through the network."));
+                }
+                Err(e) => note(format!("Relay works on the radio only: {e}")),
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Remembers that the window's message `id` is waiting in the engine's outbox as `engine_id`.

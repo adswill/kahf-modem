@@ -524,7 +524,7 @@ class AppState {
         const old = this.heard.find((h) => h.call === e.heard.call);
         const rest = this.heard.filter((h) => h.call !== e.heard.call);
         // A plain "heard" must not wipe what an announcement told us about the station.
-        const merged = { ...e.heard, lat: e.heard.lat ?? old?.lat, lon: e.heard.lon ?? old?.lon, relay: e.heard.relay ?? old?.relay };
+        const merged = { ...e.heard, lat: e.heard.lat ?? old?.lat, lon: e.heard.lon ?? old?.lon, relay: e.heard.relay ?? old?.relay, online: e.heard.online ?? old?.online };
         this.heard = [merged, ...rest].slice(0, 80);
         save(HEARD_STORE, this.heard);
         break;

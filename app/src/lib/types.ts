@@ -32,6 +32,8 @@ export interface Heard {
   hops?: number;
   /** The announcing station runs a relay. */
   relay?: boolean;
+  /** A relay that has its internet connection, so it can reach other areas. */
+  online?: boolean;
   /** Where the station said it is, when it chose to say. */
   lat?: number | null;
   lon?: number | null;

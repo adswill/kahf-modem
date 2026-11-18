@@ -185,7 +185,7 @@ impl Mac {
         // Back-off counts down only while the channel stays quiet past the long gap. A station
         // that finds the channel quiet and has no back-off pending goes at once.
         if let Some(left) = self.backoff_ms {
-            let counted = dt.min(quiet.saturating_sub(DIFS_MS).max(0)).min(left);
+            let counted = dt.min(quiet.saturating_sub(DIFS_MS)).min(left);
             let left = left - counted;
             self.backoff_ms = Some(left);
             if left > 0 {

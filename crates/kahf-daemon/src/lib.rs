@@ -23,8 +23,10 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
+mod backbone;
+use backbone::{Backbone, BbHandle, BbJob, BbResult, Queued};
 use kahf_core::mac::{Class, Mac};
-use kahf_core::link::{encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
+use kahf_core::link::{encode_beacon, BEACON_ONLINE, encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::Modulation;
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -89,6 +91,14 @@ pub enum Event {
         relay: bool,
         /// Where the station said it is (latitude, longitude), when it chose to say.
         loc: Option<(f32, f32)>,
+    },
+    /// A relay announced itself on the air.
+    Relay {
+        call: String,
+        online: bool,
+        /// The time the relay gave (unix seconds), for stations without a clock source.
+        time_s: u32,
+        load: u8,
     },
     /// A mail arrived, with its text, and was saved in the inbox.
     MailReceived {
@@ -224,6 +234,8 @@ struct Shared {
     relay: Mutex<Option<Relay>>,
     /// Relay stations to try, in order, when a station is not reached on air.
     relay_hints: Mutex<Vec<String>>,
+    /// Server the relay carries messages through (None: radio only).
+    backbone_server: Mutex<Option<String>>,
     /// Where this station says it is in its announcements. None: it does not say.
     location: Mutex<Option<(f32, f32)>>,
     /// Forwards sent by this station as a relay (plan 4).
@@ -359,6 +371,12 @@ impl Engine {
         }
         self.shared.flags.operator_link.store(true, Ordering::SeqCst);
         self.send_cmd(Cmd::Connect { peer })
+    }
+
+    /// Lets a running relay carry messages through the server (relays are online, operators may
+    /// not be). `None` turns it off, and the relay works on the radio side only.
+    pub fn set_backbone(&self, server: Option<&str>) {
+        *lock(&self.shared.backbone_server) = server.map(|s| s.to_string());
     }
 
     /// The position to put in announcements (latitude, longitude), or None to say nothing.
@@ -694,6 +712,7 @@ pub fn transmit_modulation(&self) -> &'static str {
             key_error: Mutex::new(key_error),
             relay: Mutex::new(None),
             relay_hints: Mutex::new(Vec::new()),
+            backbone_server: Mutex::new(None),
             location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
@@ -1737,9 +1756,19 @@ struct Worker {
     mac: Mac,
     /// A received burst is being tracked, so its end is reported to `mac`.
     rx_locked: bool,
+    /// Stations heard lately: callsign -> (SNR, when). Reported to the server and used to
+    /// decide who a relay can reach itself.
+    heard_recent: HashMap<String, (Option<i32>, Instant)>,
+    /// The thread that talks to the server, and what it has to tell us.
+    bb: Option<BbHandle>,
+    /// Outbox id -> server message id, for messages taken from the server and sent on the radio.
+    bb_pending: HashMap<u64, String>,
+    bb_last: Instant,
     /// Adverts already seen (callsign, sequence), so a relay passes each one on once.
     adverts_seen: VecDeque<(String, u8)>,
     advert_seq: u8,
+    /// When this relay last announced itself.
+    beacon_at: Instant,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
 }
@@ -1881,6 +1910,11 @@ impl Worker {
             rx_locked: false,
             adverts_seen: VecDeque::new(),
             advert_seq: 0,
+            beacon_at: Instant::now() - Duration::from_secs(3600),
+            heard_recent: HashMap::new(),
+            bb: None,
+            bb_pending: HashMap::new(),
+            bb_last: Instant::now(),
             refusal_logged: None,
         };
         w.publish_pending();
@@ -1909,6 +1943,7 @@ impl Worker {
                 None => self.refusal_logged = None,
             }
             self.check_relays();
+            self.backbone_step();
             self.auto_link();
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
@@ -1974,7 +2009,9 @@ impl Worker {
                     self.log(e);
                 }
             }
-            Cmd::Queue { msgs, ids, private } => self.enqueue(msgs, ids, private),
+            Cmd::Queue { msgs, ids, private } => {
+                self.enqueue(msgs, ids, private);
+            }
             Cmd::Shutdown => {}
             #[cfg(test)]
             Cmd::TestBurst(samples) => self.bursts.push_back(samples),
@@ -2013,18 +2050,21 @@ impl Worker {
     }
 
     /// Adds messages to the outbox in order and saves the queue. `ids` are the public ids the caller returned.
-    fn enqueue(&mut self, msgs: Vec<Message>, ids: Vec<u64>, private: bool) {
+    fn enqueue(&mut self, msgs: Vec<Message>, ids: Vec<u64>, private: bool) -> Vec<u64> {
+        let mut oids = Vec::new();
         for (m, pid) in msgs.iter().zip(ids) {
             let item = OutItem {
                 kind: kind_of(m).to_string(),
                 payload: encode_message(m, private),
             };
             let oid = self.outbox.push(item, priority_of(m));
+            oids.push(oid);
             self.tags.insert(oid, (pid, describe_msg(m)));
             let at = self.now_ms();
             self.queued.insert(oid, (dest_of(m).to_string(), at));
         }
         self.persist_outbox();
+        oids
     }
 
     /// Plan 6.3: a message whose station is not reached on air within the timeout goes to
@@ -2189,9 +2229,189 @@ impl Worker {
         if self.forwarded.len() > 512 {
             self.forwarded.pop_front();
         }
+        // A relay with a server connection hands the message to the backbone: radio hops between
+        // relays are not used, and the destination's own relay delivers it (NETWORK-SCENARIOS H1).
+        // A station this relay hears itself is reached directly, not through the server.
+        if self.bb.is_some() || lock(&self.shared.backbone_server).is_some() {
+            if self.heard_lately(dest_of(msg)) {
+                self.log(format!("{} is heard here: the message is delivered directly.", dest_of(msg)));
+            } else {
+                self.bb_submit(msg);
+                return;
+            }
+        }
         let id = self.next_id();
         self.log(format!("Forwarding a message from {} to {}.", sender_of(msg), dest_of(msg)));
         self.enqueue(vec![msg.clone()], vec![id], private);
+    }
+
+    fn note_heard_recent(&mut self, call: &str, snr: Option<f32>) {
+        if call == self.callsign {
+            return;
+        }
+        self.heard_recent.insert(call.to_uppercase(), (snr.map(|s| s.round() as i32), Instant::now()));
+        if self.heard_recent.len() > 500 {
+            self.heard_recent.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(900));
+        }
+    }
+
+    fn heard_lately(&self, call: &str) -> bool {
+        self.heard_recent
+            .get(&call.to_uppercase())
+            .is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(600))
+    }
+
+    /// Starts the server thread when relay mode runs and a server is set, and stops it when not.
+    fn bb_ensure(&mut self) {
+        let want = if self.shared.flags.relay_running.load(Ordering::SeqCst) {
+            lock(&self.shared.backbone_server).clone()
+        } else {
+            None
+        };
+        match (want, self.bb.is_some()) {
+            (Some(server), false) => {
+                let Some(key) = self.shared.station_key.clone() else { return };
+                self.bb = Some(BbHandle::spawn(Backbone::new(&server, &self.callsign, key)));
+                self.log(format!("Relay connected to the network through {server}."));
+            }
+            (None, true) => {
+                self.bb = None;
+                self.log("Relay no longer carries messages through the server.");
+            }
+            _ => {}
+        }
+    }
+
+    /// Hands one message for a station out of reach to the server.
+    fn bb_submit(&mut self, msg: &Message) {
+        let Some(bb) = &self.bb else { return };
+        let (kind, subject, body) = match msg {
+            Message::Chat { text, .. } => ("chat", String::new(), text.as_bytes().to_vec()),
+            Message::Mail { subject, body, .. } => ("mail", subject.clone(), body.as_bytes().to_vec()),
+            Message::File { .. } => return,
+        };
+        let limit = if kind == "chat" { 1024 } else { 4096 };
+        if body.is_empty() || body.len() > limit {
+            self.log(format!("Message from {} to {} is too large for the network ({} bytes).", sender_of(msg), dest_of(msg), body.len()));
+            return;
+        }
+        let now = now_unix_secs().max(0) as u64;
+        let mut stream = body.clone();
+        stream.extend_from_slice(dest_of(msg).as_bytes());
+        let q = Queued {
+            id: backbone::message_id(sender_of(msg), &stream, now),
+            origin: sender_of(msg).to_uppercase(),
+            dest: dest_of(msg).to_uppercase(),
+            kind: kind.to_string(),
+            subject,
+            body,
+            urgent: priority_of(msg) == Priority::Urgent,
+        };
+        self.log(format!("Passing the message from {} to {} on to the network.", q.origin, q.dest));
+        bb.send(BbJob::Submit(q, now, if kind == "chat" { 6 * 3600 } else { 24 * 3600 }));
+    }
+
+    /// An outbox item that came from the server is finished: tell the server how it went.
+    fn bb_item_done(&mut self, oid: u64, delivered: bool) {
+        let Some(sid) = self.bb_pending.remove(&oid) else { return };
+        if let Some(bb) = &self.bb {
+            bb.send(BbJob::Receipt(sid, delivered, if delivered { String::new() } else { "no answer".into() }));
+        }
+    }
+
+    /// Every so often: tell the server who is heard, pick up what is waiting for them, and act
+    /// on what the server's thread has to report.
+    fn backbone_step(&mut self) {
+        self.bb_ensure();
+        self.beacon_step();
+        let Some(bb) = &self.bb else { return };
+        for r in bb.take_results() {
+            match r {
+                BbResult::Pulled(p) => {
+                    for m in p.messages {
+                        self.bb_deliver(m);
+                    }
+                    for r in p.receipts {
+                        self.bb_receipt_notice(r);
+                    }
+                }
+                BbResult::Log(t) => self.log(t),
+            }
+        }
+        if self.bb_last.elapsed() < Duration::from_secs(20) {
+            return;
+        }
+        self.bb_last = Instant::now();
+        self.heard_recent.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(900));
+        let now = now_unix_secs().max(0) as u64;
+        let list: Vec<(String, Option<i32>, u64)> = self
+            .heard_recent
+            .iter()
+            .map(|(c, (snr, t))| (c.clone(), *snr, now.saturating_sub(t.elapsed().as_secs())))
+            .collect();
+        if let Some(bb) = &self.bb {
+            let calls: Vec<String> = list.iter().map(|(c, _, _)| c.clone()).collect();
+            bb.send(BbJob::Heard(list));
+            bb.send(BbJob::Pull(calls));
+        }
+    }
+
+    /// A running relay announces itself every minute: who it is, whether it has the internet, the
+    /// time (operators often have no clock source), and how busy it is.
+    fn beacon_step(&mut self) {
+        if !self.shared.flags.relay_running.load(Ordering::SeqCst)
+            || self.beacon_at.elapsed() < Duration::from_secs(60)
+            || tx_refusal(&self.shared.flags).is_some()
+        {
+            return;
+        }
+        self.beacon_at = Instant::now();
+        let flags = if self.bb.is_some() { BEACON_ONLINE } else { 0 };
+        let load = (self.outbox.pending().len() * 16).min(255) as u8;
+        let now = now_unix_secs().max(0) as u32;
+        let frames = vec![encode_beacon(&self.callsign, flags, now, load)];
+        if !self.control.iter().any(|c| *c == frames) {
+            self.control.push_back(frames);
+        }
+    }
+
+    /// A message the server gave us for a station we hear: send it on the radio.
+    fn bb_deliver(&mut self, m: Queued) {
+        if self.bb_pending.values().any(|s| *s == m.id) {
+            return;
+        }
+        let msg = if m.kind == "mail" {
+            Message::Mail {
+                from: m.origin.clone(),
+                to: m.dest.clone(),
+                subject: m.subject.clone(),
+                body: String::from_utf8_lossy(&m.body).into_owned(),
+                attachments: Vec::new(),
+            }
+        } else {
+            Message::Chat { from: m.origin.clone(), to: m.dest.clone(), text: String::from_utf8_lossy(&m.body).into_owned() }
+        };
+        let id = self.next_id();
+        self.log(format!("Delivering a message from {} to {} that came through the network.", m.origin, m.dest));
+        let oids = self.enqueue(vec![msg], vec![id], false);
+        if let Some(oid) = oids.first() {
+            self.bb_pending.insert(*oid, m.id);
+        }
+    }
+
+    /// The server says what became of a message one of our stations sent: tell that station.
+    fn bb_receipt_notice(&mut self, r: backbone::Receipt) {
+        let origin = r.id.rsplit_once('-').map(|(o, _)| o.to_string()).unwrap_or_default();
+        if origin.is_empty() {
+            return;
+        }
+        let text = if r.status == "delivered" {
+            format!("Delivered to {}.", r.dest)
+        } else {
+            format!("Could not deliver to {}: {}.", r.dest, if r.reason.is_empty() { "no reason given" } else { &r.reason })
+        };
+        let id = self.next_id();
+        self.enqueue(vec![Message::Chat { from: self.callsign.clone(), to: origin, text }], vec![id], false);
     }
 
     /// Plan 4: a station with a relay role sends only inside one of its transmit slots.
@@ -2499,6 +2719,7 @@ impl Worker {
             }
         }
         self.outbox.done(id);
+        self.bb_item_done(id, true);
         self.record_forward(public);
         self.persist_outbox();
     }
@@ -2510,6 +2731,7 @@ impl Worker {
         let still_queued = self.outbox.pending().iter().any(|(pid, _, _)| *pid == id);
         if was_queued && !still_queued {
             self.log(format!("gave up on an outbox item: {why}"));
+            self.bb_item_done(id, false);
         } else {
             self.log(format!("send failed, will retry: {why}"));
         }
@@ -2700,6 +2922,7 @@ impl Worker {
         if self.adverts_seen.iter().any(|(c, s)| *c == call && *s == seq) {
             return;
         }
+        self.note_heard_recent(&call, None);
         self.adverts_seen.push_back((call.clone(), seq));
         if self.adverts_seen.len() > 256 {
             self.adverts_seen.pop_front();
@@ -2722,6 +2945,10 @@ impl Worker {
             match action {
                 Action::Transmit(payload) => frames.push(payload),
                 Action::Deliver(chunk) => self.deliver(chunk),
+                Action::Beacon { call, flags, time_s, load } => {
+                    self.note_heard_recent(&call, None);
+                    self.emit(Event::Relay { call, online: flags & BEACON_ONLINE != 0, time_s, load });
+                }
                 Action::Advert { call, ttl, seq, flags, loc } => self.on_advert(call, ttl, seq, flags, loc),
                 Action::StateChanged(state) => {
                     self.on_link_state(&state);
@@ -3164,6 +3391,7 @@ impl Worker {
             Err(e) => self.log(e),
         }
         for call in self.link.take_heard() {
+            self.note_heard_recent(&call, self.link.own_snr_db());
             self.emit(Event::Heard { call, snr_db: self.link.own_snr_db() });
         }
     }
@@ -4351,6 +4579,7 @@ mod tests {
             key_error: Mutex::new(None),
             relay: Mutex::new(None),
             relay_hints: Mutex::new(Vec::new()),
+            backbone_server: Mutex::new(None),
             location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
@@ -4824,6 +5053,55 @@ mod tests {
         assert!(r.forwarded.is_empty(), "a file was queued for forwarding");
         r.forward_third_party(&chat("AA1AAA", "BB1BBB", "hi"), false);
         assert_eq!(r.forwarded.len(), 1, "a chat was not forwarded");
+    }
+
+    fn relay_with_backbone(tag: &str) -> Worker {
+        let mut r = bare_worker(tag, "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
+        // A server that is not there: jobs fail quietly in the thread, which is all these tests need.
+        r.bb = Some(BbHandle::spawn(Backbone::new("http://127.0.0.1:9", "RR1RRR", StationKey::generate())));
+        r
+    }
+
+    #[test]
+    fn a_message_from_the_server_is_sent_on_the_radio_and_remembered() {
+        let mut r = relay_with_backbone("bb-deliver");
+        let m = Queued {
+            id: "K1ALF-7".into(), origin: "K1ALF".into(), dest: "D1AVE".into(), kind: "chat".into(),
+            subject: String::new(), body: b"hello".to_vec(), urgent: false,
+        };
+        r.bb_deliver(m.clone());
+        assert_eq!(r.outbox.pending().len(), 1);
+        assert_eq!(r.bb_pending.values().cloned().collect::<Vec<_>>(), vec!["K1ALF-7".to_string()]);
+        // The same message again (the server hands it out until it is receipted) is not queued twice.
+        r.bb_deliver(m);
+        assert_eq!(r.outbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn a_receipt_becomes_a_short_message_to_the_origin() {
+        let mut r = relay_with_backbone("bb-receipt");
+        r.bb_receipt_notice(backbone::Receipt {
+            id: "K1ALF-7".into(), dest: "D1AVE".into(), status: "delivered".into(), reason: String::new(),
+        });
+        let (_, item, _) = r.outbox.pending().into_iter().next().expect("a notice was queued");
+        let _ = item;
+        assert_eq!(r.outbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn a_station_the_relay_hears_is_not_sent_through_the_server() {
+        let mut r = relay_with_backbone("bb-heard");
+        r.note_heard_recent("D1AVE", Some(10.0));
+        r.forward_third_party(&chat("K1ALF", "D1AVE", "hi"), false);
+        // The relay hears Dave itself, so it delivers on the radio (and does not use the server).
+        assert_eq!(r.outbox.pending().len(), 1, "a station heard here must be delivered to directly");
+        // A station nobody here hears goes to the server, not onto the radio.
+        r.forward_third_party(&chat("K1ALF", "Z9FAR", "hi"), false);
+        assert_eq!(r.outbox.pending().len(), 1, "radio forward used although the server is available");
     }
 
     #[test]

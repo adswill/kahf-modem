@@ -68,6 +68,10 @@ pub fn event_json(ev: &Event, pending: &[Pending]) -> Vec<Value> {
                 "lat": loc.map(|l| l.0), "lon": loc.map(|l| l.1)
             }
         })],
+        Event::Relay { call, online, load, .. } => vec![json!({
+            "type": "heard",
+            "heard": { "call": call, "snr": Value::Null, "at": now_ms(), "relay": true, "online": online, "load": load }
+        })],
         Event::Spectrum(bins) => vec![json!({ "type": "spectrum", "bins": thin_spectrum(bins) })],
         Event::Metrics(m) => vec![json!({
             "type": "metrics",

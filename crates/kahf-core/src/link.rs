@@ -17,6 +17,7 @@ const TAG_CONNECT: u8 = 0x01;
 const TAG_CONNECT_ACK: u8 = 0x02;
 const TAG_DISCONNECT: u8 = 0x03;
 const TAG_ADVERT: u8 = 0x04;
+const TAG_BEACON: u8 = 0x05;
 const TAG_BUSY: u8 = 0x06;
 /// A connected link with nothing to send and nothing heard from the peer for this long is
 /// closed (the peer left without a goodbye, or the goodbye was lost).
@@ -69,6 +70,8 @@ pub enum Action {
     StateChanged(LinkState),
     /// A station announced itself (no link needed). Relays pass it on while `ttl` lasts.
     Advert { call: String, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)> },
+    /// A relay announced itself (identity, whether it is online, the time, how busy it is).
+    Beacon { call: String, flags: u8, time_s: u32, load: u8 },
     /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
     Metrics(LinkMetrics),
 }
@@ -250,6 +253,13 @@ impl Link {
                 self.on_ack(payload)
             }
             Some(&TAG_BUSY) => self.on_busy(payload),
+            Some(&TAG_BEACON) => match decode_beacon(payload) {
+                Some((call, flags, time_s, load)) if call != self.callsign && valid_callsign(&call) => {
+                    self.note_heard(&call);
+                    vec![Action::Beacon { call, flags, time_s, load }]
+                }
+                _ => Vec::new(),
+            },
             Some(&TAG_ADVERT) => match decode_advert(payload) {
                 Some((call, ttl, seq, flags, loc)) if call != self.callsign && valid_callsign(&call) => {
                     self.note_heard(&call);
@@ -744,6 +754,29 @@ fn valid_callsign(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CALLSIGN
 }
 
+/// Beacon flag: the relay has its internet connection, so it can reach other areas.
+pub const BEACON_ONLINE: u8 = 1;
+
+/// A relay's announcement, sent every minute or so: tag, flags, time (unix seconds, so a
+/// station with no clock source learns the time), load (0 idle to 255 saturated), callsign.
+pub fn encode_beacon(call: &str, flags: u8, time_s: u32, load: u8) -> Vec<u8> {
+    let mut v = vec![TAG_BEACON, flags];
+    v.extend_from_slice(&time_s.to_be_bytes());
+    v.push(load);
+    v.push(call.len() as u8);
+    v.extend_from_slice(call.as_bytes());
+    v
+}
+
+fn decode_beacon(p: &[u8]) -> Option<(String, u8, u32, u8)> {
+    let n = *p.get(7)? as usize;
+    if n == 0 || n > MAX_CALLSIGN || p.len() != 8 + n {
+        return None;
+    }
+    let call = String::from_utf8(p[8..].to_vec()).ok()?;
+    Some((call, p[1], u32::from_be_bytes([p[2], p[3], p[4], p[5]]), p[6]))
+}
+
 /// Advert flag: the announcing station runs a relay.
 pub const ADVERT_RELAY: u8 = 1;
 /// Advert flag: four bytes of position follow the callsign (hundredths of a degree).
@@ -870,7 +903,7 @@ mod tests {
                             self.b_rx.push(p)
                         }
                     }
-                    Action::StateChanged(_) | Action::Metrics(_) | Action::Advert { .. } => {}
+                    Action::StateChanged(_) | Action::Metrics(_) | Action::Advert { .. } | Action::Beacon { .. } => {}
                 }
             }
         }
@@ -1206,6 +1239,16 @@ mod tests {
 #[cfg(test)]
 mod advert_tests {
     use super::*;
+
+    #[test]
+    fn a_beacon_carries_the_relay_and_the_time() {
+        let mut l = Link::new("KB2BRV");
+        let acts = l.on_receive(&encode_beacon("RR1RRR", BEACON_ONLINE, 1_800_000_000, 40));
+        assert_eq!(acts, vec![Action::Beacon { call: "RR1RRR".into(), flags: BEACON_ONLINE, time_s: 1_800_000_000, load: 40 }]);
+        assert!(l.on_receive(&encode_beacon("KB2BRV", 0, 1, 0)).is_empty());
+        assert!(l.on_receive(&[TAG_BEACON, 0, 0, 0, 0, 0, 0, 5, b'x']).is_empty());
+    }
+
 
     #[test]
     fn an_advert_is_heard_without_a_link() {
