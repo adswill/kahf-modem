@@ -53,6 +53,8 @@ export interface StationStore {
 const TTL_SECONDS = 48 * 60 * 60;
 
 const recordKey = (reporter: string, heard: string) => `rec:${reporter}>${heard}`;
+/** Name of the one AreaObject that plans slots for every relay. */
+const WORLD_SLOTS = "world-slots";
 const relayIndexKey = (callsign: string) => `relayidx:${callsign}`;
 /** The one current release announcement. */
 const RELEASE_KEY = "release:current";
@@ -160,10 +162,12 @@ export function objectStore(env: Env): Pick<
 
     async leaveArea(area, callsign) {
       await callObject(env.AREAS, area, "leave", { callsign });
+      await callObject(env.AREAS, WORLD_SLOTS, "leave", { callsign });
     },
 
     bookSchedule(area, relay, requests, nowMs) {
-      return callObject(env.AREAS, area, "book", { area, relay, requests, nowMs });
+      // One object for the whole world: HF is global, so transmit slots are planned together.
+      return callObject(env.AREAS, WORLD_SLOTS, "book", { area, relay, requests, nowMs });
     },
   };
 }

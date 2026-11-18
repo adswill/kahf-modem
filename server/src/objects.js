@@ -117,9 +117,18 @@ export const areaOps = {
     const booked = [];
     for (const other of members) {
       if (other === relay) continue;
-      for (const slot of state.slots[other]?.slots ?? []) {
+      const rec = state.slots[other];
+      for (const slot of rec?.slots ?? []) {
         if (slot.start + slot.duration > nowS) {
-          booked.push({ area, channel: slot.channel, start: slot.start, duration: slot.duration });
+          // Every relay's slots are kept in this one object, so the planner sees them all:
+          // same-area slots of any direction, and transmit slots of every area (HF is global).
+          booked.push({
+            area: rec.area ?? area,
+            channel: slot.channel,
+            start: slot.start,
+            duration: slot.duration,
+            direction: slot.direction,
+          });
         }
       }
     }
@@ -133,6 +142,7 @@ export const areaOps = {
     }
     const slots = plan.slots[relay];
     state.slots[relay] = {
+      area,
       slots: slots.map((s2) => ({ channel: s2.channel, start: s2.start, duration: s2.duration, direction: s2.direction })),
       refreshed_at: nowMs,
     };

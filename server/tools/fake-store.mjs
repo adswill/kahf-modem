@@ -57,8 +57,13 @@ export function fakeStore({ slow = false } = {}) {
       one(() => callsignOps.claimRelay(callsignStorage(callsign), { callsign, area, publicKey, nowMs })),
     getRelay: (callsign) => one(() => callsignOps.getRelay(callsignStorage(callsign))),
     joinArea: (area, callsign, nowMs) => one(() => areaOps.join(areaStorage(area), { callsign, nowMs })),
-    leaveArea: (area, callsign) => one(() => areaOps.leave(areaStorage(area), { callsign })),
+    leaveArea: (area, callsign) =>
+      one(async () => {
+        await areaOps.leave(areaStorage(area), { callsign });
+        await areaOps.leave(areaStorage("world-slots"), { callsign });
+      }),
+    // One object for the whole world, like src/store.ts: HF transmit slots are global.
     bookSchedule: (area, relay, requests, nowMs) =>
-      one(() => areaOps.book(areaStorage(area), { area, relay, requests, nowMs })),
+      one(() => areaOps.book(areaStorage("world-slots"), { area, relay, requests, nowMs })),
   };
 }
