@@ -14,6 +14,8 @@
 //   GET  /map-data   relays and live stations as JSON (buildMapData)
 //   GET  /release    the current release announcement, or null
 //   POST /release    signed release announcement from the owner's release key
+//   POST /relay/heard, /msg/submit, /msg/pull, /msg/receipt  signed HF backbone calls (backbone.js)
+//   GET  /relay/wanted  destination callsigns that have queued messages
 import {
   BUSY_WINDOW_S,
   EXPIRY_MS,
@@ -33,6 +35,16 @@ import {
   verifySignature,
   zoneReports,
 } from "./core.js";
+import {
+  MAX_BACKBONE_BODY_BYTES,
+  MAX_PULL_MESSAGES,
+  RELAY_RATE_PER_MINUTE,
+  parseMessageId,
+  validateHeard,
+  validatePull,
+  validateReceipt,
+  validateSubmit,
+} from "./backbone.js";
 import { OPERATE_PNG_BASE64 } from "./web/operate-png.js";
 import { homeScriptSha256, mapScriptSha256, renderHome, renderMap } from "./page.ts";
 
@@ -109,13 +121,13 @@ function html(body, csp) {
  * @param {Request} request
  * @returns {Promise<{ ok: true, body: unknown } | { ok: false, response: Response }>}
  */
-async function readJson(request) {
+async function readJson(request, cap = MAX_BODY_BYTES) {
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > MAX_BODY_BYTES) {
+  if (declared > cap) {
     return { ok: false, response: json({ error: "body too large" }, 413) };
   }
   const text = await request.text();
-  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
+  if (new TextEncoder().encode(text).length > cap) {
     return { ok: false, response: json({ error: "body too large" }, 413) };
   }
   try {
@@ -363,6 +375,121 @@ async function postSchedule({ request, store, nowMs }) {
   });
 }
 
+// ---- HF backbone ------------------------------------------------------------
+
+/**
+ * Reads and checks one signed backbone request: size cap, shape (validate), signature,
+ * a registered live relay with that key, and the per-relay rate limit.
+ * @returns {Promise<{ ok: true, check: any } | { ok: false, response: Response }>}
+ */
+async function backboneAuth({ request, store, nowMs, options }, validate) {
+  const parsed = await readJson(request, MAX_BACKBONE_BODY_BYTES);
+  if (!parsed.ok) return parsed;
+  const check = validate(parsed.body, nowMs);
+  if (!check.ok) return { ok: false, response: json({ error: check.error }, 400) };
+  if (!(await verifySignature(check.publicKey, check.signature, check.message))) {
+    return { ok: false, response: json({ error: "signature check failed" }, 401) };
+  }
+  const me = await store.getRelay(check.relay);
+  if (!me || isExpired(me.refreshed_at, nowMs)) {
+    return { ok: false, response: json({ error: "relay is not registered" }, 404) };
+  }
+  if (me.public_key !== check.publicKey) {
+    return { ok: false, response: json({ error: "this callsign is registered with another key" }, 403) };
+  }
+  const limit = options.relayRateLimit ?? RELAY_RATE_PER_MINUTE;
+  if (!(await store.idxRate(check.relay, nowMs, limit)).ok) {
+    return { ok: false, response: json({ error: "too many requests from this relay" }, 429, { "retry-after": "60" }) };
+  }
+  return { ok: true, check };
+}
+
+async function postRelayHeard(ctx) {
+  const auth = await backboneAuth(ctx, validateHeard);
+  if (!auth.ok) return auth.response;
+  const { relay, heard } = auth.check;
+  const done = await ctx.store.idxNoteHeard(relay, heard, ctx.nowMs);
+  return json({ ok: true, recorded: done.recorded, ignored: done.ignored });
+}
+
+async function postMsgSubmit(ctx) {
+  const auth = await backboneAuth(ctx, validateSubmit);
+  if (!auth.ok) return auth.response;
+  const { message } = auth.check;
+  const { store, nowMs } = ctx;
+  // The first submit of an id wins; the claim lives on the origin's object.
+  const claim = await store.msgClaim(message.origin, message.id, message.dest, nowMs);
+  if (claim.duplicate) return json({ ok: true, duplicate: true });
+  const queued = await store.msgEnqueue(message.dest, { ...message, submitted_by: auth.check.relay }, nowMs);
+  await store.idxWant(message.dest, queued.until);
+  return json({ ok: true, duplicate: false, expires_at: Math.floor((nowMs + message.ttl_s * 1000) / 1000) });
+}
+
+async function postMsgPull(ctx) {
+  const auth = await backboneAuth(ctx, validatePull);
+  if (!auth.ok) return auth.response;
+  const { relay, callsigns } = auth.check;
+  const { store, nowMs } = ctx;
+
+  // Look at every heard callsign's queue; expired messages turn into "failed" receipts.
+  const peeks = await Promise.all(callsigns.map(async (dest) => ({ dest, peek: await store.msgPeek(dest, nowMs) })));
+  for (const { dest, peek } of peeks) {
+    for (const e of peek.expired) {
+      await store.msgPutReceipt(e.origin, { id: e.id, dest: e.dest, status: "failed", reason: "expired" }, nowMs);
+    }
+    if (peek.remaining === 0) await store.idxUnwant(dest);
+  }
+
+  // Oldest first, urgent first; at most MAX_PULL_MESSAGES per call.
+  const candidates = peeks.flatMap(({ dest, peek }) => peek.messages.map((m) => ({ dest, m })));
+  candidates.sort((a, b) => Number(b.m.urgent === true) - Number(a.m.urgent === true) || a.m.created - b.m.created || (a.m.id < b.m.id ? -1 : 1));
+  const chosen = candidates.slice(0, MAX_PULL_MESSAGES);
+  const byDest = new Map();
+  for (const { dest, m } of chosen) byDest.set(dest, [...(byDest.get(dest) ?? []), m.id]);
+  const handed = new Map();
+  for (const [dest, ids] of byDest) {
+    for (const m of (await store.msgHandout(dest, ids, relay, nowMs)).messages) handed.set(m.id, m);
+  }
+  const messages = chosen
+    .filter(({ m }) => handed.has(m.id))
+    .map(({ m }) => ({
+      id: m.id,
+      origin: m.origin,
+      dest: m.dest,
+      kind: m.kind,
+      ...(m.subject !== undefined ? { subject: m.subject } : {}),
+      body: m.body,
+      created: m.created,
+      hops: m.hops,
+      urgent: m.urgent === true,
+      expires_at: Math.floor(m.expires_at / 1000),
+    }));
+
+  // Receipts for the heard callsigns acting as origin.
+  const receipts = (await Promise.all(callsigns.map((c) => store.msgTakeReceipts(c, nowMs)))).flatMap((r) => r.receipts);
+  return json({ messages, receipts });
+}
+
+async function postMsgReceipt(ctx) {
+  const auth = await backboneAuth(ctx, validateReceipt);
+  if (!auth.ok) return auth.response;
+  const { relay, id, status, reason } = auth.check;
+  const { store, nowMs } = ctx;
+  const origin = parseMessageId(id).origin;
+  const { claim } = await store.msgGetClaim(origin, id, nowMs);
+  if (!claim) return json({ error: "no such message" }, 404);
+  const done = await store.msgComplete(claim.dest, id, relay, nowMs);
+  if (!done.ok) return json({ error: done.error }, 409);
+  if (!done.found) return json({ ok: true, duplicate: true });
+  await store.msgPutReceipt(origin, { id, dest: claim.dest, status, reason }, nowMs);
+  if (done.remaining === 0) await store.idxUnwant(claim.dest);
+  return json({ ok: true, duplicate: false });
+}
+
+async function getRelayWanted({ store, nowMs }) {
+  return json({ wanted: (await store.idxWanted(nowMs)).wanted });
+}
+
 const TILE_PATH = /^\/tiles\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/;
 const TILE_UPSTREAM = "https://tile.openstreetmap.org";
 /** OpenStreetMap's tile policy asks for a User-Agent that names the app. */
@@ -419,6 +546,11 @@ const ROUTES = {
   "/remove": { POST: postRemove },
   "/register": { POST: postRegister },
   "/schedule": { POST: postSchedule },
+  "/relay/heard": { POST: postRelayHeard },
+  "/relay/wanted": { GET: getRelayWanted },
+  "/msg/submit": { POST: postMsgSubmit },
+  "/msg/pull": { POST: postMsgPull },
+  "/msg/receipt": { POST: postMsgReceipt },
 };
 
 /**
@@ -427,7 +559,7 @@ const ROUTES = {
  * @param {Request} request
  * @param {{ get: Function, put: Function, remove: Function, listAll: Function, claimOwner: Function, claimRemoval: Function, claimRelay: Function, getRelay: Function, joinArea: Function, leaveArea: Function, bookSchedule: Function }} store
  * @param {number} [nowMs]
- * @param {{ releaseKey?: string }} [options] releaseKey: base64 Ed25519 key allowed to post releases
+ * @param {{ releaseKey?: string, relayRateLimit?: number }} [options] relayRateLimit: backbone calls per relay per minute; releaseKey: base64 Ed25519 key allowed to post releases
  * @returns {Promise<Response>}
  */
 export async function handleRequest(request, store, nowMs = Date.now(), options = {}) {

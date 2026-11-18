@@ -23,7 +23,21 @@ class_name = "CallsignObject"
 name = "AREAS"
 class_name = "AreaObject"
 
+#   MAILBOXES: one per callsign (HF backbone queue, id claims, receipts).
+#   BACKBONE: one object for the heard index, wanted list and rate counters.
+[[durable_objects.bindings]]
+name = "MAILBOXES"
+class_name = "MailObject"
+
+[[durable_objects.bindings]]
+name = "BACKBONE"
+class_name = "IndexObject"
+
 # SQLite-backed storage for both classes (Workers Paid plan).
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CallsignObject", "AreaObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["MailObject", "IndexObject"]
