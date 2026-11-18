@@ -2701,10 +2701,17 @@ impl Worker {
         };
         let public = self.tags.get(&id).map(|t| t.0).unwrap_or(id);
         let count = chunks.len().max(1) as u64;
+        // The frames of one send go out together, up to a full burst, not one burst each: every
+        // burst costs a preamble and its own wait for the channel.
+        let mut waiting: Vec<Action> = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             match guard("link send", || self.link.send(chunk)) {
-                Ok(actions) => self.apply_link(actions, true),
+                Ok(actions) => waiting.extend(actions),
                 Err(e) => return self.fail_item(id, e),
+            }
+            let frames = waiting.iter().filter(|a| matches!(a, Action::Transmit(_))).count();
+            if frames >= BURST_MAX || i + 1 == chunks.len() {
+                self.apply_link(std::mem::take(&mut waiting), true);
             }
             if !matches!(self.link_state, LinkState::Connected { .. }) {
                 return self.fail_item(id, "link dropped during send".to_string());
@@ -3259,11 +3266,6 @@ impl Worker {
             }
             let w = window.min(len);
             if let Some((st, hz, tau)) = kahf_core::kami::find_preamble(&self.rx_buf[..w]) {
-                if !self.rx_locked {
-                    self.rx_locked = true;
-                    let ms = self.now_ms();
-                    self.mac.on_rx_start(ms);
-                }
                 self.kami_at = Some((st, hz, tau));
                 self.kami_tried = 0;
                 self.since_kami = len.saturating_sub(st + tl);
@@ -3330,7 +3332,14 @@ impl Worker {
                 }
                 let remaining = (id >> 5) as usize;
                 if self.kami_mode.is_none() {
-                    // First codeword: it fixes the mode and the length of the burst.
+                    // First codeword: it fixes the mode and the length of the burst. Only now is
+                    // it a real burst for the MAC: a start that never decodes (noise, an echo's
+                    // tail) must not keep this station from answering.
+                    if !self.rx_locked {
+                        self.rx_locked = true;
+                        let ms = self.now_ms();
+                        self.mac.on_rx_start(ms);
+                    }
                     self.kami_mode = Some(m);
                     self.kami_total = remaining + 1;
                 } else if remaining != self.kami_total - 1 - j {
