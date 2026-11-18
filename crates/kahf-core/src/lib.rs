@@ -31,6 +31,7 @@ pub mod payload_update;
 pub mod payload_urgent;
 pub mod payload_weather;
 pub mod phy;
+pub mod planner;
 pub mod relay;
 pub mod select;
 pub mod sense;
