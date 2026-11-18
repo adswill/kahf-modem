@@ -5,6 +5,7 @@
 
 mod convert;
 mod report;
+mod rig;
 mod settings;
 
 use std::path::PathBuf;
@@ -24,6 +25,8 @@ struct Shared {
     /// Messages the window sent that are still in the engine's outbox.
     pending: Mutex<Vec<Pending>>,
     data_dir: PathBuf,
+    /// The `rigctld` KAHF started for the chosen radio, if any.
+    rigctld: Mutex<Option<std::process::Child>>,
 }
 
 type Res<T> = Result<T, String>;
@@ -64,6 +67,52 @@ fn detect_sdr() -> Vec<String> {
     found
 }
 
+/// Is Hamlib installed, so radios can be chosen by name?
+#[tauri::command]
+fn rig_available() -> bool {
+    rig::find_tool("rigctld").is_some() && rig::find_tool("rigctl").is_some()
+}
+
+#[tauri::command]
+fn rig_models() -> Res<Vec<rig::RigModel>> {
+    rig::list_rigs()
+}
+
+#[tauri::command]
+fn rig_ports() -> Vec<String> {
+    rig::serial_ports()
+}
+
+fn stop_rig(state: &State<Shared>) {
+    if let Ok(mut g) = state.rigctld.lock() {
+        if let Some(mut c) = g.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// Starts radio control for the chosen radio and reads its frequency as a test.
+/// Returns the frequency in Hz.
+#[tauri::command]
+fn rig_connect(state: State<Shared>, model: u32, port: String, baud: u32) -> Res<u64> {
+    stop_rig(&state);
+    let child = rig::start_rigctld(model, &port, baud)?;
+    *state.rigctld.lock().map_err(|e| e.to_string())? = Some(child);
+    match rig::read_frequency(rig::local_addr()) {
+        Ok(hz) => Ok(hz),
+        Err(e) => {
+            stop_rig(&state);
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+fn rig_stop(state: State<Shared>) {
+    stop_rig(&state);
+}
+
 #[tauri::command]
 fn engine_modes() -> Value {
     json!(kahf_core::kami::mode_table()
@@ -74,13 +123,30 @@ fn engine_modes() -> Value {
 
 /// Starts (or restarts) the engine with the person's settings.
 #[tauri::command]
-fn engine_start(state: State<Shared>, settings: Value) -> Res<()> {
+fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()> {
     let s = EngineSettings::from_json(&settings);
+    // A radio chosen by name gets its own radio-control program. If that fails, KAHF still
+    // starts with sound only, and says so.
+    let mut rigctld = s.rigctld();
+    stop_rig(&state);
+    if let Some((model, port, baud)) = &s.rig_choice {
+        match rig::start_rigctld(*model, port, *baud) {
+            Ok(child) => {
+                if let Ok(mut g) = state.rigctld.lock() {
+                    *g = Some(child);
+                }
+                rigctld = Some(rig::local_addr().to_string());
+            }
+            Err(e) => {
+                let _ = app.emit("engine", json!({ "type": "log", "text": format!("Radio control is off: {e}") }));
+            }
+        }
+    }
     let cfg = Config {
         callsign: s.callsign(),
         audio_in: s.audio_in(),
         audio_out: s.audio_out(),
-        rigctld: s.rigctld(),
+        rigctld,
         sdr: s.sdr_spec(),
         data_dir: state.data_dir.clone(),
     };
@@ -238,6 +304,7 @@ pub fn run() {
                 engine: Mutex::new(None),
                 pending: Mutex::new(Vec::new()),
                 data_dir: data_dir(&handle),
+                rigctld: Mutex::new(None),
             });
             poll_loop(handle);
             Ok(())
@@ -248,6 +315,11 @@ pub fn run() {
             list_audio_devices,
             detect_sdr,
             engine_modes,
+            rig_available,
+            rig_models,
+            rig_ports,
+            rig_connect,
+            rig_stop,
             engine_start,
             engine_connect,
             engine_disconnect,

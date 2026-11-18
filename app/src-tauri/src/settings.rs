@@ -41,6 +41,8 @@ pub struct EngineSettings {
     pub auto_link: bool,
     pub auto_mode: bool,
     pub fixed_mode: String,
+    /// The radio chosen by name: Hamlib model number, serial port, speed.
+    pub rig_choice: Option<(u32, String, u32)>,
 }
 
 impl EngineSettings {
@@ -60,6 +62,16 @@ impl EngineSettings {
             fixed_mode: {
                 let m = text("fixedMode");
                 if m.is_empty() { "KAMI-32".to_string() } else { m }
+            },
+            rig_choice: {
+                let r = v.get("rig");
+                let model = r.and_then(|r| r.get("model")).and_then(Value::as_u64);
+                let port = r.and_then(|r| r.get("port")).and_then(Value::as_str).unwrap_or("").trim().to_string();
+                let baud = r.and_then(|r| r.get("baud")).and_then(Value::as_u64).unwrap_or(19_200) as u32;
+                match model {
+                    Some(m) if m > 0 && !port.is_empty() => Some((m as u32, port, baud)),
+                    _ => None,
+                }
             },
         }
     }
@@ -112,6 +124,15 @@ mod tests {
         assert_eq!(s.sdr_spec().as_deref(), Some("hackrf@7103000"));
         assert!(s.listen_only && !s.auto_link && !s.auto_mode);
         assert_eq!(s.fixed_mode, "KAMI-64");
+    }
+
+    #[test]
+    fn reads_the_chosen_radio_and_ignores_an_incomplete_one() {
+        let s = EngineSettings::from_json(&json!({ "rig": { "model": 3073, "port": "/dev/cu.usbserial-1", "baud": 115200 } }));
+        assert_eq!(s.rig_choice, Some((3073, "/dev/cu.usbserial-1".to_string(), 115_200)));
+        assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": 3073 } })).rig_choice, None);
+        assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": null, "port": "x" } })).rig_choice, None);
+        assert_eq!(EngineSettings::from_json(&json!({ "rig": { "model": 1, "port": "x" } })).rig_choice.unwrap().2, 19_200);
     }
 
     #[test]
