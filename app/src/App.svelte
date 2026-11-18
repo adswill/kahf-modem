@@ -4,6 +4,7 @@
   import RadioStrip from "./components/RadioStrip.svelte";
   import Nav from "./components/Nav.svelte";
   import Toasts from "./components/Toasts.svelte";
+  import SupportNudge from "./components/SupportNudge.svelte";
   import Tour from "./components/Tour.svelte";
   import FileConfirm from "./components/FileConfirm.svelte";
   import SettingsSheet from "./components/SettingsSheet.svelte";
@@ -113,6 +114,7 @@
     {#if app.helpOpen}<HelpPanel />{/if}
   {/if}
   <Toasts />
+  <SupportNudge />
   <FileConfirm />
   {#if app.tourOpen}<Tour />{/if}
 {/if}

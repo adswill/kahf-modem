@@ -30,6 +30,9 @@ export interface Step {
 const MSG_STORE = "kahf.messages";
 const MAIL_STORE = "kahf.mail";
 const HEARD_STORE = "kahf.heard";
+const SUPPORT_STORE = "kahf.support";
+export const KOFI_URL = "https://ko-fi.com/adswill";
+const DAY_MS = 86_400_000;
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -88,6 +91,8 @@ class AppState {
   transmitting = $state(false);
   receiving = $state(false);
   toasts = $state<Toast[]>([]);
+  /** The gentle support note is showing. */
+  supportNudge = $state(false);
   peer = $state<string>("");
   tourOpen = $state(false);
   settingsOpen = $state(false);
@@ -181,6 +186,7 @@ class AppState {
       this.refreshRelayDirectory(false);
     }
     this.ready = true;
+    this.maybeNudge();
     setInterval(() => void this.refreshGate(), 5000);
   }
 
@@ -468,6 +474,24 @@ class AppState {
       this.mail = this.mail.map((m) => (m.dir === "in" ? { ...m, read: true } : m));
       save(MAIL_STORE, this.mail);
     }
+  }
+
+  /** Once in a while (not in the first week, then at most monthly) asks, once, if the person would like to support KAHF. */
+  private maybeNudge() {
+    if (!this.settings.setupDone) return;
+    const now = Date.now();
+    const st = load<{ first: number; last: number; off: boolean }>(SUPPORT_STORE, { first: now, last: 0, off: false });
+    if (!st.first) st.first = now;
+    save(SUPPORT_STORE, st);
+    if (st.off || now - st.first < 7 * DAY_MS || now - st.last < 30 * DAY_MS) return;
+    window.setTimeout(() => (this.supportNudge = true), 30_000);
+  }
+
+  /** Closes the support note. `never` stops it for good; otherwise it returns in a month. */
+  closeNudge(never: boolean) {
+    this.supportNudge = false;
+    const st = load<{ first: number; last: number; off: boolean }>(SUPPORT_STORE, { first: Date.now(), last: 0, off: false });
+    save(SUPPORT_STORE, { ...st, last: Date.now(), off: never || st.off });
   }
 
   toast(text: string, kind: Toast["kind"] = "info") {

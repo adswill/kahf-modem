@@ -9,7 +9,8 @@ import { encodeBase64, radiusDegrees } from "./core.js";
 import { CSS } from "./web/styles.js";
 import { HOME_SCRIPT } from "./web/script.js";
 import { LIVE_MAP_SCRIPT } from "./web/live-map.js";
-import { homeBody } from "./web/home.js";
+import { homeBody, HOME_HEAD, HOME_FOOT } from "./web/home.js";
+import { HOME_CSS } from "./web/home-css.js";
 
 /**
  * @typedef {import("./types").Location} Location
@@ -250,7 +251,7 @@ const EMPTY_STATE = `<p>No relays or stations have reported in the last 48 hours
  * @param {string} script the inline script text for this page
  * @param {boolean} [wide] let the page use the full window width
  */
-function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "") {
+function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "", ownFrame = false) {
   const homeCurrent = current === "home" ? ' aria-current="page"' : "";
   const mapCurrent = current === "map" ? ' aria-current="page"' : "";
   return `<!doctype html>
@@ -262,11 +263,11 @@ function shell(title, description, current, body, script, wide = false, head = "
 <meta name="color-scheme" content="light dark">
 <title>${esc(title)}</title>
 <style>${CSS}</style>
-${head}
+${ownFrame ? `<style>${HOME_CSS}</style>\n` : ""}${head}
 </head>
 <body data-page="${current}">
 <a class="skip" href="#main">Skip to content</a>
-<header class="top">
+${ownFrame ? HOME_HEAD : `<header class="top">
 <div class="wrap${wide ? " wide" : ""}">
 <a class="brand" href="/">KAHF</a>
 <nav aria-label="Main">
@@ -277,15 +278,15 @@ ${head}
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>
 </div>
-</header>
+</header>`}
 <main id="main" tabindex="-1">
 ${body}
 </main>
-<footer class="foot">
+${ownFrame ? HOME_FOOT : `<footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
 <p>KAHF is pre-release software for licensed amateur radio operators. Copyright (c) 2026 adswill.</p>
 </div>
-</footer>
+</footer>`}
 ${beforeScript}
 <script>${script}</script>
 </body>
@@ -295,11 +296,15 @@ ${beforeScript}
 /** The kahf.dev home page. */
 export function renderHome() {
   return shell(
-    "KAHF: radio messaging and file transfer for HF",
-    "KAHF sends messages, mail and files between amateur radio stations over HF, with ordinary radios or SDRs.",
+    "KAHF: messages by radio, with no internet",
+    "KAHF sends chat, mail, files and voice notes between computers over HF radio on 17 metres, for licensed amateur radio operators.",
     "home",
     homeBody(),
     HOME_SCRIPT,
+    false,
+    "",
+    "",
+    true,
   );
 }
 

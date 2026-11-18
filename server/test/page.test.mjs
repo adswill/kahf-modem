@@ -34,23 +34,26 @@ const STATIONS = [
 
 const EXTERNAL = /https?:\/\/|\/\/[a-z0-9.-]+\.[a-z]{2,}|<script[^>]*\bsrc=|<link\b|@import/i;
 
-test("home page has the statement, what it does, how it travels and downloads", () => {
+// The two links the home page may carry: the project's source and the support page.
+const OWN_LINKS = /href="https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)" rel="noopener noreferrer"/g;
+const noOwnLinks = (html) => html.replace(OWN_LINKS, 'href="#"');
+
+test("home page has the statement, the lanes, what you can send, the range, the status and the licence", () => {
   const html = renderHome();
-  assert.match(html, /<h1[^>]*>KAHF sends messages, mail and files between amateur radio stations over HF\.<\/h1>/);
+  assert.match(html, /<h1 id="top-title">Messages by radio, <em>with no internet\.<\/em><\/h1>/);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
-  assert.match(html, /id="what"/);
-  assert.match(html, /id="how"/);
-  assert.match(html, /id="licences"/);
+  for (const id of ["lanes", "messages", "reach", "status", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.doesNotMatch(html, /id="download"/);
   assert.match(html, /href="\/map"/);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds/i);
-  assert.match(html, /<img src="\/operate\.png" width="1512" height="940"/);
+  assert.doesNotMatch(html, /<img\b/);
 });
 
-test("home page has no emoji and no external URL", () => {
+test("home page has no emoji and no external URL but its two own links", () => {
   const html = renderHome();
   assert.doesNotMatch(html, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
-  assert.doesNotMatch(html, EXTERNAL);
+  assert.doesNotMatch(noOwnLinks(html), EXTERNAL);
+  assert.equal((html.match(OWN_LINKS) || []).length >= 2, true);
 });
 
 const MAP_HOSTS = /^(https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)|https:\/\/tile\.openstreetmap\.org\/\{z\}\/\{x\}\/\{y\}\.png)$/;
@@ -78,7 +81,7 @@ test("map page only loads the map library and map tiles from outside", () => {
   assert.ok(urls.length > 0);
   for (const u of urls) assert.match(u, MAP_HOSTS, `unexpected URL ${u}`);
   assert.doesNotMatch(html, /<link\b(?![^>]*maplibre)/);
-  assert.doesNotMatch(renderHome(), EXTERNAL);
+  assert.doesNotMatch(noOwnLinks(renderHome()), EXTERNAL);
 });
 
 test("stored text never appears in the page; it travels as data", () => {

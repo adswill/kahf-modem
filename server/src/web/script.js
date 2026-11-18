@@ -63,9 +63,8 @@ const HOME = String.raw`
     var safe = false;
     try { safe = new window.URL(String(info.notes_url)).protocol === "https:"; } catch (e) { safe = false; }
     var when = String(info.published_at || "").slice(0, 10);
-    var sec = doc.createElement("section"), lic = $("#licences"), grid, dl, p, a;
-    sec.className = "sec"; sec.id = "download"; sec.setAttribute("aria-labelledby", "download-t");
-    p = doc.createElement("p"); p.className = "label"; p.textContent = "Downloads"; sec.appendChild(p);
+    var sec = doc.createElement("section"), lic = $("#licences"), dl, p, a;
+    sec.className = "part"; sec.id = "download"; sec.setAttribute("aria-labelledby", "download-t");
     var h2 = doc.createElement("h2"); h2.id = "download-t"; h2.textContent = "Version " + info.version; sec.appendChild(h2);
     dl = doc.createElement("dl"); dl.className = "kv";
     [["Version", info.version], ["Date", when]].forEach(function (r) {
@@ -82,6 +81,123 @@ const HOME = String.raw`
     if (lic && lic.parentNode) lic.parentNode.insertBefore(sec, lic);
   }
   getJson("/release").then(function (d) { if (d && d.release) showRelease(d.release); }).catch(function () { /* keep the honest default */ });
+
+  var reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+  /* ---- the lane ruler: read a lane, from its row in the table ---- */
+  var ROLE_TEXT = {
+    Relay: "Relay lane. Relays send to operators here, and bigger transfers use it.",
+    Calling: "Calling lane. Operators ask here and relays announce themselves. Kept short.",
+    Spare: "Spare lane. A buffer between busy lanes, and room for a faster transfer when the plan allows it."
+  };
+  function pickLane(k) {
+    var row = $("table.lanes tr[data-k=\"" + k + "\"]");
+    if (!row) return;
+    var c = row.getElementsByTagName("td");
+    $("#r-name").textContent = c[0].textContent;
+    $("#r-centre").textContent = c[2].textContent + " MHz";
+    $("#r-dial").textContent = c[3].textContent + " MHz";
+    $("#r-role").textContent = ROLE_TEXT[c[1].textContent] || "";
+    $$("#ruler .lane").forEach(function (g) { g.classList.toggle("sel", g.getAttribute("data-k") === String(k)); });
+    $$("table.lanes tr[data-k]").forEach(function (r) { r.classList.toggle("sel", r === row); });
+  }
+  $$("#ruler .lane").forEach(function (g) {
+    var k = g.getAttribute("data-k");
+    g.addEventListener("click", function () { pickLane(k); });
+    g.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickLane(k); } });
+  });
+  $$("table.lanes tr[data-k]").forEach(function (r) {
+    r.addEventListener("click", function () { pickLane(r.getAttribute("data-k")); });
+  });
+  pickLane(5);
+  var ruler = $("#ruler");
+  if (ruler) {
+    if (reduce || !("IntersectionObserver" in window)) { ruler.classList.remove("wait"); }
+    else {
+      var io = new window.IntersectionObserver(function (list) {
+        if (list[0].isIntersecting) { ruler.classList.remove("wait"); io.disconnect(); }
+      }, { threshold: 0.25 });
+      io.observe(ruler);
+    }
+  }
+
+  /* ---- the plotting sheet: night side from the sun, and packets along the passages ---- */
+  var LON0 = -30, LON1 = 100, LAT0 = -35, LAT1 = 75, M = 36, PW = 688, PH = 488;
+  function px(lon) { return M + (lon - LON0) / (LON1 - LON0) * PW; }
+  function py(lat) { return M + (LAT1 - lat) / (LAT1 - LAT0) * PH; }
+  function rad(d) { return d * Math.PI / 180; }
+  function sunNow(d) {
+    var start = Date.UTC(d.getUTCFullYear(), 0, 1), day = (d - start) / 864e5;
+    var g = 2 * Math.PI / 365 * (day - 0.5);
+    var dec = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+    var eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+    var utcMin = d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60;
+    return { dec: dec, lon: (720 - utcMin - eq) / 4 };
+  }
+  function elevation(sun, lat, lon) {
+    var h = rad(lon - sun.lon), p = rad(lat);
+    var s = Math.sin(p) * Math.sin(sun.dec) + Math.cos(p) * Math.cos(sun.dec) * Math.cos(h);
+    return Math.asin(Math.max(-1, Math.min(1, s))) * 180 / Math.PI;
+  }
+  function drawNight(sun) {
+    var g = $("#night");
+    if (!g) return;
+    while (g.firstChild) g.removeChild(g.firstChild);
+    var d = "", lon, t, tanDec = Math.tan(sun.dec);
+    if (Math.abs(tanDec) < 0.0005) tanDec = 0.0005;
+    for (lon = LON0; lon <= LON1; lon += 1) {
+      t = Math.atan(-Math.cos(rad(lon - sun.lon)) / tanDec) * 180 / Math.PI;
+      t = Math.max(LAT0 - 5, Math.min(LAT1 + 5, t));
+      d += (lon === LON0 ? "M" : "L") + px(lon).toFixed(1) + " " + py(t).toFixed(1);
+    }
+    /* Which pole is dark: the south one while the sun is north of the equator, and the reverse. */
+    var edge = sun.dec < 0 ? M - 4 : M + PH + 4;
+    d += "L" + px(LON1).toFixed(1) + " " + edge + "L" + px(LON0).toFixed(1) + " " + edge + "Z";
+    el("path", { "class": "night", d: d }, g);
+  }
+  function midpoint(a, b) {
+    var p1 = rad(a[0]), l1 = rad(a[1]), p2 = rad(b[0]), l2 = rad(b[1]);
+    var bx = Math.cos(p2) * Math.cos(l2 - l1), by = Math.cos(p2) * Math.sin(l2 - l1);
+    var p3 = Math.atan2(Math.sin(p1) + Math.sin(p2), Math.sqrt((Math.cos(p1) + bx) * (Math.cos(p1) + bx) + by * by));
+    var l3 = l1 + Math.atan2(by, Math.cos(p1) + bx);
+    return [p3 * 180 / Math.PI, ((l3 * 180 / Math.PI) + 540) % 360 - 180];
+  }
+  function sunLine() {
+    var now = new Date(), sun = sunNow(now);
+    drawNight(sun);
+    var mid = midpoint([54.69, 25.28], [25.2, 55.27]), el0 = elevation(sun, mid[0], mid[1]);
+    var cap = $("#sun");
+    if (cap) {
+      while (cap.firstChild) cap.removeChild(cap.firstChild);
+      var a = doc.createElement("span"), b = doc.createElement("span"), bold = doc.createElement("b");
+      bold.textContent = "UTC " + pad2(now.getUTCHours()) + ":" + pad2(now.getUTCMinutes()) + ". ";
+      a.appendChild(bold);
+      a.appendChild(doc.createTextNode("The dark area is where it is night now."));
+      b.appendChild(doc.createTextNode("Vilnius to Dubai, sun at the middle of the path: "));
+      var n = doc.createElement("span"); n.className = "num"; n.textContent = (el0 >= 0 ? "+" : "") + el0.toFixed(0) + " degrees";
+      b.appendChild(n);
+      b.appendChild(doc.createTextNode(el0 > 5 ? ". Daylight: 17 m usually works on a path like this." : el0 > -6 ? ". Dawn or dusk: it can go either way." : ". Night: 17 m is usually closed on this path."));
+      cap.appendChild(a); cap.appendChild(b);
+    }
+  }
+  sunLine();
+  window.setInterval(sunLine, 60000);
+
+  var packets = [["p1", "pk1", 0], ["p2", "pk2", 2800], ["p3", "pk3", 5600]].map(function (r) {
+    return { path: $("#" + r[0]), dot: $("#" + r[1]), offset: r[2] };
+  }).filter(function (p) { return p.path && p.dot && p.path.getTotalLength; });
+  function tick(ms) {
+    packets.forEach(function (p) {
+      var t = ((ms + 1800 + p.offset) % 9000) / 3600;
+      if (t > 1) { p.dot.setAttribute("opacity", "0"); return; }
+      var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      var pt = p.path.getPointAtLength(e * p.path.getTotalLength());
+      p.dot.setAttribute("cx", pt.x.toFixed(1)); p.dot.setAttribute("cy", pt.y.toFixed(1));
+      p.dot.setAttribute("opacity", t < 0.06 ? String(t / 0.06) : t > 0.94 ? String((1 - t) / 0.06) : "1");
+    });
+    window.requestAnimationFrame(tick);
+  }
+  if (!reduce && packets.length) window.requestAnimationFrame(tick);
 `;
 
 const MAP = String.raw`

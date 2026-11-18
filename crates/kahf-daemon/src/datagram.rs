@@ -65,6 +65,8 @@ struct RxBurst {
 
 struct DgSend {
     oid: u64,
+    /// The message's own destination (the next hop may be a relay).
+    dest_h: u32,
     peer: String,
     peer_h: u32,
     seq: u8,
@@ -76,6 +78,11 @@ struct DgSend {
 }
 
 impl DgState {
+    /// The first message being sent: its destination and how many chunks are not acknowledged.
+    pub(crate) fn first_send(&self) -> Option<(u32, usize)> {
+        self.sends.first().map(|s| (s.dest_h, s.acked.iter().filter(|a| !**a).count()))
+    }
+
     #[cfg(test)]
     pub(crate) fn waiting_acks(&self) -> usize {
         self.acks.len()
@@ -184,6 +191,7 @@ impl Worker {
             let n = chunks.len();
             self.dg.sends.push(DgSend {
                 oid,
+                dest_h: bundle::h24(dest_of(&msg)),
                 peer_h: bundle::h24(&peer),
                 peer,
                 seq: self.dg.seq,
@@ -200,7 +208,7 @@ impl Worker {
     }
 
     /// A random wait of up to `base_ms` doubled `tries` times (at most 16 s), at least a quarter of it.
-    fn dg_jitter(&self, tries: u32, base_ms: u64) -> Duration {
+    pub(crate) fn dg_jitter(&self, tries: u32, base_ms: u64) -> Duration {
         use kahf_core::select::{RandomSource, SplitMix};
         let seed = if self.clock.is_virtual() {
             fnv(&self.callsign)
@@ -219,8 +227,16 @@ impl Worker {
         if self.tx.is_some() || !self.bursts.is_empty() || !self.control.is_empty() {
             return;
         }
-        if self.dg.hold_until.is_some_and(|t| self.clock.now() < t) {
-            return;
+        // A relay that referees the lane (or is one) decides when; otherwise listen before talk.
+        let mut max_air: Option<f64> = None;
+        match self.ref_gate() {
+            RefGate::Csma => {
+                if self.dg.hold_until.is_some_and(|t| self.clock.now() < t) {
+                    return;
+                }
+            }
+            RefGate::Wait => return,
+            RefGate::Go { max_air_s } => max_air = Some(max_air_s),
         }
         let Some(first) = self.dg.sends.first().map(|s| s.oid) else { return };
         // A send opens the radio when nothing else has (listening starts it too).
@@ -228,7 +244,8 @@ impl Worker {
             self.log(e);
             return;
         }
-        match self.pick_channel(Some(first), false, false) {
+        // In a slot the referee gave there is no random back-off: it is an answer-class send.
+        match self.pick_channel(Some(first), false, max_air.is_some()) {
             Pick::Go => {}
             Pick::Wait => return,
             Pick::GaveUp => {
@@ -244,6 +261,15 @@ impl Worker {
                     break 'fill;
                 }
                 burst.push((s.oid, ci));
+            }
+        }
+        if let Some(limit) = max_air {
+            self.pick_level();
+            while burst.len() > 1 && self.burst_secs(burst.len()) > limit {
+                burst.pop();
+            }
+            if self.burst_secs(burst.len()) > limit {
+                return; // not even one codeword fits what is left of the slot
             }
         }
         let frames: Result<Vec<Vec<u8>>, String> = burst
@@ -277,8 +303,12 @@ impl Worker {
                 let air = burst_len_for(MODULATIONS[self.tx_level as usize], n) as f64 / RATE as f64 * self.slow() as f64;
                 // Own transmit time (it may wait behind another burst), then every answer in turn.
                 let peers = self.dg_burst_peers().len() as u32;
-                let wait = Duration::from_secs_f64(air + 1.0) + DG_ACK_WAIT * self.slow() + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
+                let referee_wait = if max_air.is_some() { Duration::from_secs(36) } else { Duration::ZERO };
+                let wait = referee_wait + Duration::from_secs_f64(air + 1.0) + DG_ACK_WAIT * self.slow() + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
                 self.dg.deadline = Some(self.clock.now() + wait);
+                if max_air.is_some() {
+                    self.ref_data_sent();
+                }
             }
             Err(e) => {
                 self.dg.burst.clear();
@@ -305,6 +335,7 @@ impl Worker {
     /// The answers did not all come in time: whoever stayed silent has one more try used.
     fn dg_retry(&mut self) {
         self.dg.deadline = None;
+        self.ref_op_reset();
         let silent: Vec<u32> = self.dg_burst_peers().into_iter().filter(|p| !self.dg.answered.contains(p)).collect();
         let mut gave_up: Vec<DgSend> = Vec::new();
         for s in self.dg.sends.iter_mut().filter(|s| silent.contains(&s.peer_h)) {
@@ -364,6 +395,7 @@ impl Worker {
             self.bb_item_done(s.oid, true);
             self.record_forward(public);
             self.persist_outbox();
+            self.ref_op_reset();
         }
         // Everyone in the burst answered: the next burst may go at once.
         if self.dg_burst_peers().iter().all(|p| self.dg.answered.contains(p)) || self.dg.burst.iter().all(|(o, _)| !self.dg.sends.iter().any(|s| s.oid == *o)) {
@@ -385,6 +417,7 @@ impl Worker {
         match h.kind {
             Kind::Message => self.dg_on_message(&frame),
             Kind::Ack => self.dg_on_ack(&frame),
+            Kind::Beacon | Kind::Request | Kind::Grant => self.ref_on_frame(&frame),
             _ => {}
         }
     }
@@ -457,7 +490,12 @@ impl Worker {
                 body: vec![map, *seq, snr_byte],
             };
             if let Ok(p) = ack.encode() {
-                self.dg.acks.push((due, p));
+                if self.is_ref_relay() {
+                    // The referee answers everyone together, with its next beacon.
+                    self.refs.acks.push(p);
+                } else {
+                    self.dg.acks.push((due, p));
+                }
             }
         }
     }

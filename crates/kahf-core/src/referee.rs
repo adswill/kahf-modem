@@ -51,6 +51,58 @@ pub fn encode_grant(relay: u32, to: u32, lane: u8, abs_slot: u64, count: u8, ind
         .expect("grant fits")
 }
 
+/// A beacon: the relay's callsign hash is the source; the body is the operator window (slots),
+/// the load (0 to 255) and the epoch counter (the relay's UTC epoch), so an operator can lay the
+/// slot grid on the burst it heard.
+pub fn encode_beacon(relay_call: &str, window: u8, load: u8, epoch: u64) -> Vec<u8> {
+    let mut body = vec![window, load];
+    body.extend((epoch as u32).to_be_bytes());
+    body.extend(relay_call.trim().to_uppercase().bytes().take(bundle::BODY_MAX - 6));
+    Frame { header: Header { kind: Kind::Beacon, flags: 0, hops: 0, next_hop: 0, source: bundle::h24(relay_call), index: 0, count: 1 }, body }
+        .encode()
+        .expect("beacon fits")
+}
+
+/// `(window, load, epoch, relay callsign)` of a beacon frame.
+pub fn decode_beacon(f: &Frame) -> Option<(u8, u8, u64, String)> {
+    (f.header.kind == Kind::Beacon && f.body.len() > 6).then(|| {
+        (
+            f.body[0],
+            f.body[1],
+            u32::from_be_bytes([f.body[2], f.body[3], f.body[4], f.body[5]]) as u64,
+            String::from_utf8_lossy(&f.body[6..]).into_owned(),
+        )
+    })
+}
+
+/// `(destination hash, data slots, urgency)` of a request frame.
+pub fn decode_request(f: &Frame) -> Option<(u32, u8, u8)> {
+    (f.header.kind == Kind::Request && f.body.len() >= 5)
+        .then(|| (u32::from_be_bytes([0, f.body[0], f.body[1], f.body[2]]), f.body[3], f.body[4]))
+}
+
+/// `(lane, slots, first absolute slot)` of a grant frame.
+pub fn decode_grant(f: &Frame) -> Option<(u8, u8, u64)> {
+    (f.header.kind == Kind::Grant && f.body.len() >= 6)
+        .then(|| (f.body[0], f.body[1], u32::from_be_bytes([f.body[2], f.body[3], f.body[4], f.body[5]]) as u64))
+}
+
+/// Epoch slots 0 to 3 belong to the relay and the request window; slots 4 and 5 carry data.
+pub const FIRST_DATA_SLOT: u64 = 4;
+
+/// The first absolute slot at or after `cursor` where `count` data slots fit inside one epoch.
+pub fn next_data_slot(cursor: u64, count: u8) -> u64 {
+    let count = (count as u64).clamp(1, SLOTS - FIRST_DATA_SLOT);
+    let mut a = cursor;
+    loop {
+        let s = a % SLOTS;
+        if s >= FIRST_DATA_SLOT && s + count <= SLOTS {
+            return a;
+        }
+        a = if s < FIRST_DATA_SLOT { a - s + FIRST_DATA_SLOT } else { a - s + SLOTS + FIRST_DATA_SLOT };
+    }
+}
+
 /// What an operator holds to send.
 #[derive(Clone, Debug)]
 pub struct Message {
@@ -305,6 +357,29 @@ mod tests {
         let e = run(&mut cell, 50);
         assert!(cell.done() && e <= 4, "served in epoch {e}");
         assert_eq!(cell.stats.collisions, 0);
+    }
+
+    #[test]
+    fn beacon_request_and_grant_round_trip_and_data_slots_are_found() {
+        let b = Frame::decode(&encode_beacon("RELAY1", 2, 9, 1234567)).unwrap();
+        assert_eq!(decode_beacon(&b), Some((2, 9, 1234567, "RELAY1".to_string())));
+        assert_eq!(b.header.source, h24("RELAY1"));
+        let r = Frame::decode(&encode_request(h24("OP1"), h24("RELAY1"), h24("ZZ9ZZZ"), 2, 1)).unwrap();
+        assert_eq!(decode_request(&r), Some((h24("ZZ9ZZZ"), 2, 1)));
+        let g = Frame::decode(&encode_grant(h24("RELAY1"), h24("OP1"), 5, 77, 2, 0, 1)).unwrap();
+        assert_eq!(decode_grant(&g), Some((5, 2, 77)));
+        // Slots 4 and 5 of each epoch of six.
+        assert_eq!(next_data_slot(0, 2), 4);
+        assert_eq!(next_data_slot(5, 2), 10);
+        assert_eq!(next_data_slot(5, 1), 5);
+        assert_eq!(next_data_slot(6, 1), 10);
+        assert_eq!(next_data_slot(11, 2), 16);
+        for c in 0..60 {
+            for n in 1..=2u8 {
+                let a = next_data_slot(c, n);
+                assert!(a >= c && a % SLOTS >= FIRST_DATA_SLOT && a % SLOTS + n as u64 <= SLOTS);
+            }
+        }
     }
 
     #[test]

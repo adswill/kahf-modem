@@ -19,6 +19,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
 mod datagram;
+mod referee;
+use referee::{RefGate, RefState};
 use datagram::{is_answer_payload, is_dg_item, DgState};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
@@ -1996,6 +1998,15 @@ struct Worker {
     lane_rx: Option<narrow::LaneRx>,
     /// The other calling lane, heard at the same time while the radio is on C1 or C2.
     second: Option<RxLane>,
+    /// The relay as referee of its lane, and the operator that obeys it (`referee.rs`).
+    refs: RefState,
+    /// When a KAHF frame was last decoded on each lane (worker clock ms): that lane's regular
+    /// bursts are not a foreign signal to keep out of.
+    kahf_seen: HashMap<u8, u64>,
+    /// True while the second lane's receive state is swapped in.
+    on_second: bool,
+    /// Lane number of the second lane (set while its state is swapped in).
+    second_k: Option<u8>,
     /// Next whole-segment occupancy report, on the worker clock (ms).
     occupancy_due_ms: u64,
     /// Channel plan for transmit selection (plan 2.2).
@@ -2193,6 +2204,10 @@ impl Worker {
             dg: DgState::new(&config.callsign),
             lane_rx: None,
             second: None,
+            refs: RefState::new(),
+            kahf_seen: HashMap::new(),
+            on_second: false,
+            second_k: None,
             occupancy_due_ms: OCCUPANCY_PERIOD_MS,
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
@@ -2280,6 +2295,7 @@ impl Worker {
             self.check_relays();
             self.backbone_step();
             self.auto_link();
+            self.referee_step();
             self.datagram_step();
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
@@ -2476,6 +2492,12 @@ impl Worker {
 
     /// Same for an item known only by its queue entry.
     fn route_peer_of(&self, id: u64) -> Option<String> {
+        // A chat goes through the relay that referees the lane, while its beacon is fresh.
+        if let Some(relay) = self.ref_relay_call() {
+            if self.outbox.get(id).is_some_and(is_dg_item) {
+                return Some(relay);
+            }
+        }
         self.via.get(&id).cloned().or_else(|| self.queued.get(&id).map(|(d, _)| d.clone()))
     }
 
@@ -2777,6 +2799,8 @@ impl Worker {
             Some(r) if r.role == Role::Station => true,
             // A relay role is held unless relay mode runs and a transmit slot covers now.
             // With no schedule there is no slot, so it is held.
+            // On a lane the referee's epoch cycle governs the relay, not a 24 hour slot.
+            Some(_) if self.lanes.is_some() => self.shared.flags.relay_running.load(Ordering::SeqCst),
             Some(r) => {
                 self.shared.flags.relay_running.load(Ordering::SeqCst)
                     && !r.slots().is_empty()
@@ -2912,12 +2936,15 @@ impl Worker {
     /// Feeds the second lane its audio and looks for frames in it.
     fn second_lane_step(&mut self, fresh: &[f32], scan: bool) {
         let Some(mut st) = self.second.take() else { return };
+        self.second_k = Some(st.k);
         let stream = st.lane_rx.process(fresh);
         st.rx_buf.extend_from_slice(&stream);
         st.since_kami += stream.len();
         if scan {
             self.swap_rx(&mut st);
+            self.on_second = true;
             self.decode_frames();
+            self.on_second = false;
             self.swap_rx(&mut st);
         }
         self.second = Some(st);
@@ -2957,6 +2984,13 @@ impl Worker {
         if now_ms >= w.classified_ms + SENSE_CLASSIFY_MS {
             w.classified_ms = now_ms;
             for (i, k) in w.ks.clone().into_iter().enumerate() {
+                // KAHF's own regular bursts look like a periodic narrow signal: a lane where a
+                // KAHF frame was decoded lately is not kept out of.
+                // Its neighbours hear the leakage of that burst, so they are skipped too.
+                let kahf_near = (k.saturating_sub(1)..=k + 1).any(|j| self.kahf_seen.get(&j).is_some_and(|t| now_ms.saturating_sub(*t) < 90_000));
+                if kahf_near {
+                    continue;
+                }
                 match w.sense.classify(i) {
                     LaneClass::Voice | LaneClass::Cw => self.quarantine.human(k as usize, now_s),
                     LaneClass::Carrier | LaneClass::Digital15s => self.quarantine.occupied(k as usize, now_s),
@@ -3562,10 +3596,15 @@ impl Worker {
 
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
+        self.push_burst_mode(frames, None);
+    }
+
+    /// As `push_burst`, in the mode `mode` when one is given (the referee's own frames).
+    fn push_burst_mode(&mut self, frames: &[Vec<u8>], mode: Option<Modulation>) {
         self.last_activity = self.clock.now();
         let before = self.tx_level;
         self.pick_level();
-        let m = MODULATIONS[self.tx_level as usize];
+        let m = mode.unwrap_or(MODULATIONS[self.tx_level as usize]);
         // Weak mode: the most robust KAMI mode, for stations that cannot answer.
         let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) { Modulation::Kami256 } else { m };
         self.link.set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
@@ -3982,6 +4021,11 @@ impl Worker {
 
     fn on_frame(&mut self, payload: Vec<u8>) {
         self.last_activity = self.clock.now();
+        let lane_k = if self.on_second { self.second_k } else { self.lanes.as_ref().map(|w| w.ks[w.own]) };
+        if let Some(k) = lane_k {
+            let now = self.now_ms();
+            self.kahf_seen.insert(k, now);
+        }
         if matches!(payload.first(), Some(0x30..=0x37)) {
             // A bundle frame: not the link's. An answer proves the channel works, as on the link.
             if payload.first() == Some(&0x32) {
@@ -5861,6 +5905,89 @@ mod tests {
         assert!(!hears(18_110_640, lane_burst_audio("neighbour", 2200.0), "neighbour"), "a relay lane station heard a neighbour lane");
         // On C1 a burst on the spare lane X2 (3 x 700 Hz up: 3600 Hz) is not a calling lane.
         assert!(!hears(18_113_440, lane_burst_audio("spare", 3600.0), "spare"), "a calling lane station heard the spare lane");
+    }
+
+    // ---- the relay as referee (WP5) ------------------------------------------------------------
+
+    /// A relay (index 0), `ops` operators (1..=ops) and a destination (last) on the C1 lane. The
+    /// operators and the destination hear only the relay, the relay hears them all: hidden stations.
+    fn referee_cell(tag: &str, ops: usize) -> Vec<Engine> {
+        let n = ops + 2;
+        let calls: Vec<String> = std::iter::once("RR1RRR".to_string())
+            .chain((0..ops).map(|i| format!("OP{}AAA", (b'A' + i as u8) as char)))
+            .chain(std::iter::once("ZZ9ZZZ".to_string()))
+            .collect();
+        let mut hears = Vec::new();
+        for i in 1..n {
+            hears.push((0, i));
+            hears.push((i, 0));
+        }
+        let names: Vec<&str> = calls.iter().map(|c| c.as_str()).collect();
+        // A little receiver noise: a floor of exact zeros makes every leak look huge.
+        let st = mesh(tag, &names, &hears, 0.002);
+        for e in &st {
+            e.set_dial_hz(Some(C1_DIAL_HZ));
+            e.set_fixed_mode("KAMI-1c").unwrap();
+            e.set_auto_link(true);
+        }
+        make_relay(&st[0]);
+        st
+    }
+
+    #[test]
+    fn an_operator_asks_the_relay_gets_a_grant_and_the_message_reaches_the_destination() {
+        let mut st = referee_cell("ref-one", 1);
+        let n = st.len();
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        // Let the operator hear a beacon first, then write.
+        test_clock().sleep(Duration::from_secs(30));
+        a.send_message("ZZ9ZZZ", "through the referee").unwrap();
+        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text == "through the referee"), 400);
+        assert!(got.is_some(), "the message never reached the destination ({n} stations)");
+    }
+
+    #[test]
+    fn hidden_operators_and_one_relay_every_message_arrives_once() {
+        // Three operators by default; REF_OPS=10 runs ten (about 15 minutes of real time, and not
+        // yet finished within 2400 virtual seconds: see docs/NETWORK-STATUS.md, WP5).
+        let ops: usize = std::env::var("REF_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let mut st = referee_cell("ref-ten", ops);
+        let mut z = st.pop().unwrap();
+        for e in st.iter_mut() {
+            e.listen().unwrap();
+        }
+        z.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        for (i, e) in st.iter_mut().enumerate().skip(1) {
+            e.send_message("ZZ9ZZZ", &format!("op {i}")).unwrap();
+        }
+        let clock = test_clock();
+        let t0 = clock.now();
+        let mut seen: Vec<String> = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(2400) && seen.len() < ops {
+            for e in st.iter_mut() {
+                let _ = e.poll_events();
+            }
+            for ev in z.poll_events() {
+                if let Event::Message { text, .. } = ev {
+                    seen.push(text);
+                }
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        let secs = clock.since(t0).as_secs();
+        seen.sort();
+        let mut want: Vec<String> = (1..=ops).map(|i| format!("op {i}")).collect();
+        want.sort();
+        assert_eq!(seen, want, "after {secs} s");
+        eprintln!("{ops} operators, one relay: all delivered after {secs} virtual seconds");
+        // Nothing arrives twice afterwards.
+        clock.sleep(Duration::from_secs(120));
+        assert!(z.poll_events().into_iter().all(|e| !matches!(e, Event::Message { .. })), "a duplicate arrived");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 KAHF (pronounced "kaf", rhymes with "calf") is an HF data modem written in Rust. It has so far been built and run only on macOS (Linux and Windows are not yet tested) and is built for amateur radio data links: station connections, messages, mail and file transfer.
 
+Like KAHF? You can support its development on Ko-fi: <https://ko-fi.com/adswill>
+
 ## Status
 
 Early development. KAHF is not yet on air. The modem, frame, link and session layers, the logbook and the stress tests are implemented and tested. The sound-card and SDR adapters and the desktop interface are in progress. Measured numbers are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).

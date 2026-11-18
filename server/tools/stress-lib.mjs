@@ -1486,7 +1486,8 @@ S(G.page, "home page: one hashed inline script, no external URL, strict CSP", "2
   check(/connect-src 'self'(;|$)/.test(csp), `CSP lacks connect-src 'self': ${csp}`);
   check(!/unsafe-eval|unsafe-inline[^;]*script|script-src[^;]*(unsafe-inline|\*)|https?:|data:|wasm-unsafe/.test(csp.replace(/style-src[^;]*;?/, "")), `CSP too loose: ${csp}`);
   for (const d of ["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) check(csp.includes(d), `CSP lacks ${d}`);
-  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, ""), "home");
+  // The home page links to the project source and the support page; nothing else leaves the site.
+  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, "").replace(/href="https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)" rel="noopener noreferrer"/g, 'href="#"'), "home");
   check(!/http-equiv\s*=\s*["']?refresh/i.test(r.text), "meta refresh");
   scriptCalls(scripts[0][1], "home");
   eq(r.headers.get("x-content-type-options"), "nosniff", "nosniff");

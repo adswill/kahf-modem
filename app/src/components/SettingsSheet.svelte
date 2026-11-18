@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { modal } from "../lib/modal";
-  import { app, type SettingsTab } from "../lib/state.svelte";
+  import { app, KOFI_URL, type SettingsTab } from "../lib/state.svelte";
   import { callProblem, normaliseCall, validCall } from "../lib/callsign";
   import { validLat, validLon } from "../lib/geo";
   import LocationEditor from "./LocationEditor.svelte";
@@ -113,6 +113,7 @@
         <div class="row wrap">
           <button class="btn" onclick={() => { close(); app.tourOpen = true; }}>Take the tour again</button>
           <button class="btn" onclick={() => { close(); app.go("setup"); }}>Run setup again</button>
+          <button class="btn" onclick={() => window.open(KOFI_URL, "_blank")}>Support KAHF on Ko-fi</button>
         </div>
         <hr class="rule" />
         {#if !confirmReset}
