@@ -83,7 +83,8 @@ Status values: `planned`, `in progress`, `blocked`, `in review`, `done`.
 | O2 | owner | claude | `crates/kahf-daemon/src/lib.rs` (link timers, decode scan) | `fix-step-up` | in review | 2026-11-18 | merge before O3 |
 | O3 | owner | claude | KAMI modes: `crates/kahf-core/src/kami.rs`, `phy.rs`, daemon ladder, `crates/kahf-sim` | `kami-mode` | in review | 2026-11-18 | KAMI-32/16/8 and KAMI-8H, based on O2 |
 | O4 | owner | claude | receive frequency search in `phy.rs` | `rx-pilot-freq` | in review | 2026-11-18 | |
-| O5 | owner | claude | live map tile proxy: `server/src/web/live-map.js`, `server/src/routes.js`, `server/test/` | `fix-map-tiles` | in progress | 2026-11-18 | needs the owner's Cloudflare to deploy |
+| O5 | owner | claude | live map tile proxy: `server/src/web/live-map.js`, `server/src/routes.js`, `server/test/` | `fix-map-tiles` | in review | 2026-11-18 | needs the owner's Cloudflare to deploy |
+| O6 | owner | claude | trial merge of O1 to O5 plus docs and release fixes: all combine, tests and clippy pass | `integ-02` | in review | 2026-11-18 | owner decides the real merge |
 
 ## 5. Tasks for the second person, available now
 
