@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn server_frame_with_16_bit_length_and_partial_input() {
         let mut frame = vec![0x82u8, 126, 0, 200];
-        frame.extend(std::iter::repeat(9u8).take(200));
+        frame.extend(std::iter::repeat_n(9u8, 200));
         assert!(parse_server_frame(&frame[..100]).unwrap().is_none());
         let (f, used) = parse_server_frame(&frame).unwrap().unwrap();
         assert_eq!(used, 204);

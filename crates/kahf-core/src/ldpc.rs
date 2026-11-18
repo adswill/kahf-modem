@@ -262,11 +262,11 @@ mod tests {
 
     /// Independent parity check written from the base matrix, not from the graph.
     fn parity_ok(cw: &[u8]) -> bool {
-        for i in 0..MB {
+        for row in BASE.iter().take(MB) {
             for r in 0..Z {
                 let mut acc = 0u8;
                 for j in 0..NB {
-                    let s = BASE[i][j];
+                    let s = row[j];
                     if s >= 0 {
                         acc ^= cw[j * Z + (r + s as usize) % Z];
                     }

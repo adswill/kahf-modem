@@ -84,8 +84,8 @@ mod tests {
         sig[at] = 3.0;
         let out = blank(&sig);
         assert!(out[at].abs() < 1e-6, "click not removed: {}", out[at]);
-        for k in at - 2..=at + 2 {
-            assert_eq!(out[k], 0.0, "neighbour {k} not blanked");
+        for (k, v) in out.iter().enumerate().skip(at - 2).take(5) {
+            assert_eq!(*v, 0.0, "neighbour {k} not blanked");
         }
         assert!(blanked_fraction(&sig) > 0.0);
     }

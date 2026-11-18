@@ -22,12 +22,52 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
+    /// KAMI-32 real Walsh signalling (see `kami`), the bottom rung of the ladder (frame id 3).
+    /// It is not an OFDM mode: `modulate_frame` / `demodulate_frame` hand it to `kami`.
+    Kami32,
+    /// KAMI-16: 4 bits per 16-chip Walsh symbol, 2000 bit/s raw (frame id 4).
+    Kami16,
+    /// KAMI-8: 3 bits per 8-chip Walsh symbol, 3000 bit/s raw (frame id 5).
+    Kami8,
+    /// KAMI-8H: 8-chip Walsh words with four amplitude levels, 5 bits per symbol, 5000 bit/s raw
+    /// (frame id 6). Needs about 3 dB; faster than QPSK.
+    Kami8H,
     Qpsk,
     Qam16,
     Qam64,
 }
 
+impl Modulation {
+    /// Symbol shape of the KAMI modes, None for the OFDM modes.
+    pub fn kami_shape(self) -> Option<crate::kami::Shape> {
+        use crate::kami::Shape;
+        match self {
+            Modulation::Kami32 => Some(Shape::walsh(5)),
+            Modulation::Kami16 => Some(Shape::walsh(4)),
+            Modulation::Kami8 => Some(Shape::walsh(3)),
+            Modulation::Kami8H => Some(crate::kami::SHAPE_8H),
+            _ => None,
+        }
+    }
+}
+
+/// SNR (dB, per real sample) below which KAMI-32 is chosen over QPSK. KAMI-32 clears 1 percent
+/// frame loss near -5 dB, QPSK only above this point (1 percent loss near 1 dB on awgn, measured 100 frames per point, see the
+/// integration report); above it QPSK is faster (about 0.36 s a frame against 0.65 s).
+pub const QPSK_FLOOR_DB: f32 = 1.0;
+
+/// SNR (dB) from which KAMI-16 (2000 bit/s, 0.46 s a frame) is chosen over KAMI-32: it clears
+/// 1 percent frame loss near -2 dB (100 frames per point, awgn). KAMI-8 clears it near +1 dB and is
+/// no faster than QPSK (0.35 s against 0.36 s), so the SNR chooser never picks it; it stays on
+/// the link ladder.
+pub const KAMI16_FLOOR_DB: f32 = -2.0;
+
+/// SNR (dB) from which KAMI-8H (5000 bit/s raw, 0.26 s a frame against 0.36 s for QPSK) is chosen
+/// over QPSK: 10 percent frame loss near 4 dB, 2 percent near 5 dB (100 frames per point, awgn).
+pub const KAMI8H_FLOOR_DB: f32 = 5.5;
+
 /// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`).
+/// The ladder, lowest rung first: KAMI-32, QPSK, 16QAM, 64QAM.
 /// Thresholds are the lowest 0.5 dB points where the frame error rate of the mode
 /// is below 1 percent (1000 frames per point, unit-power PHY, LDPC 50 iterations).
 /// 16QAM first clears 1 percent at 6.5 dB; 64QAM at 10.5 dB.
@@ -36,8 +76,14 @@ pub fn choose_modulation(snr_db: f32) -> Modulation {
         Modulation::Qam64
     } else if snr_db >= 6.5 {
         Modulation::Qam16
-    } else {
+    } else if snr_db >= KAMI8H_FLOOR_DB {
+        Modulation::Kami8H
+    } else if snr_db >= QPSK_FLOOR_DB {
         Modulation::Qpsk
+    } else if snr_db >= KAMI16_FLOOR_DB {
+        Modulation::Kami16
+    } else {
+        Modulation::Kami32
     }
 }
 
@@ -70,6 +116,10 @@ const DD_PASSES: usize = 2;
 const SEARCH_MARGIN: usize = 64 * SYM;
 /// Decay length (taps) of the exponential power-delay profile used as the channel prior.
 const PDP_DECAY: f64 = 8.0;
+/// Preamble correlation below which the aliased frequency hypotheses are also tried.
+const ALIAS_CORR: f64 = 0.5;
+/// Largest frequency offset (Hz) the joint search will consider.
+const MAX_CFO: f64 = 100.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct C {
@@ -214,6 +264,9 @@ fn is_pilot(i: usize) -> bool {
 
 fn bits_per_axis(m: Modulation) -> usize {
     match m {
+        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 | Modulation::Kami8H => {
+            unreachable!("KAMI is not an OFDM mode")
+        }
         Modulation::Qpsk => 1,
         Modulation::Qam16 => 2,
         Modulation::Qam64 => 3,
@@ -222,6 +275,9 @@ fn bits_per_axis(m: Modulation) -> usize {
 
 fn mod_idx(m: Modulation) -> usize {
     match m {
+        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 | Modulation::Kami8H => {
+            unreachable!("KAMI is not an OFDM mode")
+        }
         Modulation::Qpsk => 0,
         Modulation::Qam16 => 1,
         Modulation::Qam64 => 2,
@@ -507,6 +563,9 @@ fn slot_order(total: usize) -> Vec<usize> {
 
 /// Map coded bits to audio samples (frame = sync A + channel B + data symbols).
 pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
+    if let Some(sh) = m.kami_shape() {
+        return crate::kami::modulate_frame_shape(coded, sh);
+    }
     let p = phy();
     let bps = 2 * bits_per_axis(m);
     let per_sym = p.data.len() * bps;
@@ -539,8 +598,49 @@ pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
     out.iter().map(|&v| (v * g) as f32).collect()
 }
 
+/// Mix the analytic signal by `-cfo` Hz and find the symbol-A start within one period of
+/// `d_c`. Returns the mixed signal, the start and the normalised correlation there.
+fn mix_and_time(p: &Phy, z: &[C], cfo: f64, d_c: usize) -> (Vec<C>, usize, f64) {
+    let w0 = -2.0 * PI * cfo / FS;
+    let step = C::new(w0.cos(), w0.sin());
+    let mut ph = C::new(1.0, 0.0);
+    let y: Vec<C> = z
+        .iter()
+        .map(|&v| {
+            let s = ph * v;
+            ph = ph * step;
+            s
+        })
+        .collect();
+    let tpl = &p.sym_a;
+    let tpl_e: f64 = tpl.iter().map(|v| v * v).sum();
+    let mut start = d_c;
+    let mut best = -1.0;
+    for t in d_c.saturating_sub(PER / 2)..d_c + PER / 2 {
+        if t + SYM > y.len() {
+            break;
+        }
+        let mut acc = C::ZERO;
+        let mut e = 0f64;
+        for (n, &tv) in tpl.iter().enumerate() {
+            let v = y[t + n];
+            acc = acc + v * tv;
+            e += v.norm2();
+        }
+        let r = acc.norm2() / (e * tpl_e).max(1e-30);
+        if r > best {
+            best = r;
+            start = t;
+        }
+    }
+    (y, start, best)
+}
+
 /// Find the frame in `samples`, equalise, return coded-bit LLRs (positive = 0), or None.
 pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option<Vec<f32>> {
+    if let Some(sh) = m.kami_shape() {
+        return crate::kami::demodulate_frame_shape(samples, n_bits, sh);
+    }
     let p = phy();
     // Only the region this frame can occupy is analysed: the frame itself plus
     // SEARCH_MARGIN samples of search room. Converting and transforming the whole
@@ -608,43 +708,30 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
     }
     let cfo = acc.im.atan2(acc.re) * FS / (2.0 * PI * PER as f64);
 
-    // 3. Mix the analytic signal down by the CFO. Carriers land on their nominal
-    //    bins. Mixing the real signal instead leaves a mirror image that rotates at
-    //    twice the CFO; it corrupts the time-domain fine timing (wrong start).
-    let w0 = -2.0 * PI * cfo / FS;
-    let step = C::new(w0.cos(), w0.sin());
-    let mut ph = C::new(1.0, 0.0);
-    let y: Vec<C> = z
-        .iter()
-        .map(|&v| {
-            let s = ph * v;
-            ph = ph * step;
-            s
-        })
-        .collect();
-
-    // 4. Fine timing: magnitude of the correlation with symbol A over one PER window.
-    let tpl = &p.sym_a;
-    let tpl_e: f64 = tpl.iter().map(|v| v * v).sum();
-    let mut start = d_c;
-    let mut best = -1.0;
-    // Symbol A repeats every PER samples, so a window of one period holds exactly one
-    // copy of each phase. A wider window can pick a copy one period away from the frame.
-    for t in d_c.saturating_sub(PER / 2)..d_c + PER / 2 {
-        if t + SYM > y.len() {
-            break;
-        }
-        let mut acc = C::ZERO;
-        let mut e = 0f64;
-        for (n, &tv) in tpl.iter().enumerate() {
-            let v = y[t + n];
-            acc = acc + v * tv;
-            e += v.norm2();
-        }
-        let r = acc.norm2() / (e * tpl_e).max(1e-30);
-        if r > best {
-            best = r;
-            start = t;
+    // 3+4. Mix the analytic signal down by the CFO, then fine timing. Carriers land on
+    //    their nominal bins. Mixing the real signal instead leaves a mirror image that
+    //    rotates at twice the CFO; it corrupts the time-domain fine timing (wrong start).
+    //    Fine timing is the magnitude of the correlation with symbol A over one PER window.
+    //    Symbol A repeats every PER samples, so a window of one period holds exactly one
+    //    copy of each phase. A wider window can pick a copy one period away from the frame.
+    let (mut y, mut start, mut best) = mix_and_time(p, &z, cfo, d_c);
+    // 4b. Joint time-frequency search. The lag-PER estimate wraps beyond +-31.25 Hz, so an
+    //    offset outside that range gives a poor preamble correlation. Then the aliases
+    //    cfo + k * FS / PER are tried (each with its own fine timing) and the best
+    //    (start, frequency) pair is kept. Frames that already correlate well are untouched.
+    if best < ALIAS_CORR {
+        let alias = FS / PER as f64;
+        for k in [-3i32, -2, -1, 1, 2, 3] {
+            let c = cfo + k as f64 * alias;
+            if c.abs() > MAX_CFO {
+                continue;
+            }
+            let (y2, s2, r2) = mix_and_time(p, &z, c, d_c);
+            if r2 > best {
+                best = r2;
+                y = y2;
+                start = s2;
+            }
         }
     }
 
@@ -984,6 +1071,49 @@ mod tests {
             let errors = frame_errors(100, 1.0, 777, |x| cfo(&padded(x), hz));
             eprintln!("CFO {hz} Hz, 1 dB SNR: {errors}/100 frame errors");
             assert!(errors <= 1, "{errors}/100 frames in error at CFO {hz} Hz");
+        }
+    }
+
+    /// 25 Hz offset with a start delay and noise, all modulations: recovered without errors.
+    #[test]
+    fn phy_cfo_25hz_delay_noise_all_modulations() {
+        let mut rng = Rng(25);
+        for m in ALL {
+            for hz in [25.0, -25.0] {
+                let bits = rng.bits(1500);
+                let tx = modulate_frame(&bits, m);
+                let mut rx = vec![0f32; 311];
+                rx.extend(cfo(&tx, hz));
+                rx.extend(vec![0f32; 100]);
+                let power = tx.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / tx.len() as f64;
+                let sigma = (power / 10f64.powf(3.2)).sqrt(); // 32 dB
+                for v in rx.iter_mut() {
+                    *v += (sigma * rng.gauss()) as f32;
+                }
+                let llr = demodulate_frame(&rx, m, bits.len()).expect("preamble not found");
+                assert_eq!(hard(&llr), bits, "{m:?} at {hz} Hz");
+            }
+        }
+    }
+
+    /// Offsets beyond the +-31.25 Hz lag-estimate range: found by the alias search.
+    #[test]
+    fn phy_cfo_beyond_alias_range_qpsk() {
+        let mut rng = Rng(45);
+        for hz in [45.0, -45.0, 60.0, -60.0] {
+            let bits = rng.bits(2000);
+            let tx = modulate_frame(&bits, Modulation::Qpsk);
+            let mut rx = vec![0f32; 150];
+            rx.extend(cfo(&tx, hz));
+            rx.extend(vec![0f32; 100]);
+            let power = tx.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / tx.len() as f64;
+            let sigma = (power / 100.0).sqrt(); // 20 dB
+            for v in rx.iter_mut() {
+                *v += (sigma * rng.gauss()) as f32;
+            }
+            let llr = demodulate_frame(&rx, Modulation::Qpsk, bits.len()).expect("preamble not found");
+            let errs = hard(&llr).iter().zip(&bits).filter(|(a, b)| a != b).count();
+            assert_eq!(errs, 0, "{hz} Hz: {errs} bit errors");
         }
     }
 }

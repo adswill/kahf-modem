@@ -294,6 +294,20 @@ pub fn run_point(snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
 ///
 /// Returns (frame errors, frames).
 pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
+    run_point_mod(BLER_MOD, profile, snr_db, frames, seed)
+}
+
+/// As `run_point_profile`, for any modulation (the frame carries that modulation's id).
+pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
+    let id = match m {
+        phy::Modulation::Qpsk => 0,
+        phy::Modulation::Qam16 => 1,
+        phy::Modulation::Qam64 => 2,
+        phy::Modulation::Kami32 => kahf_core::kami::ID,
+        phy::Modulation::Kami16 => kahf_core::kami::ID16,
+        phy::Modulation::Kami8 => kahf_core::kami::ID8,
+        phy::Modulation::Kami8H => kahf_core::kami::ID8H,
+    };
     const PAYLOAD_BYTES: usize = 36;
     let errors = (0..frames)
         .into_par_iter()
@@ -301,11 +315,11 @@ pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64
             let trial_seed = seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
             let mut rng = Rng::new(trial_seed);
             let payload: Vec<u8> = (0..PAYLOAD_BYTES).map(|_| (rng.next_u64() >> 56) as u8).collect();
-            let info = kahf_core::frame::build_payload(&payload);
+            let info = kahf_core::frame::build_payload_as(&payload, id);
             let coded = kahf_core::ldpc::encode(&info);
-            let tx = kahf_core::phy::modulate_frame(&coded, BLER_MOD);
+            let tx = kahf_core::phy::modulate_frame(&coded, m);
             let rx = apply(&tx, profile, snr_db, trial_seed);
-            let decoded = kahf_core::phy::demodulate_frame(&rx, BLER_MOD, kahf_core::ldpc::N)
+            let decoded = kahf_core::phy::demodulate_frame(&rx, m, kahf_core::ldpc::N)
                 .and_then(|llr| kahf_core::ldpc::decode(&llr, BLER_MAX_ITER))
                 .and_then(|bits| kahf_core::frame::parse_payload(&bits));
             decoded.as_deref() != Some(payload.as_slice())

@@ -41,15 +41,16 @@ const HOME_CSP =
 
 /**
  * The live map's policy: its one hashed inline script; MapLibre from unpkg (pinned,
- * with integrity hashes on the tags); and OpenStreetMap raster tiles. Nothing else.
+ * with integrity hashes on the tags); and map tiles from this server's own /tiles proxy.
+ * Nothing else.
  */
 function mapCsp(scriptSource) {
   return [
     "default-src 'none'",
     `script-src ${scriptSource} https://unpkg.com`,
     "style-src 'unsafe-inline' https://unpkg.com",
-    "img-src 'self' data: blob: https://tile.openstreetmap.org",
-    "connect-src 'self' https://tile.openstreetmap.org",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
     "worker-src blob:",
     "base-uri 'none'",
     "form-action 'none'",
@@ -362,6 +363,49 @@ async function postSchedule({ request, store, nowMs }) {
   });
 }
 
+const TILE_PATH = /^\/tiles\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/;
+const TILE_UPSTREAM = "https://tile.openstreetmap.org";
+/** OpenStreetMap's tile policy asks for a User-Agent that names the app. */
+const TILE_USER_AGENT = "KAHF-live-map/0.1 (+https://kahf.dev)";
+const TILE_CACHE_SECONDS = 7 * 24 * 3600;
+const TILE_MAX_BYTES = 200_000;
+
+/**
+ * GET /tiles/{z}/{x}/{y}.png: an OpenStreetMap tile fetched by this server, so browsers never
+ * call tile.openstreetmap.org directly (it refuses that with 403). Answers are cached for a week.
+ * @param {{ request: Request, options: { fetchImpl?: Function, tileCache?: { match: Function, put: Function } } }} ctx
+ * @param {RegExpMatchArray} m
+ */
+async function getTile({ request, options }, m) {
+  const [z, x, y] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (z > 19 || x >= 2 ** z || y >= 2 ** z) return json({ error: "not found" }, 404);
+  const key = new Request(`${TILE_UPSTREAM}/${z}/${x}/${y}.png`);
+  const cache = options.tileCache ?? (typeof caches !== "undefined" ? caches.default : undefined);
+  const hit = cache ? await cache.match(key) : undefined;
+  if (hit) return request.method === "HEAD" ? new Response(null, hit) : hit;
+  const doFetch = options.fetchImpl ?? fetch;
+  let up;
+  try {
+    up = await doFetch(key.url, { headers: { "user-agent": TILE_USER_AGENT, accept: "image/png" } });
+  } catch {
+    return json({ error: "tile unavailable" }, 502);
+  }
+  const type = up.headers.get("content-type") ?? "";
+  if (!up.ok || !type.startsWith("image/png")) return json({ error: "tile unavailable" }, 502);
+  const body = await up.arrayBuffer();
+  if (body.byteLength > TILE_MAX_BYTES) return json({ error: "tile unavailable" }, 502);
+  const res = new Response(request.method === "HEAD" ? null : body, {
+    status: 200,
+    headers: {
+      "content-type": "image/png",
+      "cache-control": `public, max-age=${TILE_CACHE_SECONDS}`,
+      "x-content-type-options": "nosniff",
+    },
+  });
+  if (cache) await cache.put(key, new Response(body, res));
+  return res;
+}
+
 /** Path to method to handler. A path or method missing here gets 404 or 405. */
 const ROUTES = {
   "/": { GET: getHome, HEAD: getHome },
@@ -389,6 +433,13 @@ const ROUTES = {
 export async function handleRequest(request, store, nowMs = Date.now(), options = {}) {
   try {
     const url = new URL(request.url);
+    const tile = TILE_PATH.exec(url.pathname);
+    if (tile) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return json({ error: "method not allowed" }, 405, { allow: "GET, HEAD" });
+      }
+      return await getTile({ request, options }, tile);
+    }
     if (!Object.hasOwn(ROUTES, url.pathname)) return json({ error: "not found" }, 404);
     const methods = ROUTES[url.pathname];
     if (!Object.hasOwn(methods, request.method)) {

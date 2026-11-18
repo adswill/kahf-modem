@@ -236,7 +236,7 @@ fn llr_input(rng: &mut XorShift, specials: bool) -> Vec<f32> {
 }
 
 fn check_ldpc(it: usize, llr: &[f32], label: &str, failures: &mut Vec<String>) {
-    let max_iter = (it % 21) as usize;
+    let max_iter = it % 21;
     let shape = format!("{label} iter {it}, max_iter {max_iter}");
     match guarded(|| ldpc::decode(llr, max_iter)) {
         Err(p) => failures.push(format!("{shape}: panic: {p}")),
