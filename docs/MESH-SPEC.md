@@ -705,6 +705,8 @@ of a narrow lane. Soft combining (10.1), HARQ and bonding are the main ways to w
 
 ## 12. Decisions for the owner (each blocks something)
 
+**Answered 2026-11-18:** D1 = (a) autonomous 24/7, status screen and stop button only, no daily confirmation (the owner says it is allowed where they live; other countries still need their own check). D2 = 17 m only for the first release. D4 = widen to 800 Hz (10 lanes) if the leakage test needs it, and report the measured numbers. D3, D5 to D7 still open.
+
 - **D1. Unattended relays and the law.** The IARU Region 1 plan asks societies to limit unmanned HF
   stations and recommends they be activated under operator control. Choose: (a) fully autonomous, 24/7,
   with the supervision status screen only; (b) autonomous plus a **daily operator confirmation** (5.9);
