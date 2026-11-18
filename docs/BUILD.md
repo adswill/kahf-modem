@@ -26,17 +26,17 @@ Nothing has been run on a real Intel Mac, Linux, or Windows machine. Hardware
 
 ## Native libraries
 
-`crates/kahf-sdr/build.rs` links two C libraries on every platform, even when
-no radio is attached:
+`kahf-sdr` loads two C libraries at run time (`src/dl.rs`, using libloading).
+`build.rs` is empty and nothing is linked at build time:
 
 - `hackrf` (libhackrf)
 - `rtlsdr` (librtlsdr)
 
-Because of this, `cargo build -p kahf-cli` needs both libraries installed. The
-build script looks for them in `/opt/homebrew/lib`, `/usr/local/lib` and
-`/usr/lib`. On Windows those paths do not exist, so the link step will fail
-until the build script learns about Windows library locations. This is a known
-gap. `cargo check` does not link, so it does not need the libraries.
+Because of this, `cargo build -p kahf-cli` does not need either library. They
+are looked up only when a radio is first used, by library name and in
+`/opt/homebrew/lib` and `/usr/local/lib` (`dl.rs` also names the Linux `.so`
+and Windows `.dll` files). Without them the radio adapter reports an error at
+run time; the rest of KAHF works.
 
 Other native parts:
 
@@ -45,7 +45,7 @@ Other native parts:
   Windows.
 - `zstd-sys` (compression). It builds a bundled C library, so a C compiler is
   needed for the target platform.
-- The GUI crates (`kahf-gui`, `kahf-ui`, built on iced) pull in windowing and
+- The GUI crates (`kahf-gui` is built on eframe and egui, `kahf-ui` on iced) pull in windowing and
   graphics crates. On Linux they may need Wayland or X11 development packages.
   This is expected from the crate set, not confirmed by a Linux build.
 
@@ -71,8 +71,8 @@ scripts/build-check.sh                 # check + kahf-cli build, with a summary
 
 Notes:
 
-- Intel Macs use Homebrew under `/usr/local`. The build script searches both
-  `/opt/homebrew/lib` and `/usr/local/lib`, so the link path should be found.
+- Intel Macs use Homebrew under `/usr/local`. The runtime loader searches both
+  `/opt/homebrew/lib` and `/usr/local/lib`, so the libraries should be found.
   This is not tested on an Intel Mac.
 - The minimum macOS version is 14. This Mac runs 27.2. Nothing has been run on
   macOS 14.
@@ -85,12 +85,14 @@ Notes:
 Packages, Debian or Ubuntu (package names may differ on other distributions):
 
 ```bash
-sudo apt install build-essential pkg-config libasound2-dev libusb-1.0-0-dev \
-    libhackrf-dev librtlsdr-dev
+sudo apt install build-essential pkg-config libasound2-dev libusb-1.0-0-dev
 ```
 
 The GUI crates may also need the windowing development packages, for example
 `libxkbcommon-dev`, `libwayland-dev`, `libx11-dev`. These are not confirmed.
+
+To use the radios, also install `libhackrf0` and `librtlsdr0` (loaded at run time,
+not needed to build).
 
 Build:
 
@@ -119,8 +121,8 @@ Packages:
 - Targets, if you build for ARM64 as well:
   `rustup target add aarch64-pc-windows-msvc` and
   `rustup target add x86_64-pc-windows-msvc`.
-- hackrf and rtlsdr libraries for Windows. There is no build-script support for
-  them yet, so the link step will not find them without changes. Not done.
+- hackrf and rtlsdr libraries for Windows, only to use those radios. They are
+  loaded at run time (`hackrf.dll`, `rtlsdr.dll`), not linked. Not tested.
 
 Build (PowerShell, from the repo folder):
 

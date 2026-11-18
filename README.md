@@ -1,6 +1,6 @@
 # KAHF Modem
 
-KAHF (pronounced "kaf", rhymes with "calf") is an HF data modem written in Rust. It runs on macOS, Linux and Windows and is built for amateur radio data links: station connections, messages, mail and file transfer.
+KAHF (pronounced "kaf", rhymes with "calf") is an HF data modem written in Rust. It has so far been built and run only on macOS (Linux and Windows are not yet tested) and is built for amateur radio data links: station connections, messages, mail and file transfer.
 
 ## Status
 
@@ -11,7 +11,7 @@ Early development. KAHF is not yet on air. The modem, frame, link and session la
 - The modem over audio: encode a message to a WAV file and decode it back, including through the channel simulator.
 - Messages, mail and file transfer over the link and session layers.
 - A contact logbook with CSV storage and ADIF 3 export.
-- Server stress tests for the station server.
+- Unit and simulation tests for the station server.
 
 ## Build and test
 
@@ -22,7 +22,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The `kahf-sdr` crate links the HackRF and RTL-SDR libraries. On macOS, install them with Homebrew:
+The `kahf-sdr` crate loads the HackRF and RTL-SDR libraries at run time; they are not needed to build. To use those radios on macOS, install them with Homebrew:
 
 ```bash
 brew install hackrf librtlsdr
@@ -48,7 +48,7 @@ cargo run -p kahf-cli -- rx message.wav -o decoded.bin
 | `kahf-daemon` | Engine that connects the modem to audio, SDR and rig; the API used by the interfaces |
 | `kahf-cli` | Command-line tool: `tx`, `rx`, `sim-tx`, `bler`, `e2e` |
 | `kahf-gui` | Desktop interface |
-| `kahf-ui` | Alternative desktop interface |
+| `kahf-ui` | Alternative desktop interface (shows sample data; not for real use) |
 
 ## Licence
 
