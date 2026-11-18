@@ -237,7 +237,7 @@ test("a click on a map node opens a card with its details, built from DOM calls"
   assert.match(MAP_SCRIPT, /new window\.maplibregl\.Popup\(/);
   assert.match(MAP_SCRIPT, /setDOMContent\(wrap\)/);
   assert.match(MAP_SCRIPT, /function nodeCard\(p\)/);
-  assert.match(MAP_SCRIPT, /Heard by "/);
+  assert.match(MAP_SCRIPT, /Known only because "/);
   assert.match(MAP_SCRIPT, /Reported hearing "/);
   assert.match(MAP_SCRIPT, /Passes messages between stations/);
   // Nodes at the same point are listed together, and the chosen one is marked.

@@ -142,8 +142,8 @@ const LIVE = String.raw`
           ["Reported hearing " + s.heard_call + ".", freqText(s)]);
       }
       var hkey = "h:" + s.heard_call + ":" + i;
-      addNode(nodes, hkey, s.heard_call, "heard", s.heard_location, s.heard_at, "Heard",
-        ["Heard by " + s.reporter_call + ".", freqText(s)]);
+      addNode(nodes, hkey, s.heard_call, "heard", s.heard_location, s.heard_at, "Heard only",
+        ["Known only because " + s.reporter_call + " heard it.", freqText(s)]);
     });
     nodes.forEach(function (f) {
       if (f.properties.area) {
