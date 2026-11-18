@@ -395,6 +395,14 @@ pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64
 
 /// As `run_point_profile`, for any modulation (the frame carries that modulation's id).
 pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
+    run_point_with(m, frames, seed, |tx, trial_seed| apply(tx, profile, snr_db, trial_seed))
+}
+
+/// The most general sweep: `channel` turns each transmitted frame into what the receiver gets.
+pub fn run_point_with<F>(m: phy::Modulation, frames: usize, seed: u64, channel: F) -> (usize, usize)
+where
+    F: Fn(&[f32], u64) -> Vec<f32> + Sync,
+{
     let id = match m {
         phy::Modulation::Qpsk => 0,
         phy::Modulation::Qam16 => 1,
@@ -423,7 +431,7 @@ pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: 
             let info = kahf_core::frame::build_payload_as(&payload, id);
             let coded = kahf_core::ldpc::encode(&info);
             let tx = kahf_core::phy::modulate_frame(&coded, m);
-            let rx = apply(&tx, profile, snr_db, trial_seed);
+            let rx = channel(&tx, trial_seed);
             let decoded = kahf_core::phy::demodulate_frame(&rx, m, kahf_core::ldpc::N)
                 .and_then(|llr| kahf_core::ldpc::decode(&llr, BLER_MAX_ITER))
                 .and_then(|bits| kahf_core::frame::parse_payload(&bits));
@@ -433,9 +441,25 @@ pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: 
     (errors, frames)
 }
 
+/// The Watterson channel with explicit parameters, then AWGN: for probing which impairment a
+/// receiver cannot take. `delay_s` 0 makes the second path add in phase (a flat fade).
+pub fn hf_channel(samples: &[f32], delay_s: f64, spread_hz: f64, snr_db: f32, seed: u64) -> Vec<f32> {
+    awgn(&watterson(samples, delay_s, spread_hz, seed), snr_db, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two equal-strength Rayleigh paths 1 ms apart (a normal HF echo) must not break KAMI-32 at a
+    /// good SNR. Before the receiver had an equalizer this lost more than 70 percent of the frames.
+    #[test]
+    fn kami_32_survives_an_hf_echo() {
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 5, |tx, s| hf_channel(tx, 0.001, 0.05, 30.0, s));
+        assert!(err * 10 <= n, "{err} of {n} frames lost through a 1 ms echo");
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 6, |tx, s| hf_channel(tx, 0.002, 0.05, 30.0, s));
+        assert!(err * 10 <= n, "{err} of {n} frames lost through a 2 ms echo");
+    }
 
     #[test]
     fn the_hf_channel_keeps_mean_power_and_fades() {

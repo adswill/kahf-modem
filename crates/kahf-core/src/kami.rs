@@ -634,6 +634,167 @@ fn demod_shapes(z: &[C], start: usize, hz: f64, tau: f64, n_bits: usize, sizes: 
     out
 }
 
+/// Echoes that arrive before the main path, in chips.
+const EQ_PRE: isize = 3;
+/// Echoes that arrive after it, in chips (8 chips are 4 ms).
+const EQ_POST: isize = 8;
+/// Equalizer reach either side of the centre, in chips.
+const EQ_HALF: isize = 8;
+
+/// Undo the echoes of a multipath channel (HF has them: 0.5 to 2 ms is ordinary, and one chip is
+/// 0.5 ms) before the Walsh correlation, which needs the chips of a slot to arrive unmixed.
+///
+/// The preamble is a known +-1 sequence with a flat autocorrelation, so correlating the received
+/// preamble with it at each delay gives the channel's impulse response, one complex tap per chip
+/// delay. From that a short linear MMSE equalizer is solved and run over the whole frame.
+/// Taps that cannot be told from the estimate's own noise are dropped; with only the main path
+/// left (any channel without echoes) the chips are returned untouched, so a plain noise channel
+/// behaves exactly as before.
+fn equalise(r: &mut [C], pn: &[f64]) {
+    let p = pn.len();
+    if r.len() < p + 32 || p < 64 {
+        return;
+    }
+    let at = |k: isize| -> Option<C> { (k >= 0 && (k as usize) < r.len()).then(|| r[k as usize]) };
+    // Channel taps h[d], d in -EQ_PRE..=EQ_POST: r[k] = sum_d h[d] p[k-d] + noise.
+    let n_taps = (EQ_PRE + EQ_POST + 1) as usize;
+    let mut h = vec![(0.0f64, 0.0f64); n_taps];
+    let span = (p as isize) - EQ_POST.max(EQ_PRE) - 1;
+    for (i, d) in (-EQ_PRE..=EQ_POST).enumerate() {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        let mut cnt = 0.0f64;
+        for k in EQ_PRE.max(0)..span {
+            if let Some(v) = at(k + d) {
+                re += v.0 * pn[k as usize];
+                im += v.1 * pn[k as usize];
+                cnt += 1.0;
+            }
+        }
+        h[i] = (re / cnt.max(1.0), im / cnt.max(1.0));
+    }
+    // Noise in the estimate: what the preamble leaves after the main taps are removed.
+    let (mut peak_i, mut peak_m) = (0usize, 0.0f64);
+    for (i, t) in h.iter().enumerate() {
+        let m = t.0 * t.0 + t.1 * t.1;
+        if m > peak_m {
+            peak_m = m;
+            peak_i = i;
+        }
+    }
+    if peak_m <= 0.0 {
+        return;
+    }
+    let mut resid = 0.0f64;
+    let mut cnt = 0.0f64;
+    for k in (EQ_POST.max(EQ_PRE))..span {
+        let mut e = r[k as usize];
+        for (i, d) in (-EQ_PRE..=EQ_POST).enumerate() {
+            let kk = k - d;
+            if kk >= 0 && (kk as usize) < p {
+                e.0 -= h[i].0 * pn[kk as usize];
+                e.1 -= h[i].1 * pn[kk as usize];
+            }
+        }
+        resid += e.0 * e.0 + e.1 * e.1;
+        cnt += 1.0;
+    }
+    let sigma2 = if cnt > 0.0 { resid / cnt } else { 0.0 };
+    // Each tap's own estimation noise is about sigma2 / p; keep taps well above it.
+    let floor = 9.0 * sigma2 / p as f64;
+    let mut kept = 0;
+    for (i, t) in h.iter_mut().enumerate() {
+        // The preamble is a cut of an m-sequence, so even a clean channel leaves sidelobes of
+        // about 1 / p in power at the other delays: an echo must clearly exceed that.
+        if i != peak_i && t.0 * t.0 + t.1 * t.1 < floor.max(6.0 / p as f64 * peak_m) {
+            *t = (0.0, 0.0);
+        } else if i != peak_i {
+            kept += 1;
+        }
+    }
+    if kept == 0 {
+        return;
+    }
+    // Linear MMSE equalizer w[m], m in -EQ_HALF..=EQ_HALF, so that sum_m w[m] h[j-m] ~ delta[j].
+    let nw = (2 * EQ_HALF + 1) as usize;
+    let lo = -EQ_PRE - EQ_HALF;
+    let hi = EQ_POST + EQ_HALF;
+    let nj = (hi - lo + 1) as usize;
+    let hval = |d: isize| -> C {
+        if d >= -EQ_PRE && d <= EQ_POST {
+            h[(d + EQ_PRE) as usize]
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    // Normal equations A w = b with A = H^H H + lambda I, b = H^H e0.
+    let lambda = sigma2.max(1e-9);
+    let mut a = vec![vec![(0.0f64, 0.0f64); nw + 1]; nw];
+    for m1 in 0..nw {
+        for m2 in 0..nw {
+            let (mut re, mut im) = (0.0, 0.0);
+            for j in 0..nj {
+                let jj = lo + j as isize;
+                let x = hval(jj - (m1 as isize - EQ_HALF));
+                let y = hval(jj - (m2 as isize - EQ_HALF));
+                // conj(x) * y
+                re += x.0 * y.0 + x.1 * y.1;
+                im += x.0 * y.1 - x.1 * y.0;
+            }
+            if m1 == m2 {
+                re += lambda;
+            }
+            a[m1][m2] = (re, im);
+        }
+        let x = hval(-(m1 as isize - EQ_HALF));
+        a[m1][nw] = (x.0, -x.1);
+    }
+    // Gaussian elimination with partial pivoting.
+    for col in 0..nw {
+        let mut piv = col;
+        for row in col + 1..nw {
+            if a[row][col].0.hypot(a[row][col].1) > a[piv][col].0.hypot(a[piv][col].1) {
+                piv = row;
+            }
+        }
+        a.swap(col, piv);
+        let d = a[col][col];
+        let dn = d.0 * d.0 + d.1 * d.1;
+        if dn < 1e-18 {
+            return;
+        }
+        for row in 0..nw {
+            if row != col {
+                let f = cmul(a[row][col], (d.0 / dn, -d.1 / dn));
+                for c in col..=nw {
+                    let t = cmul(f, a[col][c]);
+                    a[row][c] = (a[row][c].0 - t.0, a[row][c].1 - t.1);
+                }
+            }
+        }
+    }
+    let w: Vec<C> = (0..nw)
+        .map(|i| {
+            let d = a[i][i];
+            let dn = d.0 * d.0 + d.1 * d.1;
+            cmul(a[i][nw], (d.0 / dn, -d.1 / dn))
+        })
+        .collect();
+    let src = r.to_vec();
+    for (k, out) in r.iter_mut().enumerate() {
+        let (mut re, mut im) = (0.0, 0.0);
+        for (i, wi) in w.iter().enumerate() {
+            let m = i as isize - EQ_HALF;
+            let idx = k as isize - m;
+            if idx >= 0 && (idx as usize) < src.len() {
+                let v = cmul(*wi, src[idx as usize]);
+                re += v.0;
+                im += v.1;
+            }
+        }
+        *out = (re, im);
+    }
+}
+
 /// Demodulate the frame that starts at `zs[0]` (baseband), given the coarse frequency `coarse`.
 /// Soft decisions and the SNR estimate of one demodulated frame or burst.
 fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option<(Vec<f32>, f64)> {
@@ -684,6 +845,7 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
         let th = -2.0 * PI * fbest.1 * k as f64 / CHIP_RATE;
         *v = cmul(*v, (th.cos(), th.sin()));
     }
+    equalise(&mut r, pn);
     let sc = sh.slot_chips();
     let pre = sh.pre_chips();
     let block = |slot: usize| &r[pre + slot * sc..pre + (slot + 1) * sc];
