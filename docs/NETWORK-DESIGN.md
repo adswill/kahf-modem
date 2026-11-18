@@ -12,6 +12,7 @@ and speed collapsing. Those were symptoms. This is the whole list.
   section H. Where this file describes forwarding between relays over the air (L2: suppression,
   hop limit), read it as the fallback, not the main path.
 
+- **Three channels per area (owner, latest): a meeting channel C0 and two data channels D1, D2.** See NETWORK-CHANNELS.md. Where this file says "the channel", it means the channel a station is on; the rules apply on each.
 - One shared channel, about 2.4 kHz wide. Everyone in range hears everyone, **except** stations
   that cannot hear each other but both reach the same relay (the hidden station problem).
 - A radio is half-duplex: while it sends, it is deaf. A station that is sending cannot know
