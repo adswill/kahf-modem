@@ -35,6 +35,10 @@ poor 2 ms and 1 Hz). SNR in dB for 10 percent frame loss (">30" means never reac
    burst, so the single channel estimate from the preamble goes stale. KAMI-256/64/32 never reach 10 percent
    loss on any HF channel; KAMI-16 to KAMI-1a do on "good" and "moderate". The link now never falls below
    KAMI-16 while the signal is not weak (-3 dB or better).
+   Frame loss at fixed SNR (`hf_floor` example), so the shape is visible: on "good", KAMI-32 sits at a
+   12 to 15 percent floor at any SNR (deep fades: ARQ repeats these) while KAMI-256 loses 82 to 85 percent
+   (a wall); on "moderate", KAMI-32 and KAMI-16 lose 51 to 76 percent at any SNR. A loss that does not
+   fall as SNR rises is the channel changing inside the frame, not noise.
 3. **Not solved:** the poor channel (1 Hz Doppler) for everything, and the slow modes everywhere. The fix is
    tracking the channel through a burst: short known training blocks inside the burst, or decision-directed
    re-estimation. That changes the frame format and is the next PHY task. Until it is done, quote HF
