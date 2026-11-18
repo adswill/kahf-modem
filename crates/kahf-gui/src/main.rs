@@ -280,7 +280,7 @@ fn frequency_text(sdr: Option<&str>) -> String {
     match spec.split_once('@').map(|(_, f)| f.trim().parse::<u64>()) {
         Some(Ok(hz)) => format!("{:.3} MHz (from the SDR setting)", hz as f64 / 1e6),
         Some(Err(_)) => "Frequency in the SDR setting is not a number".to_string(),
-        None => "14.100 MHz (SDR default)".to_string(),
+        None => "18.113 MHz (SDR default)".to_string(),
     }
 }
 

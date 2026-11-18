@@ -1,3 +1,5 @@
+> **Background only (2026-11-18).** KAHF now works on 17 m only; where this file mentions 20 m, 40 m or 80 m, channel pools or one 24 h relay slot, `docs/MESH-SPEC.md` replaces it.
+
 # KAHF on a busy channel: what can go wrong, and the design that answers it
 
 Status: proposal for the owner. Nothing here is built yet except where it says "exists".

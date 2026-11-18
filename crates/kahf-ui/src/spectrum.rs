@@ -20,7 +20,7 @@ pub const DB_MAX: f32 = -45.0;
 const WF_DB_MIN: f32 = -111.0;
 const WF_DB_MAX: f32 = -62.0;
 pub const SPAN_HZ: f64 = 12_000.0;
-static CENTRE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7_042_500);
+static CENTRE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(18_115_500);
 
 /// Centre of the shown span in Hz. Follows the chosen band.
 pub const FRAMES_PER_SECOND: u64 = 25;
@@ -40,18 +40,16 @@ pub fn set_centre_hz(hz: f64) {
     CENTRE.store(hz as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The two bands of the selector, each centred on its KAHF segment.
+/// The band selector: 17 m only, centred on the KAHF segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
-    M20,
-    M40,
+    M17,
 }
 
 impl Band {
-    pub const ALL: [Band; 2] = [Band::M20, Band::M40];
+    pub const ALL: [Band; 1] = [Band::M17];
     fn segment(self) -> &'static kahf_core::bandplan::Segment {
-        let i = if self == Band::M40 { 0 } else { 1 };
-        &kahf_core::bandplan::KAHF_SEGMENTS[i]
+        &kahf_core::bandplan::KAHF_SEGMENTS[0]
     }
     pub fn centre_hz(self) -> f64 {
         let s = self.segment();
@@ -70,7 +68,7 @@ pub const PASS_HI_HZ: f64 = 2_690.0;
 pub const BANDWIDTH_HZ: f64 = PASS_HI_HZ - PASS_LO_HZ;
 /// Segment name (from the core band plan) of the tuned frequency, or None.
 pub fn segment_at(hz: f64) -> Option<&'static str> {
-    kahf_core::bandplan::allowed_segment(hz as u64, kahf_core::bandplan::KAHF_CHANNEL_WIDTH_HZ)
+    kahf_core::bandplan::allowed_segment(hz as u64, kahf_core::lanes::LANE_WIDTH_HZ)
 }
 
 /// Segment for the readout, or "No segment".

@@ -156,15 +156,15 @@ mod tests {
 
     fn six(relay: &str) -> Vec<RelayEntry> {
         (0..6)
-            .map(|i| entry(relay, 14_105 + i, 845 + i as u16, 30, i as u8))
+            .map(|i| entry(relay, 18_115 + i, 845 + i as u16, 30, i as u8))
             .collect()
     }
 
     #[test]
     fn round_trip() {
         let table = vec![
-            entry("BB1BBB", 14_105, 845, 30, 0),
-            entry("AB/9", 7_040, 0, 65_535, 2),
+            entry("BB1BBB", 18_115, 845, 30, 0),
+            entry("AB/9", 18_117, 0, 65_535, 2),
             entry("A2/BB1BBB1", 144_300, 1439, 1, 255),
         ];
         let bytes = encode(&table);
@@ -184,7 +184,7 @@ mod tests {
     fn seven_entries_are_refused_and_split() {
         let seven: Vec<RelayEntry> = six("BB1BBB")
             .into_iter()
-            .chain(std::iter::once(entry("BB1BBB", 14_200, 900, 20, 1)))
+            .chain(std::iter::once(entry("BB1BBB", 18_118, 900, 20, 1)))
             .collect();
         assert!(encode(&seven).is_empty());
         assert!(decode(&[]).is_none());
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_messages() {
-        let good = encode(&[entry("BB1BBB", 14_105, 845, 30, 0)]);
+        let good = encode(&[entry("BB1BBB", 18_115, 845, 30, 0)]);
         assert!(decode(&good[..good.len() - 1]).is_none(), "truncated");
         let mut trailing = good.clone();
         trailing.push(0);
@@ -216,9 +216,9 @@ mod tests {
 
     #[test]
     fn encode_refuses_bad_entries() {
-        assert!(encode(&[entry("BAD CALL", 14_105, 0, 30, 0)]).is_empty());
+        assert!(encode(&[entry("BAD CALL", 18_115, 0, 30, 0)]).is_empty());
         assert!(encode(&[entry("BB1BBB", 0x100_0000, 0, 30, 0)]).is_empty());
-        assert!(encode(&[entry("BB1BBB", 14_105, 1440, 30, 0)]).is_empty());
+        assert!(encode(&[entry("BB1BBB", 18_115, 1440, 30, 0)]).is_empty());
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
             duration_s: 30,
         }];
         let start = 1_728_000_000 + 14 * 3600 + 5 * 60; // 14:05 UTC
-        let slots = plan(&reqs, &[(14_105, 0.0)], start, 0);
+        let slots = plan(&reqs, &[(18_115, 0.0)], start, 0);
         let input: Vec<(String, u32, u64, u64, u8)> = slots
             .iter()
             .map(|s| {
@@ -245,10 +245,10 @@ mod tests {
             })
             .collect();
         let table = table_from_slots(&input);
-        assert_eq!(table, vec![entry("BB1BBB", 14_105, 845, 30, 0)]);
+        assert_eq!(table, vec![entry("BB1BBB", 18_115, 845, 30, 0)]);
         assert_eq!(
             describe(&table[0]),
-            "Relay BB1BBB: listen and wait for a slot at 14.105 MHz at 14:05 UTC for 30 seconds. \
+            "Relay BB1BBB: listen and wait for a slot at 18.115 MHz at 14:05 UTC for 30 seconds. \
              This is an instruction for you to read and confirm; nothing is keyed until you confirm it."
         );
     }
@@ -256,16 +256,16 @@ mod tests {
     #[test]
     fn table_from_slots_drops_oversized_duration() {
         let input = [
-            ("BB1BBB".to_string(), 14_105, 0, 70_000, 0),
-            ("BB1BBB".to_string(), 14_105, 60, 30, 1),
+            ("BB1BBB".to_string(), 18_115, 0, 70_000, 0),
+            ("BB1BBB".to_string(), 18_115, 60, 30, 1),
         ];
-        assert_eq!(table_from_slots(&input), vec![entry("BB1BBB", 14_105, 1, 30, 1)]);
+        assert_eq!(table_from_slots(&input), vec![entry("BB1BBB", 18_115, 1, 30, 1)]);
     }
 
     #[test]
     fn describe_asks_for_confirmation() {
-        let line = describe(&entry("BB1BBB", 14_105, 845, 30, 0));
+        let line = describe(&entry("BB1BBB", 18_115, 845, 30, 0));
         assert!(line.contains("confirm"), "{line}");
-        assert!(line.starts_with("Relay BB1BBB: listen and wait for a slot at 14.105 MHz at 14:05 UTC"));
+        assert!(line.starts_with("Relay BB1BBB: listen and wait for a slot at 18.115 MHz at 14:05 UTC"));
     }
 }

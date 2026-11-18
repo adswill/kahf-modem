@@ -5,8 +5,6 @@
 //! by channel index: lower third Online, middle third Open, top third Emergency.
 //! This split is a default; the server may change the plan.
 
-use crate::bandplan;
-
 /// Channel spacing in Hz of the plain grids used by `Plan::grid` (tests, other plans). The
 /// default plan is not a grid: it is the 12 narrow 17 m lanes of `lanes.rs` (18.111 to
 /// 18.120 MHz, IARU Region 1), 700 Hz apart. Everything else is left out on purpose.

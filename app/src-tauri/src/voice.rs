@@ -256,7 +256,7 @@ mod tests {
         // Across the air a file arrives byte for byte; the receiver decodes the same bytes.
         let heard = decode(&sent).unwrap();
         assert_eq!(heard.len(), 16000);
-        assert_eq!(Voice::clip_path(&dir.join(".."), "x").is_err(), true);
+        assert!(Voice::clip_path(&dir.join(".."), "x").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

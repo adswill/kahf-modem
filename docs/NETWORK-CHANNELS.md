@@ -1,3 +1,5 @@
+> **Background only (2026-11-18).** KAHF now works on 17 m only; where this file mentions 20 m, 40 m or 80 m, channel pools or one 24 h relay slot, `docs/MESH-SPEC.md` replaces it.
+
 # KAHF with three channels
 
 Owner decision: one channel will clog (mail is long, a busy network is busy), so each area uses

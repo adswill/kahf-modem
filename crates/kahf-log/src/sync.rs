@@ -235,11 +235,11 @@ mod tests {
 
     fn six() -> Vec<Qso> {
         vec![
-            entry("AB1C", "120000", "20M", Some(14.074)),
-            entry("AB2D", "120500", "20M", None),
-            entry("AB3E", "121000", "40M", Some(7.030)),
-            entry("AB4F", "121500", "20M", None),
-            entry("AB5G", "122000", "80M", Some(3.560)),
+            entry("AB1C", "120000", "17M", Some(18.1134)),
+            entry("AB2D", "120500", "17M", None),
+            entry("AB3E", "121000", "17M", Some(18.1134)),
+            entry("AB4F", "121500", "17M", None),
+            entry("AB5G", "122000", "17M", Some(18.1134)),
             entry("AB6H", "235959", "10M", Some(28.074)),
         ]
     }
@@ -279,7 +279,7 @@ mod tests {
     fn sync_batch_size_for_six_short_calls() {
         // Per record: call 5 + date 2 + time 3 + band 4 + mode 3 + freq flag 1 = 18.
         let short: Vec<Qso> = (0..6)
-            .map(|i| entry(&format!("AB{i}C"), "120000", "20M", None))
+            .map(|i| entry(&format!("AB{i}C"), "120000", "17M", None))
             .collect();
         let batch = make_batch(&short, 0);
         println!(

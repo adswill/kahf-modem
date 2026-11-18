@@ -819,14 +819,14 @@ mod shots {
             (Section::Operate, "relay-start"),
             (Section::Operate, "bandplan"),
             (Section::Operate, "bandplan-in"),
-            (Section::Operate, "20m"),
+            (Section::Operate, "17m"),
         ] {
             let mut app = App::init();
             app.section = sec;
             let _ = app.update(crate::app::Message::ShowSample(true));
             app.setup_open = name == "setup";
-            if name == "20m" {
-                let _ = app.update(crate::app::Message::BandChosen(crate::spectrum::Band::M20));
+            if name == "17m" {
+                let _ = app.update(crate::app::Message::BandChosen(crate::spectrum::Band::M17));
             }
             if name == "bandplan" {
                 app.tune = 0.93;

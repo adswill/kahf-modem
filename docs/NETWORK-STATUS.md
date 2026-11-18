@@ -82,3 +82,16 @@ Not built yet (designs are in NETWORK-DESIGN.md, NETWORK-SCENARIOS.md, NETWORK-C
 Measured on the test bench only. Nothing here has been on a real channel.
 
 Step 4 limits: ideal channel and ideal transmitter only (no radio non-linearity, no drift between neighbours, no fading). The needed SNR is on the whole 8 kHz audio, not per lane. The speeds in MESH-SPEC 2.4 are still estimates; no speed was measured. The lane mode is not yet in the engine or the mode ladder.
+
+## WP0 green baseline and 17 m sweep (2026-11-18, session E)
+
+| Item | State | Evidence |
+|---|---|---|
+| Workspace clippy (`-D warnings`, all targets) | clean | fixed an unused import in `select.rs` left by the 17 m change |
+| `cargo test --workspace` | all pass | core 347, daemon 77 (about 3.5 s), ui 15, log 47 and the rest |
+| `crates/kahf-ui` | fixed | band selector is 17 m only (`Band::M17`), segment check uses the 480 Hz lane width, sample data says 17 m |
+| Old band tables | removed | `bandplan::ALLOCATIONS` holds only 17 m (same rows in all three regions); the daemon logbook band table, kahf-gui, kahf-prop `HF_BANDS` and the kahf-log fixtures are 17 m only; SDR default frequency is 18.11344 MHz (lane C1 dial) |
+| App, Tauri, server | pass | `svelte-check` 0 errors, vitest 24, `app/src-tauri` clippy clean and 32 tests, server 1173 tests |
+| Docs | marked | NETWORK-CHANNELS, NETWORK-DESIGN and NETWORK-SCENARIOS carry a "background only" note. Old band names remain in history docs and in negative tests (they check that old bands are refused), by design |
+
+Not verified: the real Tauri window was not run in this package; nothing has been on a radio. Website text (`server/src/web/*`) and release notes are WP11.

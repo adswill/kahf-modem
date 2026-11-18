@@ -1,3 +1,5 @@
+> **Background only (2026-11-18).** KAHF now works on 17 m only; where this file mentions 20 m, 40 m or 80 m, channel pools or one 24 h relay slot, `docs/MESH-SPEC.md` replaces it.
+
 # KAHF network: scenarios, what happens, what we do
 
 Companion to NETWORK-DESIGN.md. That file lists the layers. This one walks through concrete

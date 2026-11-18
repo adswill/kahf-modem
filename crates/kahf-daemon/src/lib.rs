@@ -198,8 +198,8 @@ const SDR_RATE_HZ: u32 = 2_400_000;
 const SDR_OVERSAMPLE: usize = (SDR_RATE_HZ / RATE) as usize;
 /// Half-length of the interpolation filter, in audio samples.
 const SDR_HALF: usize = 8;
-/// Used when the sdr setting has no "@frequency" part: 14.100 MHz.
-const DEFAULT_SDR_FREQ_HZ: u64 = 14_100_000;
+/// Used when the sdr setting has no "@frequency" part: 18.11344 MHz, the dial for lane C1.
+const DEFAULT_SDR_FREQ_HZ: u64 = 18_113_440;
 const SDR_RX_LNA_DB: u32 = 16;
 const SDR_RX_VGA_DB: u32 = 20;
 const SDR_TX_VGA_DB: u32 = 20;
@@ -1637,22 +1637,8 @@ impl<'a> Fields<'a> {
     }
 }
 
-/// HF and VHF/UHF amateur bands in ADIF names, by frequency in MHz.
-const BANDS: &[(f64, f64, &str)] = &[
-    (1.8, 2.0, "160M"),
-    (3.5, 4.0, "80M"),
-    (5.3, 5.41, "60M"),
-    (7.0, 7.3, "40M"),
-    (10.1, 10.15, "30M"),
-    (14.0, 14.35, "20M"),
-    (18.068, 18.168, "17M"),
-    (21.0, 21.45, "15M"),
-    (24.89, 24.99, "12M"),
-    (28.0, 29.7, "10M"),
-    (50.0, 54.0, "6M"),
-    (144.0, 148.0, "2M"),
-    (430.0, 440.0, "70CM"),
-];
+/// The only band KAHF works in, in its ADIF name, by frequency in MHz.
+const BANDS: &[(f64, f64, &str)] = &[(18.068, 18.168, "17M")];
 
 /// Band name for a frequency in MHz, or empty when it is outside the amateur bands.
 fn band_name(mhz: f64) -> String {
@@ -3989,8 +3975,9 @@ mod tests {
 
     #[test]
     fn band_names_from_frequency() {
-        assert_eq!(band_name(14.1), "20M");
-        assert_eq!(band_name(7.074), "40M");
+        assert_eq!(band_name(18.1134), "17M");
+        assert_eq!(band_name(14.1), "");
+        assert_eq!(band_name(7.074), "");
         assert_eq!(band_name(10.0), "");
     }
 

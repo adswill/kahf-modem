@@ -238,9 +238,9 @@ mod tests {
             call: call.into(),
             date: "20261117".into(),
             time: "120000".into(),
-            band: "20M".into(),
+            band: "17M".into(),
             mode: "KAHF".into(),
-            freq_mhz: Some(14.1),
+            freq_mhz: Some(18.1134),
             rst_sent: "59".into(),
             rst_rcvd: "57".into(),
             name: "Jörg".into(),
@@ -276,7 +276,7 @@ mod tests {
         let adif = export_adif(&[sample("BB1BBB")]);
         // "Jörg" is 4 characters but 5 bytes.
         assert!(adif.contains("<NAME:5>Jörg "), "{adif}");
-        assert!(adif.contains("<CALL:6>BB1BBB <QSO_DATE:8>20261117 <TIME_ON:6>120000 <BAND:3>20M <MODE:4>KAHF <FREQ:9>14.100000 "));
+        assert!(adif.contains("<CALL:6>BB1BBB <QSO_DATE:8>20261117 <TIME_ON:6>120000 <BAND:3>17M <MODE:4>KAHF <FREQ:9>18.113400 "));
         assert!(adif.ends_with("<EOR>\n"));
     }
 
