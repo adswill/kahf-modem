@@ -168,3 +168,7 @@ The Radio screen shows a plain note from the sun's height at the person's own pl
 daylight (17 m usually works on 1000 to 4000 km paths), dawn or dusk, or night (usually closed, the outbox keeps the message and KAHF keeps
 listening). It is a rule of thumb from the sun, not a measurement or a forecast, and it needs a shared place. Tests: vitest (26). The model learner on the server is not used yet.
 Not done in WP10: the relay screen's referee status, lane occupancy bars from the sensing reports, first-run wizard changes, accessibility pass, and a check in the real Tauri window.
+
+### WP5 update: ten operators
+
+After the relay's downlink was limited to the first data slot, with the next slot left free for the answer (the answer of the station that receives it had collided with granted slots), `REF_OPS=10 cargo test -p kahf-daemon hidden_operators` **passes**: ten operators that cannot hear each other, one relay, every message delivered once, the last after 2038 virtual seconds (about 34 minutes; six operators took 314 s). That is simulation, with the spec's own slot plan, and it is slow: one lane gives two data slots per 12 s round and requests collide in two window slots. Capacity needs the planner's other lanes (WP6) or a bigger round. Still not done: relay crash and restart, two relays on different lanes.
