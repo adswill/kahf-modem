@@ -297,6 +297,8 @@ struct Flags {
     radio_dial_hz: AtomicU64,
     /// Occupancy reports waiting for the server link (kept in memory, newest last).
     occupancy: Mutex<VecDeque<OccupancyReport>>,
+    /// Referee counters since start: rounds run, requests heard, grants given.
+    ref_counts: [AtomicU64; 3],
 }
 
 /// The transmit gate's settings. The built-in table is **not verified** (`plan_verified` is
@@ -336,6 +338,7 @@ impl Flags {
             radio_known: AtomicBool::new(false),
             radio_dial_hz: AtomicU64::new(0),
             occupancy: Mutex::new(VecDeque::new()),
+            ref_counts: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 }
@@ -615,6 +618,12 @@ impl Engine {
     /// unverified. It has no effect on a real radio, which stays refused.
     pub fn set_test_table(&self, on: bool) {
         lock(&self.shared.flags.policy).test_table = on;
+    }
+
+    /// What the relay referee has done since start: (rounds, requests heard, grants given).
+    pub fn referee_counts(&self) -> (u64, u64, u64) {
+        let c = &self.shared.flags.ref_counts;
+        (c[0].load(Ordering::Relaxed), c[1].load(Ordering::Relaxed), c[2].load(Ordering::Relaxed))
     }
 
     /// The newest occupancy report, without taking it from the queue.

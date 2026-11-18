@@ -431,7 +431,14 @@ fn relay_status(state: State<Shared>) -> Res<Value> {
         .map(|d| d.as_secs().saturating_sub(86_400))
         .unwrap_or(0);
     let today = hops.iter().filter(|h| h.at_unix >= day_ago).count();
+    let (rounds, requests, grants) = match state.engine.lock().map_err(|e| e.to_string())?.as_ref() {
+        Some(e) => e.referee_counts(),
+        None => (0, 0, 0),
+    };
     Ok(json!({
+        "rounds": rounds,
+        "requests": requests,
+        "grants": grants,
         "running": running,
         "forwardedToday": today,
         "forwardedTotal": total,

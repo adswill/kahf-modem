@@ -140,6 +140,9 @@
           </div>
           <div class="stats">
             <div><div class="big mono">{app.relay.forwardedToday}</div><div class="label">Forwarded today</div></div>
+            <div><div class="big mono">{app.relay.rounds ?? 0}</div><div class="label">Rounds run</div></div>
+            <div><div class="big mono">{app.relay.requests ?? 0}</div><div class="label">Requests heard</div></div>
+            <div><div class="big mono">{app.relay.grants ?? 0}</div><div class="label">Grants given</div></div>
             <div><div class="big mono">{app.relay.forwardedTotal}</div><div class="label">Forwarded in total</div></div>
             <div>
               <div class="big mono">{app.relay.area ?? "-"}</div>

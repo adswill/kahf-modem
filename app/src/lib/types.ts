@@ -99,6 +99,10 @@ export interface RelayHop {
 
 export interface RelayStatus {
   running: boolean;
+  /** Referee rounds run, requests heard and grants given since the radio started. */
+  rounds?: number;
+  requests?: number;
+  grants?: number;
   forwardedToday: number;
   forwardedTotal: number;
   recent: RelayHop[];

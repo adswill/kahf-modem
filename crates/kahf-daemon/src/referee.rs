@@ -173,6 +173,7 @@ impl Worker {
         frames.extend(self.refs.acks.drain(..take));
         let ok = self.ref_send(&frames);
         if ok {
+            self.shared.flags.ref_counts[0].fetch_add(1, Ordering::Relaxed);
             self.refs.beacon_sent = true;
         } else if self.refs.acks.len() < take {
             // Not sent: the answers stay for the next try.
@@ -199,6 +200,7 @@ impl Worker {
         }
         let ok = self.ref_send(&frames);
         if ok {
+            self.shared.flags.ref_counts[2].fetch_add(frames.len() as u64, Ordering::Relaxed);
             self.refs.cursor = cursor;
             self.refs.granted.extend(ranges);
         }
@@ -231,6 +233,7 @@ impl Worker {
                 }
                 if let Some((dest, slots, _)) = rf::decode_request(f) {
                     if !self.refs.reqs.iter().any(|(op, _, _)| *op == f.header.source) {
+                        self.shared.flags.ref_counts[1].fetch_add(1, Ordering::Relaxed);
                         self.refs.reqs.push((f.header.source, dest, slots.clamp(1, 2)));
                     }
                 }
