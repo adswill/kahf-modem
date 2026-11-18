@@ -525,9 +525,14 @@ impl Link {
         let until = self.clock + wait as u64 * 1000 + spread;
         self.busy_until.retain(|(c, u)| c != &from && *u > self.clock);
         self.busy_until.push((from.clone(), until));
-        if let LinkState::Connecting { peer } = &self.state {
-            if *peer == from {
-                self.hs_deadline = self.hs_deadline.max(until);
+        // Only the station the notice was for puts its retry off. Others just remember it for
+        // when they next start a call; if their own retries were pushed back by every notice
+        // sent to somebody else, two callers could keep each other waiting for ever.
+        if to == self.callsign {
+            if let LinkState::Connecting { peer } = &self.state {
+                if *peer == from {
+                    self.hs_deadline = self.hs_deadline.max(until);
+                }
             }
         }
         Vec::new()
@@ -544,6 +549,8 @@ impl Link {
         if let LinkState::Connecting { peer } = self.state.clone() {
             if peer == from {
                 self.reset_arq();
+                self.last_activity = self.clock;
+                self.peer_active = false;
                 self.set_state(LinkState::Connected { peer: from }, &mut out);
             }
         }

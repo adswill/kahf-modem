@@ -25,11 +25,11 @@ fn main() {
     let mut more = false;
     let t = Instant::now();
     let mut advertised = false;
-    while t.elapsed() < Duration::from_secs(45) {
+    while t.elapsed() < Duration::from_secs(100) {
         if !more && t.elapsed() > Duration::from_secs(10) {
             more = true;
-            a.send_message("KB2BRV", "second message").unwrap();
-            b.send_message("KA1ALF", "reply from b").unwrap();
+            let body = "The quick brown fox jumps over the lazy dog. ".repeat(60);
+            a.send_mail("KB2BRV", "Long mail", &body, &[]).unwrap();
         }
         let _ = &mut advertised;
         for (n, e) in [("A", &mut a), ("B", &mut b)] {

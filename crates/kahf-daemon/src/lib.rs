@@ -23,6 +23,7 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
+use kahf_core::mac::{Class, Mac};
 use kahf_core::link::{encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::Modulation;
@@ -1732,6 +1733,10 @@ struct Worker {
     last_activity: Instant,
     /// Digests of messages already forwarded for others, so one is never forwarded twice.
     forwarded: VecDeque<u64>,
+    /// Who may transmit when: listen before talk, back-off, fair share (see `kahf_core::mac`).
+    mac: Mac,
+    /// A received burst is being tracked, so its end is reported to `mac`.
+    rx_locked: bool,
     /// Adverts already seen (callsign, sequence), so a relay passes each one on once.
     adverts_seen: VecDeque<(String, u8)>,
     advert_seq: u8,
@@ -1872,6 +1877,8 @@ impl Worker {
             auto_initiated: false,
             last_activity: Instant::now(),
             forwarded: VecDeque::new(),
+            mac: Mac::new(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)),
+            rx_locked: false,
             adverts_seen: VecDeque::new(),
             advert_seq: 0,
             refusal_logged: None,
@@ -1920,6 +1927,8 @@ impl Worker {
                 continue;
             }
             if let Some(samples) = self.bursts.pop_front() {
+                let ms = self.now_ms();
+                self.mac.on_tx_start(ms, ms + (samples.len() as u64 * 1000 / RATE as u64));
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2331,14 +2340,27 @@ impl Worker {
     /// in the outbox for a later retry.
     fn clear_channel(&mut self, id: u64, msg: &Message) -> bool {
         matches!(
-            self.pick_channel(Some(id), priority_of(msg) == Priority::Urgent),
+            self.pick_channel(Some(id), priority_of(msg) == Priority::Urgent, false),
             Pick::Go
         )
     }
 
     /// The channel check shared by data and control bursts. `id` is the outbox item, if any;
     /// a control burst has none and is dropped on the last try.
-    fn pick_channel(&mut self, id: Option<u64>, urgent: bool) -> Pick {
+    fn pick_channel(&mut self, id: Option<u64>, urgent: bool, answer: bool) -> Pick {
+        // Listen before talk (kahf_core::mac): never while a burst is arriving, a short gap for
+        // an answer, a long gap plus a random back-off for everything else, and a fair share.
+        let class = if answer {
+            Class::Answer
+        } else if urgent {
+            Class::Urgent
+        } else {
+            Class::Data
+        };
+        let now = self.now_ms();
+        if self.mac.check(now, class).is_some() {
+            return Pick::Wait;
+        }
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -2406,9 +2428,36 @@ impl Worker {
         if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
             return;
         }
-        match self.pick_channel(None, false) {
+        let answer = self
+            .control
+            .front()
+            .and_then(|f| f.first())
+            .is_some_and(|p| matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)));
+        match self.pick_channel(None, false, answer) {
             Pick::Go => {
-                if let Some(frames) = self.control.pop_front() {
+                // One answer burst for everything waiting: eight codewords received give one
+                // burst of eight acknowledgements, not eight bursts each with its own preamble.
+                let mut frames: Vec<Vec<u8>> = Vec::new();
+                while frames.len() < BURST_MAX {
+                    let same = self
+                        .control
+                        .front()
+                        .and_then(|f| f.first())
+                        .is_some_and(|p| matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)) == answer);
+                    match self.control.front() {
+                        Some(f) if same && frames.len() + f.len() <= BURST_MAX => {
+                            let f = self.control.pop_front().unwrap_or_default();
+                            frames.extend(f);
+                        }
+                        _ => break,
+                    }
+                }
+                if frames.is_empty() {
+                    if let Some(f) = self.control.pop_front() {
+                        frames = f;
+                    }
+                }
+                if !frames.is_empty() {
                     self.push_burst(&frames);
                 }
             }
@@ -2607,6 +2656,10 @@ impl Worker {
         match guard("link tick", || self.link.tick(now_ms)) {
             Ok(actions) => {
                 self.tick_error = None;
+                // A frame sent again means the last try got no answer: the back-off window grows.
+                if actions.iter().any(|a| matches!(a, Action::Transmit(p) if !matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)))) {
+                    self.mac.failure();
+                }
                 self.apply(actions);
             }
             Err(e) => {
@@ -2692,7 +2745,8 @@ impl Worker {
         }
         if cleared {
             self.push_burst(&frames);
-        } else {
+        } else if !self.control.iter().any(|c| *c == frames) {
+            // The same frames already waiting say nothing new.
             self.control.push_back(frames);
         }
     }
@@ -2829,7 +2883,9 @@ impl Worker {
                 self.stop_radio_tx();
                 self.end_rx_gap();
                 let now = self.now_ms();
-                self.link.tx_finished(now);
+                self.mac.on_tx_end(now);
+                let link_now = self.started.elapsed().saturating_sub(self.tick_paused).as_millis() as u64;
+                self.link.tx_finished(link_now);
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -2837,6 +2893,8 @@ impl Worker {
             Err(e) => {
                 self.stop_radio_tx();
                 self.end_rx_gap();
+                let now = self.now_ms();
+                self.mac.on_tx_end(now);
                 self.emit_tx(TxState::Failed(e.clone()));
                 self.log(format!("transmit failed: {e}"));
                 true
@@ -2974,6 +3032,11 @@ impl Worker {
             }
             let w = window.min(len);
             if let Some((st, hz, tau)) = kahf_core::kami::find_preamble(&self.rx_buf[..w]) {
+                if !self.rx_locked {
+                    self.rx_locked = true;
+                    let ms = self.now_ms();
+                    self.mac.on_rx_start(ms);
+                }
                 self.kami_at = Some((st, hz, tau));
                 self.kami_tried = 0;
                 self.since_kami = len.saturating_sub(st + tl);
@@ -3078,6 +3141,11 @@ impl Worker {
     /// Drops the audio up to `end` and goes back to looking for a preamble.
     fn end_kami_burst(&mut self, end: usize) {
         let end = end.min(self.rx_buf.len());
+        if self.rx_locked {
+            self.rx_locked = false;
+            let ms = self.now_ms();
+            self.mac.on_rx_end(ms);
+        }
         self.rx_buf.drain(..end);
         self.kami_at = None;
         self.kami_mode = None;
@@ -3088,6 +3156,9 @@ impl Worker {
 
     fn on_frame(&mut self, payload: Vec<u8>) {
         self.last_activity = Instant::now();
+        if matches!(payload.first(), Some(0x11) | Some(0x02)) {
+            self.mac.success();
+        }
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),

@@ -29,7 +29,7 @@ struct Tx {
     frames: Vec<Vec<u8>>,
 }
 
-struct Outgoing {
+pub struct Outgoing {
     class: Class,
     payload: Vec<u8>,
 }
@@ -45,8 +45,8 @@ struct Job {
 pub struct Station {
     pub call: String,
     link: Link,
-    mac: Mac,
-    out: VecDeque<Outgoing>,
+    pub mac: Mac,
+    pub out: VecDeque<Outgoing>,
     txing: Option<u64>,
     jobs: VecDeque<Job>,
     sent_job: bool,
@@ -74,6 +74,7 @@ pub struct Net {
     pub bursts: u64,
     /// Test switch: every station sends as soon as it has something, ignoring the MAC.
     pub no_mac: bool,
+    pub trace: bool,
 }
 
 impl Net {
@@ -106,7 +107,7 @@ impl Net {
                 }
             })
             .collect();
-        Net { now: 0, st, hear, active: Vec::new(), recent: VecDeque::new(), fade_loss: 0.0, rng: seed | 1, collisions: 0, bursts: 0, no_mac: false }
+        Net { now: 0, st, hear, active: Vec::new(), recent: VecDeque::new(), fade_loss: 0.0, rng: seed | 1, collisions: 0, bursts: 0, no_mac: false, trace: false }
     }
 
     fn rand01(&mut self) -> f32 {
@@ -143,8 +144,13 @@ impl Net {
 
     fn receive(&mut self, j: usize, frames: &[Vec<u8>]) {
         for f in frames {
+            let before = self.st[j].link.describe();
             let acts = self.st[j].link.on_receive(f);
-            self.st[j].mac.success();
+            if self.trace { println!("      st{j} rx tag {} : {} -> {}", f[0], before, self.st[j].link.describe()); }
+            // Only an answer to our own traffic shows the channel worked for us.
+            if matches!(f.first(), Some(0x11) | Some(0x02)) {
+                self.st[j].mac.success();
+            }
             for a in &acts {
                 if let Action::Deliver(chunk) = a {
                     if chunk.len() >= 4 {
@@ -188,11 +194,15 @@ impl Net {
                 self.st[j].lost_overlap += 1;
                 self.collisions += 1;
             }
+            if self.trace {
+                println!("  {:7} tx st{} tags {:?} -> st{} destroyed={} deaf={}", self.now, tx.from, tx.frames.iter().map(|f| f[0]).collect::<Vec<_>>(), j, destroyed, deaf);
+            }
             self.st[j].mac.on_rx_end(self.now);
             if destroyed {
                 continue;
             }
             if self.fade_loss > 0.0 && self.rand01() < self.fade_loss {
+                if self.trace { println!("      faded at st{j}"); }
                 self.st[j].lost_fade += 1;
                 continue;
             }
@@ -281,18 +291,23 @@ impl Net {
         if self.st[i].txing.is_some() || self.st[i].out.is_empty() {
             return;
         }
-        let class = self.st[i].out.front().map(|o| o.class).unwrap_or(Class::Data);
+        // Answers go ahead of everything else: the other station is waiting for them.
+        let class = if self.st[i].out.iter().any(|o| o.class == Class::Answer) { Class::Answer } else { Class::Data };
         let now = self.now;
         if !self.no_mac && self.st[i].mac.check(now, class).is_some() {
             return;
         }
         // One burst for everything of the same class that is waiting.
         let mut frames = Vec::new();
-        while frames.len() < BURST_MAX && self.st[i].out.front().is_some_and(|o| o.class == class) {
-            if let Some(o) = self.st[i].out.pop_front() {
+        let mut keep = VecDeque::new();
+        while let Some(o) = self.st[i].out.pop_front() {
+            if o.class == class && frames.len() < BURST_MAX {
                 frames.push(o.payload);
+            } else {
+                keep.push_back(o);
             }
         }
+        self.st[i].out = keep;
         let end = now + burst_ms(frames.len());
         self.st[i].txing = Some(end);
         self.st[i].tx_ms += end - now;
@@ -372,7 +387,7 @@ mod tests {
         // Hidden stations cannot hear each other, so listening cannot stop their calls from
         // landing on the hub's reception. The BUSY reply and the back-off get nearly all of
         // them through; the rest need the relay to grant turns (NETWORK-DESIGN L2).
-        assert!(failures.len() <= 4, "hidden stations (seed, delivered, collisions): {failures:?}");
+        assert!(failures.len() <= 1, "hidden stations (seed, delivered, collisions): {failures:?}");
     }
 
     #[test]
@@ -448,6 +463,33 @@ mod debug {
             let states: Vec<String> = net.st.iter().map(|s| match s.link.metrics().state { LinkState::Idle => "I".into(), LinkState::Connecting { .. } => "c".into(), LinkState::Connected { .. } => "C".into(), _ => "?".into() }).collect();
             if minute == 10 { for (i, s) in net.st.iter().enumerate() { println!("st{i} {:?} out={} jobs={} desc={}", s.link.metrics().state, s.out.len(), s.jobs.len(), s.link.describe()); } }
             println!("min {minute:2} delivered {} bursts {} coll {} states {}", net.delivered_to(0), net.bursts, net.collisions, states.join(""));
+        }
+    }
+}
+
+#[cfg(test)]
+mod debug2 {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn fading_seeds() {
+        for seed in 14..=14u64 {
+            let mut net = Net::full(3, 15.0, seed);
+            net.fade_loss = 0.3;
+            net.send(0, 2, 1, 3);
+            net.send(1, 2, 2, 3);
+            net.run(100_000);
+            net.trace = true;
+            for t in [130u64] {
+                net.run(t * 1000);
+                let d: Vec<String> = net.st.iter().map(|s| format!("{} out{} cw{} tx{}", s.link.describe(), s.out.len(), s.mac.window(), s.tx_ms / 1000)).collect();
+                println!("T{t} {}", d.join(" | "));
+            }
+            net.run(20 * 60_000);
+            if net.delivered_to(2) != 2 {
+                let d: Vec<String> = net.st.iter().map(|s| format!("{:?}/jobs{}", s.link.metrics().state, s.jobs.len())).collect();
+                println!("seed {seed} delivered {} bursts {} | {}", net.delivered_to(2), net.bursts, d.join(" | "));
+            }
         }
     }
 }

@@ -93,6 +93,14 @@ impl Mac {
         self.backoff_ms = Some(slots * SLOT_MS);
     }
 
+    /// The channel was busy when this station wanted it: it will need a back-off.
+    fn defer(&mut self, class: Class) {
+        if class != Class::Answer && self.backoff_ms.is_none() {
+            let cw = if class == Class::Urgent { CW_URGENT } else { self.cw };
+            self.draw(cw);
+        }
+    }
+
     /// A burst from another station started arriving.
     pub fn on_rx_start(&mut self, now: u64) {
         self.rx_active = true;
@@ -162,21 +170,20 @@ impl Mac {
             }
         }
         if self.rx_active {
+            self.defer(class);
             return Some(SLOT_MS);
         }
         let quiet = now.saturating_sub(self.last_rx_end.unwrap_or(0));
         let gap = if class == Class::Answer { SIFS_MS } else { DIFS_MS };
         if self.last_rx_end.is_some() && quiet < gap {
+            self.defer(class);
             return Some(gap - quiet);
         }
         if class == Class::Answer {
             return None;
         }
-        // Back-off counts down only while the channel stays quiet past the long gap.
-        if self.backoff_ms.is_none() {
-            let cw = if class == Class::Urgent { CW_URGENT } else { self.cw };
-            self.draw(cw);
-        }
+        // Back-off counts down only while the channel stays quiet past the long gap. A station
+        // that finds the channel quiet and has no back-off pending goes at once.
         if let Some(left) = self.backoff_ms {
             let counted = dt.min(quiet.saturating_sub(DIFS_MS).max(0)).min(left);
             let left = left - counted;
