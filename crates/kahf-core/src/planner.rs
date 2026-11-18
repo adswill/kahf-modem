@@ -145,7 +145,7 @@ pub fn plan(epoch: u64, seed: u32, relays: &[RelayIn]) -> Plan {
 pub fn local_plan(epoch: u64, seed: u32, relay_ids: &[u32]) -> Plan {
     let all: Vec<RelayIn> = relay_ids.iter().map(|&id| RelayIn { id, queue_bytes: 1, urgency: 0 }).collect();
     let mut p = plan(epoch, seed, &all);
-    p.grants.retain(|g| (epoch + g.relay as u64) % LOCAL_DUTY_DIV == 0);
+    p.grants.retain(|g| (epoch + g.relay as u64).is_multiple_of(LOCAL_DUTY_DIV));
     p
 }
 
