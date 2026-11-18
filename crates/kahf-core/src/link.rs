@@ -17,6 +17,12 @@ const TAG_CONNECT: u8 = 0x01;
 const TAG_CONNECT_ACK: u8 = 0x02;
 const TAG_DISCONNECT: u8 = 0x03;
 const TAG_ADVERT: u8 = 0x04;
+const TAG_BUSY: u8 = 0x06;
+/// A connected link with nothing to send and nothing heard from the peer for this long is
+/// closed (the peer left without a goodbye, or the goodbye was lost).
+pub const LINK_IDLE_MS: u64 = 60_000;
+/// A new caller may take over a link that has been quiet for this long.
+const TAKEOVER_IDLE_MS: u64 = 15_000;
 const TAG_DATA: u8 = 0x10;
 const TAG_ACK: u8 = 0x11;
 
@@ -103,6 +109,12 @@ pub struct Link {
     /// Extra time added to every retransmit timer: the air time of a frame in both directions
     /// plus the peer's processing delay. Zero until `set_air_ms` is called.
     air_extra: u64,
+    /// Stations that said they are busy, and until when (ms on our clock).
+    busy_until: Vec<(String, u64)>,
+    /// Clock at the last frame of the current exchange (sent or received).
+    last_activity: u64,
+    /// Data or an acknowledgement has been exchanged on this link (not just a connect).
+    peer_active: bool,
     pub callsign: String,
     pub state: LinkState,
     clock: u64,
@@ -143,6 +155,9 @@ impl Link {
             state: LinkState::Idle,
             clock: 0,
             air_extra: 0,
+            busy_until: Vec::new(),
+            last_activity: 0,
+            peer_active: false,
             peer_snr: None,
             heard: Vec::new(),
             rx_snr: None,
@@ -183,7 +198,13 @@ impl Link {
         self.begin_session();
         self.hs_retries = 0;
         self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS + self.air_extra;
-        let mut out = vec![Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer))];
+        let mut out = Vec::new();
+        // The station said it is busy: do not call into its busy exchange, wait it out.
+        if let Some(until) = self.busy_for(peer) {
+            self.hs_deadline = until;
+        } else {
+            out.push(Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer)));
+        }
         self.set_state(
             LinkState::Connecting {
                 peer: peer.to_string(),
@@ -218,8 +239,17 @@ impl Link {
             Some(&TAG_CONNECT) => self.on_connect(payload),
             Some(&TAG_CONNECT_ACK) => self.on_connect_ack(payload),
             Some(&TAG_DISCONNECT) => self.on_disconnect(payload),
-            Some(&TAG_DATA) => self.on_data(payload),
-            Some(&TAG_ACK) => self.on_ack(payload),
+            Some(&TAG_DATA) => {
+                self.last_activity = self.clock;
+                self.peer_active = true;
+                self.on_data(payload)
+            }
+            Some(&TAG_ACK) => {
+                self.last_activity = self.clock;
+                self.peer_active = true;
+                self.on_ack(payload)
+            }
+            Some(&TAG_BUSY) => self.on_busy(payload),
             Some(&TAG_ADVERT) => match decode_advert(payload) {
                 Some((call, ttl, seq, flags, loc)) if call != self.callsign && valid_callsign(&call) => {
                     self.note_heard(&call);
@@ -237,6 +267,8 @@ impl Link {
         if !matches!(self.state, LinkState::Connected { .. }) {
             return Vec::new();
         }
+        self.last_activity = self.clock;
+        self.peer_active = true;
         for chunk in data.chunks(MAX_CHUNK) {
             self.tx_queue.push_back(chunk.to_vec());
         }
@@ -278,6 +310,11 @@ impl Link {
                 }
             }
             LinkState::Connected { .. } => {
+                if self.nothing_pending() && now_ms.saturating_sub(self.last_activity) >= LINK_IDLE_MS {
+                    self.reset_arq();
+                    self.set_state(LinkState::Idle, &mut out);
+                    return out;
+                }
                 if now_ms >= self.metrics_due {
                     self.metrics_due = now_ms + METRICS_INTERVAL_MS;
                     out.push(Action::Metrics(self.metrics()));
@@ -422,18 +459,31 @@ impl Link {
             LinkState::Connecting { peer } if peer == from => self.accept(&from, &mut out),
             // Our CONNECT_ACK was lost and the peer retried: acknowledge again.
             LinkState::Connected { peer } if peer == from => {
+                self.last_activity = self.clock;
                 out.push(Action::Transmit(encode_hs(
                     TAG_CONNECT_ACK,
                     &self.callsign,
                     &from,
                 )));
             }
-            _ => {}
+            // Already in an exchange with someone else: say so once, with how long to wait,
+            // instead of letting the caller retry into it.
+            LinkState::Connected { .. } if self.quiet_for_takeover() => {
+                // The old peer has gone quiet with nothing pending: the new caller gets the link.
+                self.reset_arq();
+                self.accept(&from, &mut out);
+            }
+            _ => {
+                let wait = self.busy_wait_s();
+                out.push(Action::Transmit(encode_busy(&self.callsign, &from, wait)));
+            }
         }
         out
     }
 
     fn accept(&mut self, from: &str, out: &mut Vec<Action>) {
+        self.last_activity = self.clock;
+        self.peer_active = false;
         self.begin_session();
         self.set_state(
             LinkState::Connected {
@@ -442,6 +492,45 @@ impl Link {
             out,
         );
         out.push(Action::Transmit(encode_hs(TAG_CONNECT_ACK, &self.callsign, from)));
+    }
+
+    fn nothing_pending(&self) -> bool {
+        self.tx_queue.is_empty() && self.slots.iter().all(|s| s.is_none())
+    }
+
+    fn quiet_for_takeover(&self) -> bool {
+        self.peer_active && self.nothing_pending() && self.clock.saturating_sub(self.last_activity) >= TAKEOVER_IDLE_MS
+    }
+
+    /// Seconds a caller should stay away: a fixed part plus what we still have to send.
+    fn busy_wait_s(&self) -> u8 {
+        let queued = self.tx_queue.len() + self.slots.iter().flatten().count();
+        (8 + 2 * queued as u64).min(90) as u8
+    }
+
+    fn busy_for(&self, peer: &str) -> Option<u64> {
+        self.busy_until.iter().find(|(c, u)| c == peer && *u > self.clock).map(|(_, u)| *u)
+    }
+
+    /// A busy notice. Everyone who hears it leaves that station alone for a while, whoever it
+    /// was addressed to (a hidden caller learns from the notice the others hear).
+    fn on_busy(&mut self, p: &[u8]) -> Vec<Action> {
+        let Some((from, to, wait)) = decode_busy(p) else { return Vec::new() };
+        if from == self.callsign {
+            return Vec::new();
+        }
+        self.note_heard(&from);
+        // A small spread by callsign, so the callers do not all return at the same moment.
+        let spread: u64 = to.bytes().map(u64::from).sum::<u64>() % 7 * 400;
+        let until = self.clock + wait as u64 * 1000 + spread;
+        self.busy_until.retain(|(c, u)| c != &from && *u > self.clock);
+        self.busy_until.push((from.clone(), until));
+        if let LinkState::Connecting { peer } = &self.state {
+            if *peer == from {
+                self.hs_deadline = self.hs_deadline.max(until);
+            }
+        }
+        Vec::new()
     }
 
     fn on_connect_ack(&mut self, p: &[u8]) -> Vec<Action> {
@@ -684,6 +773,18 @@ fn decode_advert(p: &[u8]) -> Option<DecodedAdvert> {
         (lat, lon)
     });
     Some((call, p[1], p[2], flags, loc))
+}
+
+fn encode_busy(from: &str, to: &str, wait_s: u8) -> Vec<u8> {
+    let mut v = encode_hs(TAG_BUSY, from, to);
+    v.push(wait_s);
+    v
+}
+
+fn decode_busy(p: &[u8]) -> Option<(String, String, u8)> {
+    let (&wait, body) = p.split_last()?;
+    let (from, to) = decode_hs(body)?;
+    Some((from, to, wait))
 }
 
 fn encode_hs(tag: u8, from: &str, to: &str) -> Vec<u8> {

@@ -13,6 +13,9 @@ pub mod kami;
 pub mod ldpc;
 pub mod ldpc_std;
 pub mod link;
+pub mod mac;
+#[cfg(test)]
+pub mod sim;
 pub mod marker;
 pub mod outbox;
 pub mod payload_position;
