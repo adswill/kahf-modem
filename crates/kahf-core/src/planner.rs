@@ -232,6 +232,69 @@ impl Held {
     }
 }
 
+/// Physical lane (the 12 of `lanes.rs`) of each relay lane R1 to R8. Lanes 4 and 7 are spares,
+/// 5 and 6 are the calling lanes.
+pub const PHYS: [u8; LANES] = [0, 1, 2, 3, 8, 9, 10, 11];
+const PHYS_LANES: u8 = 12;
+const CALLING: [u8; 2] = [5, 6];
+
+/// A relay's run of adjacent physical lanes in one slot, sent as one wider signal (2.5): the
+/// run is `first..first + count`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bonded {
+    pub relay: u32,
+    pub slot: u8,
+    pub first: u8,
+    pub count: u8,
+}
+
+/// How many lanes a transfer should ask for: one unless the link is strong (a fast mode works)
+/// and the transfer is more than a few frames. The thresholds are guesses (est.), to be tuned.
+pub fn bond_count(snr_db: f32, bytes: u32) -> u8 {
+    if bytes < 4 * 27 || snr_db < 9.0 {
+        1
+    } else if snr_db < 15.0 {
+        2
+    } else if snr_db < 21.0 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Widen grants into runs of adjacent lanes. `wants` is (relay, lanes wanted, at most 4; five
+/// lanes would be 3280 Hz, over the 2700 Hz cap). A run takes only lanes that no other grant
+/// holds in that slot, never the calling lanes, and never overlaps another bonded run. A run
+/// that cannot grow stays as wide as it can get, down to the relay's own lane.
+pub fn bond(plan: &Plan, wants: &[(u32, u8)]) -> Vec<Bonded> {
+    let mut taken: Vec<[bool; PHYS_LANES as usize]> = vec![[false; PHYS_LANES as usize]; SLOTS];
+    for g in &plan.grants {
+        taken[g.slot as usize][PHYS[g.lane as usize] as usize] = true;
+    }
+    let mut out = Vec::new();
+    for &(relay, want) in wants {
+        let want = want.clamp(1, 4);
+        for g in plan.grants.iter().filter(|g| g.relay == relay) {
+            let own = PHYS[g.lane as usize];
+            let free = |slot: usize, l: u8| !CALLING.contains(&l) && (l == own || !taken[slot][l as usize]);
+            let mut best = (own, 1u8);
+            'n: for n in (1..=want).rev() {
+                for first in own.saturating_sub(n - 1)..=own {
+                    if first + n <= PHYS_LANES && (first..first + n).all(|l| free(g.slot as usize, l)) {
+                        best = (first, n);
+                        break 'n;
+                    }
+                }
+            }
+            for l in best.0..best.0 + best.1 {
+                taken[g.slot as usize][l as usize] = true;
+            }
+            out.push(Bonded { relay, slot: g.slot, first: best.0, count: best.1 });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +496,88 @@ mod tests {
         eprintln!("TWIN77 {}", twin_line(&plan(77, 42, &rs)));
         eprintln!("TWIN78 {}", twin_line(&plan(78, 42, &rs)));
         eprintln!("TWINL {}", twin_line(&local_plan(80, 42, &rs.iter().map(|r| r.id).collect::<Vec<_>>())));
+    }
+}
+
+#[cfg(test)]
+mod bonding_tests {
+    use super::*;
+    use crate::lanes::{BandTable, LANE_PITCH_HZ, LANE_WIDTH_HZ};
+
+    fn busy(ids: &[u32]) -> Vec<RelayIn> {
+        ids.iter().map(|&id| RelayIn { id, queue_bytes: 800, urgency: 0 }).collect()
+    }
+
+    #[test]
+    fn eligibility_needs_a_strong_link_and_a_large_transfer() {
+        assert_eq!(bond_count(25.0, 50), 1, "too small");
+        assert_eq!(bond_count(5.0, 5000), 1, "too weak");
+        assert_eq!([bond_count(10.0, 500), bond_count(16.0, 500), bond_count(30.0, 500)], [2, 3, 4]);
+    }
+
+    #[test]
+    fn a_lone_relay_widens_but_never_into_the_calling_lanes_and_never_past_four() {
+        let rs = busy(&[1]);
+        for epoch in 0..30 {
+            let p = plan(epoch, 5, &rs);
+            for want in 1..=6u8 {
+                for b in bond(&p, &[(1, want)]) {
+                    assert!(b.count >= 1 && b.count <= want.min(4));
+                    for l in b.first..b.first + b.count {
+                        assert!(![5, 6].contains(&l), "run {b:?} takes a calling lane");
+                    }
+                    let own = PHYS[p.grants.iter().find(|g| g.slot == b.slot).unwrap().lane as usize];
+                    assert!(b.first <= own && own < b.first + b.count, "run {b:?} lost its own lane");
+                }
+            }
+        }
+        // A relay on its own can reach the full four lanes.
+        assert!(bond(&plan(1, 5, &rs), &[(1, 4)]).iter().any(|b| b.count == 4));
+    }
+
+    #[test]
+    fn bonded_runs_never_overlap_each_other_or_anyone_elses_lane() {
+        let mut seen_wide = false;
+        for epoch in 0..200 {
+            let rs: Vec<RelayIn> = (0..6u32).map(|i| RelayIn { id: i, queue_bytes: if (epoch + i as u64).is_multiple_of(4) { 0 } else { 500 }, urgency: 0 }).collect();
+            let p = plan(epoch, 2, &rs);
+            let wants: Vec<(u32, u8)> = (0..6).map(|i| (i, 1 + (i as u8 + epoch as u8) % 4)).collect();
+            let runs = bond(&p, &wants);
+            for slot in 0..SLOTS as u8 {
+                let mut used = [None::<u32>; 12];
+                for b in runs.iter().filter(|b| b.slot == slot) {
+                    seen_wide |= b.count > 1;
+                    for l in b.first..b.first + b.count {
+                        assert!(used[l as usize].replace(b.relay).is_none(), "lane {l} twice in slot {slot}");
+                    }
+                }
+                // Another relay's own grant is never inside someone else's run.
+                for g in p.grants.iter().filter(|g| g.slot == slot) {
+                    let l = PHYS[g.lane as usize] as usize;
+                    assert_eq!(used[l], Some(g.relay), "lane {l} in slot {slot}");
+                }
+            }
+        }
+        assert!(seen_wide, "some run should have grown");
+    }
+
+    #[test]
+    fn a_bonded_run_passes_the_band_table_and_fits_2700_hz() {
+        let mut t = BandTable::builtin_r1();
+        t.plan_verified = true; // for this check only
+        let b = t.band("17m").unwrap().clone();
+        for first in 0..9u8 {
+            for count in 1..=4u8 {
+                if first + count > 12 || (first..first + count).any(|l| [5, 6].contains(&l)) {
+                    continue;
+                }
+                let (a, z) = (b.lane(first).unwrap(), b.lane(first + count - 1).unwrap());
+                let width = z.upper_hz() - a.lower_hz;
+                assert_eq!(width, count as u64 * LANE_WIDTH_HZ + (count as u64 - 1) * (LANE_PITCH_HZ - LANE_WIDTH_HZ));
+                assert!(width <= 2_700);
+                let (lo, hi) = (1500 - LANE_WIDTH_HZ / 2, 1500 - LANE_WIDTH_HZ / 2 + width);
+                assert_eq!(t.permit_tx("17m", first, first + count - 1, a.dial_hz, lo, hi), Ok(()), "{first}+{count}");
+            }
+        }
     }
 }

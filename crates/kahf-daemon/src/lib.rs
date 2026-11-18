@@ -161,6 +161,7 @@ pub enum TxState {
 
 /// Default transmit modulation: KAMI-32, the bottom rung of the ladder (see `MODULATIONS`).
 const MODULATION: Modulation = Modulation::Kami32;
+#[cfg(test)]
 const LDPC_ITER: usize = 50;
 /// An automatic link with nothing waiting is closed after this long without a frame.
 const AUTO_HANGUP: Duration = Duration::from_secs(20);
@@ -1840,6 +1841,7 @@ struct Worker {
     mac: Mac,
     /// A received burst is being tracked, so its end is reported to `mac`.
     rx_locked: bool,
+    harq: kahf_core::harq::Harq,
     /// Stations heard lately: callsign -> (SNR, when). Reported to the server and used to
     /// decide who a relay can reach itself.
     heard_recent: HashMap<String, (Option<i32>, Instant)>,
@@ -1997,6 +1999,7 @@ impl Worker {
             rx_deaf_until: None,
             mac: Mac::new(if clock.is_virtual() { fnv(&config.callsign) } else { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) }),
             rx_locked: false,
+            harq: Default::default(),
             adverts_seen: VecDeque::new(),
             advert_seq: 0,
             beacon_at: clock.now() - Duration::from_secs(3600),
@@ -3484,7 +3487,12 @@ impl Worker {
             };
             let snr = rx.snr_db as f32;
             for (j, llr) in rx.llrs.into_iter().enumerate().skip(self.kami_next) {
-                let decoded = ldpc::decode(&llr, LDPC_ITER).and_then(|info| frame::parse_payload_id(&info));
+                // A repeat of a codeword that failed before is added to it (chase combining).
+                let (tag, now_ms) = (mod_id(m), self.now_ms());
+                let decoded = self
+                    .harq
+                    .try_decode(j, tag, &llr, now_ms, |info| frame::parse_payload_id(info).is_some_and(|(_, id)| id & ID_MODE_MASK == tag))
+                    .and_then(|d| frame::parse_payload_id(&d.info));
                 let Some((data, id)) = decoded else { break };
                 if id & ID_MODE_MASK != mod_id(m) {
                     break;
