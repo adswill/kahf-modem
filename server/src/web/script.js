@@ -82,6 +82,17 @@ const HOME = String.raw`
   }
   getJson("/release").then(function (d) { if (d && d.release) showRelease(d.release); }).catch(function () { /* keep the honest default */ });
 
+  /* ---- copy buttons on the command blocks ---- */
+  $$("[data-copy]").forEach(function (box) {
+    var btn = $("[data-cp]", box), code = $("code", box);
+    if (!btn || !code) return;
+    btn.addEventListener("click", function () {
+      var text = code.textContent.replace(/^\$ /gm, "");
+      var done = function () { btn.textContent = "Copied"; btn.classList.add("done"); window.setTimeout(function () { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1600); };
+      if (window.navigator.clipboard && window.navigator.clipboard.writeText) window.navigator.clipboard.writeText(text).then(done, function () {});
+    });
+  });
+
   var reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
   /* ---- the lane ruler: read a lane, from its row in the table ---- */

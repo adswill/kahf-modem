@@ -355,11 +355,12 @@ impl Worker {
         if self.refs.granted.iter().any(|(a, b)| abs >= *a && abs < *b) {
             return RefGate::Wait;
         }
-        // Free slots from here to the end of the epoch, up to the next granted one.
-        let mut free = 1;
-        while slot + free < rf::SLOTS && !self.refs.granted.iter().any(|(a, b)| abs + free >= *a && abs + free < *b) {
-            free += 1;
+        // Only the first data slot, and only when the next one is free too: the station that
+        // receives the downlink answers right after it, and that answer needs air of its own
+        // (it would otherwise land in a granted slot, or on the next beacon).
+        if slot != rf::FIRST_DATA_SLOT || self.refs.granted.iter().any(|(a, b)| abs + 1 >= *a && abs + 1 < *b) {
+            return RefGate::Wait;
         }
-        RefGate::Go { max_air_s: self.ref_air_for(free) - in_slot as f64 / 1000.0 }
+        RefGate::Go { max_air_s: self.ref_air_for(1) - in_slot as f64 / 1000.0 }
     }
 }

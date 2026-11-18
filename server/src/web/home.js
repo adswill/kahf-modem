@@ -187,6 +187,91 @@ function roundOfSlots() {
     `<div class="play" aria-hidden="true"></div></div></div>`;
 }
 
+
+/** The 36 byte payload of one codeword: the 9 byte header (bundle.rs) and the body. */
+function frameLayout() {
+  const cells = [
+    ["0", ["type"], "", 1],
+    ["1", ["flags", "hops"], "4 + 4", 1],
+    ["2 to 4", ["next hop"], "24 bit hash, 0 = anyone", 3],
+    ["5 to 7", ["source"], "24 bit hash", 3],
+    ["8", ["index", "count"], "4 + 4", 1],
+    ["9 to 35", ["body"], "27 bytes: a session chunk, a grant, an answer", 9],
+  ];
+  const total = 17, W = 1000, X0 = 10, UW = (W - 2 * X0) / total;
+  let x = X0, s = "";
+  cells.forEach((c, i) => {
+    const w = c[3] * UW, body = i === cells.length - 1, narrow = c[3] === 1, cx = (x + w / 2).toFixed(1);
+    s += `<rect class="${body ? "cell body" : "cell"}" x="${x.toFixed(1)}" y="34" width="${w.toFixed(1)}" height="72"/>` +
+      `<text class="by" x="${(x + 6).toFixed(1)}" y="26" font-size="12">${c[0]}</text>`;
+    c[1].forEach((line, j) => {
+      const y = narrow ? 62 + j * 15 : 66;
+      s += `<text class="nm" x="${cx}" y="${y}" font-size="${narrow ? 12 : 16}" text-anchor="middle">${line}</text>`;
+    });
+    if (c[2]) s += `<text class="dim" x="${cx}" y="${narrow ? 96 : 90}" font-size="${narrow ? 11 : 12}" text-anchor="middle">${c[2]}</text>`;
+    x += w;
+  });
+  return `<svg viewBox="0 0 ${W} 120" role="img" aria-labelledby="fr-t fr-d">
+<title id="fr-t">The frame header</title>
+<desc id="fr-d">One codeword carries 36 bytes. Byte 0 is the type, byte 1 holds four bits of flags and four of hop count, bytes 2 to 4 name the next hop, bytes 5 to 7 the source, byte 8 the index and count of the codeword in its burst, and bytes 9 to 35 are the body.</desc>
+${s}</svg>`;
+}
+
+const KINDS = [["0x30", "message"], ["0x31", "receipt"], ["0x32", "ack"], ["0x33", "page"], ["0x34", "request"], ["0x35", "grant"], ["0x36", "beacon"], ["0x37", "here"]];
+
+function devSection() {
+  const kinds = KINDS.map((k) => `<code>${k[0]}</code> ${k[1]}`).join(" &nbsp; ");
+  return `
+<section class="part" id="dev" aria-labelledby="dev-t">
+<h2 id="dev-t">For developers.</h2>
+<div class="cols lean">
+<div>
+<p>KAHF is a Rust workspace with a Svelte and Tauri app, and a Cloudflare Worker for the map. The source is public to read. Everything below runs without a radio: the engine takes a virtual clock, so a test of a whole conversation between stations takes seconds, not minutes.</p>
+<div class="term" data-copy>
+<div class="bar"><span>shell</span><button type="button" class="cp js-only" data-cp>Copy</button></div>
+<pre><code><i>$</i> gh repo clone adswill/kahf-modem &amp;&amp; cd kahf-modem
+<i>$</i> cargo test --workspace
+<i>$</i> cd server &amp;&amp; npm test</code></pre>
+</div>
+</div>
+<div>
+<div class="term">
+<div class="bar"><span>cargo test -p kahf-daemon  (excerpt)</span></div>
+<pre><code>a_chat_arrives_on_every_one_of_the_twelve_lanes             <b>ok</b>
+a_lane_burst_on_the_air_stays_inside_its_lane_and_is_five_t <b>ok</b>
+a_station_on_c1_also_hears_a_burst_on_c2_and_one_on_c2_...  <b>ok</b>
+a_foreign_signal_in_the_lane_holds_the_transmit_until_it_.. <b>ok</b>
+one_bundle_reaches_three_stations_and_they_answer_in_the_.. <b>ok</b>
+an_operator_asks_the_relay_gets_a_grant_and_the_message_.. <b>ok</b>
+
+test result: ok. 98 passed; 0 failed; 1 ignored</code></pre>
+</div>
+<p class="note">Simulated channel, virtual clock. Core has 343 tests and the server 1173. None of it has touched a real radio.</p>
+</div>
+</div>
+
+<h3>One codeword on the air</h3>
+<p>Every frame starts with a 9 byte header, so a station that is not the next hop drops it after reading it. A burst is up to eight codewords sharing one preamble. Types: ${kinds}.</p>
+<figure class="frame">${frameLayout()}</figure>
+
+<h3>Crates</h3>
+<table class="lanes crates">
+<thead><tr><th scope="col">Crate</th><th scope="col">Does</th></tr></thead>
+<tbody>
+<tr><td>kahf-core</td><td>KAMI modem (plain, and lane mode at 480 Hz), LDPC, band table and lanes, frames, bundles, link and session, relay referee, planner</td></tr>
+<tr><td>kahf-daemon</td><td>The engine: radio, sensing, transmit gate, chat on bundles, referee. The API the app uses</td></tr>
+<tr><td>kahf-sim</td><td>Channel simulator, error-rate and leakage measurements</td></tr>
+<tr><td>kahf-audio, kahf-sdr</td><td>Sound card, HackRF and RTL-SDR adapters</td></tr>
+<tr><td>kahf-log, kahf-prop</td><td>Contact log with ADIF export; first-pass propagation estimate</td></tr>
+<tr><td>app/</td><td>Tauri and Svelte desktop app</td></tr>
+<tr><td>server/</td><td>This site and the map: a Cloudflare Worker, with the planner, router and hub logic written and tested</td></tr>
+</tbody>
+</table>
+<p class="note">Design notes, the status table and the numbers behind this page are in the <code>docs</code> folder of the repository: MESH-SPEC.md, NETWORK-STATUS.md, KAMI-MODES.md.</p>
+</section>
+`;
+}
+
 export function homeBody() {
   return `
 <div class="sheet">
@@ -196,6 +281,7 @@ export function homeBody() {
 <p class="lede">KAHF is a desktop app that sends chat, mail, files and voice notes between computers over HF radio, on the 17 metre band, through a sound card or an SDR.</p>
 <p class="state"><b>Early build.</b> It has not yet been tried on a real radio channel. What exists, and what does not, is listed below.</p>
 <div class="go"><a class="main" href="#lanes">See how it shares the band</a><a class="alt" href="/map">Live map</a><a class="alt" href="https://github.com/adswill/kahf-modem" rel="noopener noreferrer">Source on GitHub</a></div>
+<div class="term one" data-copy><pre><code><i>$</i> gh repo clone adswill/kahf-modem &amp;&amp; cargo test --workspace</code></pre><button type="button" class="cp js-only" data-cp>Copy</button></div>
 </div>
 <figure class="chart">${plottingSheet()}
 <figcaption class="chart-cap" id="sun"><span><b>Dark side:</b> where it is night now. Needs JavaScript.</span><span>Dots are example paths, not stations.</span></figcaption>
@@ -286,6 +372,7 @@ ${roundOfSlots()}
 </div>
 </section>
 
+${devSection()}
 <section class="part" id="licences" aria-labelledby="lic-t">
 <h2 id="lic-t">Licence and responsibility. Read this before you transmit.</h2>
 <div class="fine">
@@ -316,6 +403,7 @@ export const HOME_HEAD = `<header class="mast">
 <a href="#messages">Messages</a>
 <a href="#reach">Range</a>
 <a href="#status">Status</a>
+<a href="#dev">Build</a>
 <a href="/map">Live map</a>
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>

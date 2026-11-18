@@ -41,7 +41,7 @@ cargo run -p kahf-cli -- rx message.wav -o decoded.bin
 
 | Crate | Purpose |
 |---|---|
-| `kahf-core` | LDPC code, OFDM-style modem, frame, link and session layers, I/O traits |
+| `kahf-core` | LDPC code, the KAMI modem (plain and 480 Hz lane mode), 17 m band table and lanes, frame, bundle, link and session layers, relay referee, planner |
 | `kahf-sim` | Channel simulator and error-rate measurement |
 | `kahf-log` | Contact logbook: CSV storage and ADIF export |
 | `kahf-prop` | First-pass HF propagation estimator (estimate only) |

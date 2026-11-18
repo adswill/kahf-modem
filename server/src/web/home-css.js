@@ -190,6 +190,31 @@ table.lanes td:first-child { font-weight: 700; }
 .base p { margin: 0; }
 .base .sp { margin-left: auto; }
 
+/* developer blocks: a printed listing, not a terminal costume */
+.term { margin: 18px 0 0; border: 1px solid var(--ink); background: var(--paper); position: relative; }
+.term .bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--ink); background: var(--sea); font: 12px/1.4 var(--mono); color: var(--ink-2); }
+.term pre { margin: 0; padding: 14px 16px; overflow-x: auto; font: 13.5px/1.65 var(--mono); tab-size: 2; scrollbar-color: var(--rule) var(--paper); }
+.term code { font: inherit; }
+.term i { font-style: normal; color: var(--mag-ink); user-select: none; margin-right: 8px; }
+.term b { font-weight: 700; color: var(--ink); }
+.term.one { display: flex; align-items: stretch; max-width: 34em; margin-top: 22px; }
+.term.one pre { flex: 1; padding: 11px 14px; white-space: pre; }
+.term.one .cp { border-left: 1px solid var(--ink); }
+.cp { font: 12px/1 var(--mono); color: var(--ink); background: transparent; border: 0; padding: 4px 8px; cursor: pointer; }
+.term .bar .cp { border: 1px solid var(--rule); }
+.cp:hover { color: var(--mag-ink); border-color: var(--mag); }
+.cp.done { color: var(--mag-ink); }
+.frame { margin: 18px 0 0; border: 1px solid var(--ink); background: var(--paper); }
+.frame svg { display: block; width: 100%; height: auto; }
+.frame text { font-family: var(--mono); fill: var(--ink); }
+.frame .dim { fill: var(--ink-2); }
+.frame .by { fill: var(--mag-ink); font-weight: 700; }
+.frame .cell { fill: var(--sea); stroke: var(--ink); stroke-width: 1.4; }
+.frame .cell.body { fill: var(--paper); stroke-dasharray: none; }
+table.crates td:first-child { white-space: nowrap; padding-right: 22px; vertical-align: top; }
+table.crates td { font: 14px/1.5 var(--sans); }
+table.crates td:first-child { font: 700 14px/1.5 var(--mono); }
+
 @media (prefers-reduced-motion: reduce) {
   .chart .draw { animation: none; stroke-dashoffset: 0; }
   .chart .pop { animation: none; opacity: 1; }

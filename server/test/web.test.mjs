@@ -45,9 +45,9 @@ const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u
 
 test("home page: no downloads block without a release, the twelve lanes and the honest status", () => {
   const html = renderHome();
-  for (const id of ["top-title", "lanes", "messages", "reach", "status", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
+  for (const id of ["top-title", "lanes", "messages", "reach", "status", "dev", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
-  assert.equal((html.match(/<section\b/g) || []).length, 6);
+  assert.equal((html.match(/<section\b/g) || []).length, 7);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds|id="download"/i);
   assert.match(html, /No religious or political content/);
   assert.match(html, /Source-available/);

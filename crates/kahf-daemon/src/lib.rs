@@ -5968,18 +5968,27 @@ mod tests {
         let clock = test_clock();
         let t0 = clock.now();
         let mut seen: Vec<String> = Vec::new();
-        while clock.now() < t0 + Duration::from_secs(2400) && seen.len() < ops {
-            for e in st.iter_mut() {
-                let _ = e.poll_events();
+        let mut op1_log: Vec<String> = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(900) && seen.len() < ops {
+            for (i, e) in st.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    if let (1, Event::Log(l)) = (i, &ev) {
+                        op1_log.push(format!("{:5} {l}", clock.since(t0).as_secs()));
+                    }
+                }
             }
             for ev in z.poll_events() {
                 if let Event::Message { text, .. } = ev {
+                    eprintln!("ARRIVED {text} at {} s", clock.since(t0).as_secs());
                     seen.push(text);
                 }
             }
             clock.sleep(Duration::from_millis(50));
         }
         let secs = clock.since(t0).as_secs();
+        for l in op1_log.iter().rev().take(25).rev() {
+            eprintln!("OP1 {l}");
+        }
         seen.sort();
         let mut want: Vec<String> = (1..=ops).map(|i| format!("op {i}")).collect();
         want.sort();
