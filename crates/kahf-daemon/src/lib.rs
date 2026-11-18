@@ -1032,6 +1032,7 @@ fn frame_len_for(m: Modulation) -> usize {
 }
 
 /// Samples of one frame at the transmit modulation.
+#[cfg(test)]
 fn frame_len() -> usize {
     frame_len_for(MODULATION)
 }
