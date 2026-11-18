@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { defaultSettings } from "./defaults";
 import type {
-  Engine, EngineEvent, MessageKind, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, VoiceClip,
+  Engine, EngineEvent, MessageKind, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, Occupancy, VoiceClip,
 } from "./types";
 
 export class TauriEngine implements Engine {
@@ -132,6 +132,9 @@ export class TauriEngine implements Engine {
   }
   modes(): Promise<ModeInfo[]> {
     return invoke("engine_modes");
+  }
+  occupancy(): Promise<Occupancy | null> {
+    return invoke("engine_occupancy");
   }
   txGate(): Promise<TxGate> {
     return invoke("engine_tx_gate");

@@ -617,6 +617,11 @@ impl Engine {
         lock(&self.shared.flags.policy).test_table = on;
     }
 
+    /// The newest occupancy report, without taking it from the queue.
+    pub fn latest_occupancy(&self) -> Option<OccupancyReport> {
+        lock(&self.shared.flags.occupancy).back().cloned()
+    }
+
     /// Hands over the occupancy reports collected so far (one a minute while the dial is a lane).
     pub fn take_occupancy(&self) -> Vec<OccupancyReport> {
         lock(&self.shared.flags.occupancy).drain(..).collect()

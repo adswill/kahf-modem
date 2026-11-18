@@ -179,6 +179,12 @@ export interface Settings {
   theme: "dark" | "light";
 }
 
+export interface Occupancy {
+  at: number;
+  /** [lane number 0 to 11, dB over the lane's noise floor] */
+  lanes: [number, number][];
+}
+
 export interface TxGate {
   mode: "real" | "bench" | "off";
   text: string;
@@ -257,4 +263,6 @@ export interface Engine {
   modes(): Promise<ModeInfo[]>;
   /** Whether this station may transmit: real, bench (test table, no antenna) or off, with the reason. */
   txGate(): Promise<TxGate>;
+  /** Lane activity over the last minute, or null before the first report. */
+  occupancy(): Promise<Occupancy | null>;
 }

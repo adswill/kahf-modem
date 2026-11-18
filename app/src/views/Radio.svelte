@@ -66,6 +66,20 @@
       <div data-tour="spectrum"><Spectrum height={330} /></div>
     </section>
 
+    {#if app.occupancy}
+      <section>
+        <div class="head row"><h2>Lanes</h2><span class="faint">last minute</span></div>
+        <div class="lanes" role="img" aria-label="How busy each lane was in the last minute">
+          {#each app.occupancy.lanes as [k, db] (k)}
+            <div class="ln" class:own={BAND_TABS[k]?.khz === app.settings.freqKhz} class:busy={db > 6}>
+              <div class="bar" style="height: {Math.min(100, 6 + db * 5)}%"></div>
+              <span class="mono">{BAND_TABS[k]?.name ?? k}</span>
+            </div>
+          {/each}
+        </div>
+        <p class="faint small">A bar above the line means something else is on that lane. KAHF waits for it.</p>
+      </section>
+    {/if}
     <section data-tour="speed">
       <div class="head row">
         <h2>Speed</h2>
@@ -161,6 +175,11 @@
 </div>
 
 <style>
+  .lanes { display: flex; gap: 8px; align-items: flex-end; height: 90px; padding: 6px 0; }
+  .ln { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 4px; }
+  .ln .bar { width: 100%; background: var(--line-strong, #8a8a8a); min-height: 3px; }
+  .ln.busy .bar { background: var(--accent); }
+  .ln.own span { font-weight: 700; }
   .gate { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border, #888); }
   .gate.bench { border-color: #d29922; background: rgba(210, 153, 34, 0.14); }
   .gate.off { border-color: #8b949e; background: rgba(139, 148, 158, 0.12); }

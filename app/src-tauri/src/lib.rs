@@ -177,6 +177,17 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
     Ok(())
 }
 
+/// How busy each lane the sound card hears was in the last minute: `{ at, lanes: [[lane, dB over floor], ...] }`, or null.
+#[tauri::command]
+fn engine_occupancy(state: State<Shared>) -> Res<Value> {
+    with_engine(&state, |e| {
+        Ok(match e.latest_occupancy() {
+            Some(r) => json!({ "at": r.at_unix, "lanes": r.lanes.iter().map(|(k, db)| json!([k, db])).collect::<Vec<_>>() }),
+            None => Value::Null,
+        })
+    })
+}
+
 /// Whether this station may transmit now: `{ mode: "real" | "bench" | "off", text }`.
 #[tauri::command]
 fn engine_tx_gate(state: State<Shared>) -> Res<Value> {
@@ -536,6 +547,7 @@ pub fn run() {
             detect_sdr,
             engine_modes,
             engine_tx_gate,
+            engine_occupancy,
             rig_available,
             rig_models,
             rig_ports,

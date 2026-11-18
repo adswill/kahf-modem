@@ -7,7 +7,7 @@ import { laneKhzOrDefault } from "./bands";
 import { FILE_LIMIT_BYTES } from "./format";
 import { makeEngine } from "./engine";
 import type {
-  Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile, TxGate,
+  Attachment, Engine, EngineEvent, Heard, LinkState, MailItem, MessageKind, Metrics, ModeInfo, Msg, PickedFile, TxGate, Occupancy,
   RelayInfo, RelayStatus, Settings, VoiceClip,
 } from "./types";
 
@@ -86,6 +86,8 @@ class AppState {
   modes = $state<ModeInfo[]>([]);
   /** Whether sending is allowed now (the transmit gate), refreshed every few seconds. */
   txGate = $state<TxGate>({ mode: "off", text: "" });
+  /** How busy the lanes the radio hears were in the last minute. */
+  occupancy = $state<Occupancy | null>(null);
   log = $state<{ at: number; text: string }[]>([]);
   spectrum = $state<number[]>([]);
   transmitting = $state(false);
@@ -229,6 +231,7 @@ class AppState {
   async refreshGate() {
     try {
       this.txGate = await this.engine.txGate();
+      this.occupancy = await this.engine.occupancy();
     } catch {
       /* the engine is not running yet */
     }
