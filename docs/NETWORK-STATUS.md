@@ -65,7 +65,8 @@ Not built yet (designs are in NETWORK-DESIGN.md, NETWORK-SCENARIOS.md, NETWORK-C
 | 2 Echo bug | fixed | both echo tests pass; four engine bugs found with virtual time (see the commit message) |
 | 3 Band table and lanes | built | `kahf-core/src/lanes.rs`, 10 unit tests; every number of the spec table checked; the built-in table is **not verified** against the current IARU plan, so `permit_tx` refuses everything |
 | 4 Narrow lane mode | built, first version | `kahf-core/src/narrow.rs`: KAMI at one fifth of the chip rate (400 chips/s). Tests: frames decode at three lane centres in two modes; signal below -26 dB outside +-240 Hz. `cargo run --release -p kahf-sim --example lane_leak`: two neighbours 30 dB stronger cost 0 to 2 dB at 700 Hz pitch (KAMI-1c -1, 1a +2, 8 0; 30 frames per point, 1 dB steps, so +-1 dB); 800 Hz pitch gives the same, so the pitch stays 700 Hz (12 lanes) |
-| 5 to 17 | not started | |
+| 5 Lane sensing | built, bench only | `kahf-core/src/lanesense.rs`, 7 tests: per-lane floor, +6 dB rule (+4 dB ignored, +8.5 dB busy), neighbours checked, synthetic voice, FT8-like (15 s cycle), carrier, CW and a KAHF lane frame recognised, quarantine 10 min / 30 min / 2 h, voice blocks lane and neighbours 20 min. Synthetic signals only; never heard a real band. Not yet wired into the engine, and the one-minute whole-segment report to the server is not built |
+| 6 to 17 | not started | |
 
 Measured on the test bench only. Nothing here has been on a real channel.
 
