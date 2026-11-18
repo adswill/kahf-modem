@@ -11,7 +11,7 @@ use std::f64::consts::PI;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -186,6 +186,8 @@ struct Flags {
     listen_only: AtomicBool,
     /// Weak mode: every frame is sent WEAK_COPIES times for stations that cannot reply.
     weak_mode: AtomicBool,
+    /// Index into MODULATIONS of the modulation used for the last burst (shown to the operator).
+    tx_level_shown: AtomicU8,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; no effect yet.
@@ -201,6 +203,7 @@ impl Flags {
             operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
+            tx_level_shown: AtomicU8::new(0),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -302,6 +305,15 @@ impl Engine {
 
     /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
+    /// The modulation used for the most recent transmission: "QPSK", "16QAM" or "64QAM".
+    pub fn transmit_modulation(&self) -> &'static str {
+        match self.shared.flags.tx_level_shown.load(Ordering::SeqCst) {
+            0 => "QPSK",
+            1 => "16QAM",
+            _ => "64QAM",
+        }
+    }
+
     pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
     }
@@ -1485,6 +1497,9 @@ struct Worker {
     link: Link,
     /// Index into MODULATIONS for the next transmission. Moves one step at a time with the peer's reports.
     tx_level: u8,
+    /// Time spent transmitting, left out of the link clock.
+    tick_paused: Duration,
+    last_tick: Instant,
     link_state: LinkState,
     qso: Option<OpenQso>,
     outbox: Outbox,
@@ -1612,6 +1627,8 @@ impl Worker {
             backend: None,
             link: Link::new(&config.callsign),
             tx_level: 0,
+            tick_paused: Duration::ZERO,
+            last_tick: Instant::now(),
             link_state: LinkState::Idle,
             qso: None,
             outbox,
@@ -2205,7 +2222,18 @@ impl Worker {
 
     /// Runs link timers (handshake retries, DATA retransmits) on the monotonic clock.
     fn tick_link(&mut self) {
-        let now_ms = self.started.elapsed().as_millis() as u64;
+        // Link timers run on time the radio is free: while a burst is queued or on the air the
+        // peer cannot answer, so that time does not count towards a retransmit.
+        let now = Instant::now();
+        if self.tx.is_some() || !self.bursts.is_empty() {
+            self.tick_paused += now.saturating_duration_since(self.last_tick);
+        }
+        self.last_tick = now;
+        let now_ms = self
+            .started
+            .elapsed()
+            .saturating_sub(self.tick_paused)
+            .as_millis() as u64;
         match guard("link tick", || self.link.tick(now_ms)) {
             Ok(actions) => {
                 self.tick_error = None;
@@ -2272,6 +2300,10 @@ impl Worker {
             _ => {}
         }
         let m = MODULATIONS[self.tx_level as usize];
+        self.shared
+            .flags
+            .tx_level_shown
+            .store(self.tx_level, Ordering::SeqCst);
         let built = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
             weak_burst(frames)
         } else {
@@ -2430,48 +2462,45 @@ impl Worker {
     /// Finds frames in the RX buffer. Consumed frames leave the buffer. An
     /// incomplete frame stays until more audio arrives.
     fn decode_frames(&mut self) {
-        let longest = MODULATIONS.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
+        let qlen = frame_len_for(Modulation::Qpsk);
+        let weak_stride = qlen + GAP_SILENCE;
+        let weak_span = (WEAK_COPIES - 1) * weak_stride + qlen;
         loop {
             let Some(start) = find_preamble(&self.rx_buf) else {
                 let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
                 self.rx_buf.drain(..keep);
                 return;
             };
-            // Wait until the longest possible frame is in the buffer: the modulation is not known yet.
-            if start + longest > self.rx_buf.len() {
-                self.rx_buf.drain(..start);
-                return;
-            }
+            let avail = self.rx_buf.len() - start;
+            // A frame in any modulation that has fully arrived. Short frames are not held back
+            // waiting for the longest one.
             let mut found = None;
             for &m in &MODULATIONS {
                 let len = frame_len_for(m);
-                if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
-                    found = Some((payload, len));
-                    break;
+                if len <= avail {
+                    if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
+                        found = Some((payload, len));
+                        break;
+                    }
                 }
             }
-            if found.is_none() {
-                // Weak mode: the copies may still be arriving. Wait for all of them, then combine.
-                let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
-                let span = (WEAK_COPIES - 1) * stride + frame_len_for(Modulation::Qpsk);
-                if start + span > self.rx_buf.len() {
-                    self.rx_buf.drain(..start);
-                    return;
-                }
-                if let Some(payload) = decode_combined(&self.rx_buf[start..start + span]) {
-                    self.rx_buf.drain(..start + span);
-                    self.on_frame(payload);
-                    continue;
-                }
-            }
-            let (decoded, used) = match found {
-                Some((payload, len)) => (Some(payload), len),
-                None => (None, frame_len()),
-            };
-            self.rx_buf.drain(..start + used);
-            if let Some(payload) = decoded {
+            if let Some((payload, len)) = found {
+                    self.rx_buf.drain(..start + len);
                 self.on_frame(payload);
+                continue;
             }
+            // Weak mode: the copies may still be arriving. Wait for all of them, then combine.
+            if avail < weak_span {
+                self.rx_buf.drain(..start);
+                return;
+            }
+            if let Some(payload) = decode_combined(&self.rx_buf[start..start + weak_span]) {
+                self.rx_buf.drain(..start + weak_span);
+                self.on_frame(payload);
+                continue;
+            }
+            // Nothing decodes here: step past this preamble.
+            self.rx_buf.drain(..start + qlen);
         }
     }
 
@@ -3178,6 +3207,54 @@ mod tests {
             60,
         );
         assert!(got.is_some(), "message did not arrive");
+    }
+
+    #[test]
+    fn clean_link_steps_up_the_modulation() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir("step-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("step-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        assert_eq!(a.transmit_modulation(), "QPSK");
+        for i in 0..4 {
+            // Give the peer's ACK, which carries its error report, time to come back before
+            // the next burst is built: the level only moves on a report that has arrived.
+            thread::sleep(Duration::from_millis(1500));
+            let text = format!("step {i}");
+            a.send_message("BB1BBB", &text).unwrap();
+            let got = wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if *t == text), 60);
+            if got.is_none() {
+                for ev in b.poll_events() {
+                    eprintln!("B EVENT: {ev:?}");
+                }
+                for ev in a.poll_events() {
+                    eprintln!("A EVENT: {ev:?}");
+                }
+                panic!("step {i} lost at {:?}", a.transmit_modulation());
+            }
+        }
+        // Each clean report from the peer moves the sender one level up.
+        assert_ne!(
+            a.transmit_modulation(),
+            "QPSK",
+            "the link should step up on a clean channel"
+        );
     }
 
     /// One station with a fake radio whose transmit output is `a_to_b`.
