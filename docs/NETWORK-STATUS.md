@@ -109,3 +109,16 @@ Not verified: the real Tauri window was not run in this package; nothing has bee
 | Tests | 7 new daemon tests (gate), 1 settings test | unverified refuses and never keys PTT; verified lane signal passes; dial trap and unknown dial; wide signal refused; test table opens bench only; every burst rechecked; an SDR reports its own dial |
 
 Decision (owner said "you decide"): the bench is defined by the device names (BlackHole) and the absence of rig control or an SDR, so the owner's two-instance bench works with `"testTable": true` in its settings files and no real sound card can use it. Not verified: the real Tauri window.
+
+## WP2 lane sensing before every transmit (2026-11-18, session E)
+
+| Item | State | Evidence |
+|---|---|---|
+| Sensing in the engine | built, bench only | `kahf-daemon/src/lib.rs`: when the radio's dial is a lane dial, a `LaneSense` over the lanes the audio covers (for C1: lanes 5 to 9 less the one too low) is fed all received audio. `pick_channel` asks `own_lane_clear`: the lane and both neighbours quiet (6 dB over their own floor), the lane listened to at least half a second, and not in quarantine. This replaces the old `channel_busy` carrier sense on a lane dial; with no lane dial the old sense still decides |
+| Answers | own lane level skipped | an answer follows the other station's burst on the same lane (300 ms), so only the neighbours and the quarantine are judged for it |
+| Quarantine and classes | wired | every 5 s each covered lane is classified; voice or CW blocks it and its neighbours 20 min, a steady carrier or a 15 s digital signal blocks it 10 min, 30 min, 2 h. Classes are rules tested on synthetic signals only |
+| Noise floor | changed | found by the new tests: the floor was a 30 s minimum, so a foreign signal that stayed longer became the "noise floor" and the lane read clear. The floor is now the lowest half-second of the last 10 minutes (`lanesense.rs`). Limit: a signal already on the lane when KAHF starts, and staying, is seen as floor for the first 10 minutes only if it was there the whole time |
+| Occupancy report | built, queued in memory | once a minute: lane number and dB over floor for each covered lane (at most 12 numbers, no audio). `Engine::take_occupancy()`. Sending it to the server is WP6 and WP7 |
+| Tests | 4 new daemon tests (88 total) | quiet lane passes a message; a noise signal in the lane holds the transmit until it is gone and the message then arrives; noise on the next lane up also holds it; the report names the busy lane and not the quiet one. Background noise is on the test bus (an all-zero bus has an infinite floor) |
+
+Not done or not verified: a voice or CW interferer in an engine test (the class rules are only unit tested), the wide modem still cannot pass the gate on a verified table (WP4), no real band has been heard. The daemon suite now takes about 15 s because the lane tests run long virtual spans.

@@ -23,6 +23,7 @@ use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::lanes::{self as laneplan, BandTable};
+use kahf_core::lanesense::{Class as LaneClass, LaneSense, Quarantine};
 use kahf_core::ldpc;
 mod backbone;
 mod clock;
@@ -289,6 +290,8 @@ struct Flags {
     radio_known: AtomicBool,
     /// Dial the radio itself reports (an SDR knows it), 0 when unknown.
     radio_dial_hz: AtomicU64,
+    /// Occupancy reports waiting for the server link (kept in memory, newest last).
+    occupancy: Mutex<VecDeque<OccupancyReport>>,
 }
 
 /// The transmit gate's settings. The built-in table is **not verified** (`plan_verified` is
@@ -326,6 +329,7 @@ impl Flags {
             bench_radio: AtomicBool::new(false),
             radio_known: AtomicBool::new(false),
             radio_dial_hz: AtomicU64::new(0),
+            occupancy: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -346,6 +350,55 @@ const GATE_NO_DIAL: &str = "Transmit is off: KAHF does not know the radio's dial
 const GATE_NOT_A_LANE: &str = "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
 const GATE_OUTSIDE: &str = "Transmit is off: the signal would not fit inside the lane.";
 const GATE_TEST_REAL: &str = "The test table is on, but this is a real radio. Transmit is off.";
+
+/// One whole-segment report: the lanes the receiver covers and how far over its noise floor
+/// each was (dB, 0 when quiet), 12 numbers at most, no audio (MESH-SPEC 5.5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OccupancyReport {
+    pub at_unix: i64,
+    pub lanes: Vec<(u8, i16)>,
+}
+
+const OCCUPANCY_PERIOD_MS: u64 = 60_000;
+const OCCUPANCY_KEEP: usize = 60;
+/// A lane must have been listened to this long before it can be called clear.
+const SENSE_CLASSIFY_MS: u64 = 5_000;
+
+/// The lanes one receive capture covers, for a given dial.
+struct LaneWatch {
+    dial_hz: u64,
+    /// Lane numbers covered, lowest frequency first, and their audio centres.
+    ks: Vec<u8>,
+    own: usize,
+    sense: LaneSense,
+    classified_ms: u64,
+}
+
+impl LaneWatch {
+    /// `None` unless `dial_hz` is exactly a lane's dial (centre at 1500 Hz of audio).
+    fn new(table: &BandTable, dial_hz: u64) -> Option<Self> {
+        let band = table.band("17m")?;
+        let own_lane = band.lanes.iter().find(|l| l.dial_hz == dial_hz)?;
+        let mut covered: Vec<(&laneplan::Lane, f64)> = band
+            .lanes
+            .iter()
+            .filter_map(|l| {
+                let a = l.centre_hz as f64 - dial_hz as f64;
+                (300.0..=RATE as f64 / 2.0 - 300.0).contains(&a).then_some((l, a))
+            })
+            .collect();
+        covered.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let own = covered.iter().position(|(l, _)| l.k == own_lane.k)?;
+        let centres: Vec<f64> = covered.iter().map(|(_, a)| *a).collect();
+        Some(LaneWatch {
+            dial_hz,
+            ks: covered.iter().map(|(l, _)| l.k).collect(),
+            own,
+            sense: LaneSense::new(&centres),
+            classified_ms: 0,
+        })
+    }
+}
 
 /// Audio span the modem fills today, in Hz (the wide KAMI carriers). The lane mode (480 Hz)
 /// replaces this when it is in the engine.
@@ -507,6 +560,11 @@ impl Engine {
     /// unverified. It has no effect on a real radio, which stays refused.
     pub fn set_test_table(&self, on: bool) {
         lock(&self.shared.flags.policy).test_table = on;
+    }
+
+    /// Hands over the occupancy reports collected so far (one a minute while the dial is a lane).
+    pub fn take_occupancy(&self) -> Vec<OccupancyReport> {
+        lock(&self.shared.flags.occupancy).drain(..).collect()
     }
 
     /// What the transmit gate says now: `("real", "")` when a real radio may transmit,
@@ -1874,6 +1932,12 @@ struct Worker {
     tuned_hz: Option<u64>,
     /// Carrier sense over the receive audio (plan 2.1).
     sense: Sense,
+    /// Lane sensing (MESH-SPEC 5.5) for the lanes the receive audio covers. `None` until the
+    /// radio's dial is a lane dial; then it decides every transmit instead of `channel_busy`.
+    lanes: Option<LaneWatch>,
+    quarantine: Quarantine,
+    /// Next whole-segment occupancy report, on the worker clock (ms).
+    occupancy_due_ms: u64,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -2064,6 +2128,9 @@ impl Worker {
             freq_mhz,
             tuned_hz,
             sense: Sense::new(RATE as f32),
+            lanes: None,
+            quarantine: Quarantine::default(),
+            occupancy_due_ms: OCCUPANCY_PERIOD_MS,
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
             carrier_fed: None,
@@ -2731,6 +2798,78 @@ impl Worker {
         (0.0..RATE as f64 / 2.0).contains(&off).then_some(off as f32)
     }
 
+    /// The dial the radio is on, if known.
+    fn current_dial(&self) -> Option<u64> {
+        let f = &self.shared.flags;
+        let radio = f.radio_dial_hz.load(Ordering::SeqCst);
+        lock(&f.policy).dial_hz.or((radio != 0).then_some(radio))
+    }
+
+    /// Keeps the lane watch matched to the dial and feeds it the fresh audio.
+    fn lane_feed(&mut self, fresh: &[f32]) {
+        let dial = self.current_dial();
+        if self.lanes.as_ref().map(|w| w.dial_hz) != dial {
+            self.lanes = dial.and_then(|d| LaneWatch::new(&lock(&self.shared.flags.policy).table, d));
+        }
+        let Some(w) = self.lanes.as_mut() else { return };
+        w.sense.push(fresh);
+        let now_ms = self.clock.since(self.started).as_millis() as u64;
+        let now_s = now_ms / 1000;
+        // Foreign users are found by what they are, then kept out of for a while.
+        if now_ms >= w.classified_ms + SENSE_CLASSIFY_MS {
+            w.classified_ms = now_ms;
+            for (i, k) in w.ks.clone().into_iter().enumerate() {
+                match w.sense.classify(i) {
+                    LaneClass::Voice | LaneClass::Cw => self.quarantine.human(k as usize, now_s),
+                    LaneClass::Carrier | LaneClass::Digital15s => self.quarantine.occupied(k as usize, now_s),
+                    LaneClass::Quiet | LaneClass::Unknown => {}
+                }
+            }
+        }
+        if now_ms >= self.occupancy_due_ms {
+            self.occupancy_due_ms = now_ms + OCCUPANCY_PERIOD_MS;
+            let lanes = w
+                .ks
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (*k, w.sense.over_db(i).map_or(0, |o| o.round() as i16)))
+                .collect();
+            let mut q = lock(&self.shared.flags.occupancy);
+            q.push_back(OccupancyReport { at_unix: now_unix_secs(), lanes });
+            while q.len() > OCCUPANCY_KEEP {
+                q.pop_front();
+            }
+        }
+    }
+
+    /// Listen before talk on the lane the radio is on (MESH-SPEC 5.5): the lane and both
+    /// neighbours must be quiet (6 dB rule), the lane must have been listened to, and it must
+    /// not be in quarantine. `None` while the dial is not a lane dial (the older carrier sense
+    /// then decides).
+    fn own_lane_clear(&mut self, answer: bool) -> Option<Result<(), String>> {
+        let now_s = self.clock.since(self.started).as_secs();
+        let w = self.lanes.as_ref()?;
+        let k = w.ks[w.own];
+        if w.sense.floor_db(w.own).is_none() {
+            return Some(Err("Listening to the lane before sending.".to_string()));
+        }
+        if self.quarantine.blocked(k as usize, now_s) {
+            return Some(Err(format!("Lane {} is in quarantine: someone else was using it.", k + 1)));
+        }
+        let (lo, hi) = (w.own.saturating_sub(1), (w.own + 1).min(w.ks.len() - 1));
+        for j in lo..=hi {
+            // An answer follows the other station's burst on this very lane, which is still
+            // in the last half second of level: only the neighbours are judged then.
+            if answer && j == w.own {
+                continue;
+            }
+            if let Some(over) = w.sense.over_db(j) {
+                return Some(Err(format!("Lane {} is busy ({over:.0} dB over its noise floor).", w.ks[j] + 1)));
+            }
+        }
+        Some(Ok(()))
+    }
+
     /// Carrier sense for one plan channel (plan 2.1). A channel outside the receive audio
     /// cannot be measured, so it is not called busy.
     fn channel_busy(&self, channel_hz: f32) -> bool {
@@ -2815,8 +2954,17 @@ impl Worker {
         } else {
             select::Pool::Open
         };
+        let own = self.own_lane_clear(answer);
+        if let Some(Err(why)) = &own {
+            self.log(why.clone());
+        }
         let pick = {
-            let busy = |f: f32| self.channel_busy(f);
+            // On a lane dial the verdict is about the lane the radio is on; otherwise the
+            // older per-channel carrier sense decides.
+            let busy = |f: f32| match &own {
+                Some(verdict) => verdict.is_err(),
+                None => self.channel_busy(f),
+            };
             select::choose_in_pool(
                 &self.plan,
                 pool,
@@ -3450,6 +3598,7 @@ impl Worker {
         self.rx_buf.extend_from_slice(&fresh);
 
         self.sense.push(&fresh);
+        self.lane_feed(&fresh);
         self.spec.push(&fresh);
         let now = self.clock.now();
         if now >= self.spec_due {
@@ -5151,6 +5300,149 @@ mod tests {
     fn an_sdr_knows_its_own_dial_and_a_blackhole_pair_is_a_bench() {
         let spec = parse_sdr("hackrf@18113440").unwrap();
         assert_eq!(SdrBackend::new(spec).dial_hz(), Some(C1_DIAL_HZ));
+    }
+
+    // ---- lane sensing (WP2) ------------------------------------------------------------------
+
+    /// As `bus_engines`, with the radios on the C1 lane dial so that lane sensing is on, and the
+    /// bus returned so a test can put interferers on it.
+    fn lane_engines(tag: &str, calls: &[&str]) -> (Vec<Engine>, Arc<Bus>) {
+        // A real receiver always hears some noise: a bus of exact zeros has a floor of minus
+        // infinity and would make every leak look like a strong signal.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let noise: Vec<f32> = (0..700 * RATE as usize)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((x >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.004
+            })
+            .collect();
+        let bus = Arc::new(Bus { line: Mutex::new(noise) });
+        let clock = Clock::virtual_time();
+        clock.join_thread();
+        let engines = calls
+            .iter()
+            .map(|call| {
+                let (b, c) = (bus.clone(), clock.clone());
+                let start = clock.now();
+                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { bus: b.clone(), clock: c.clone(), start, delivered: 0, tx_base: 0 }) as Box<dyn Backend>));
+                let mut e = Engine::spawn_with_clock(config(call, temp_dir(&format!("{tag}-{call}"))), factory, clock.clone()).unwrap();
+                e.set_dial_hz(Some(C1_DIAL_HZ));
+                e.listen().unwrap();
+                e.set_auto_link(true);
+                e.set_fixed_mode("KAMI-1c").unwrap();
+                e
+            })
+            .collect();
+        (engines, bus)
+    }
+
+    /// Band-limited noise of about +-200 Hz around `centre_hz` of audio from second `from` to `to`
+    /// (a foreign signal that is not KAHF and not a steady tone).
+    fn put_noise(bus: &Bus, centre_hz: f64, from: u64, to: u64) {
+        let (a, z) = (from as usize * RATE as usize, to as usize * RATE as usize);
+        let mut line = bus.line.lock().unwrap();
+        if line.len() < z {
+            line.resize(z, 0.0);
+        }
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let tones: Vec<(f64, f64)> = (0..40)
+            .map(|i| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (centre_hz - 200.0 + 10.0 * i as f64, (x >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU)
+            })
+            .collect();
+        for (n, v) in line[a..z].iter_mut().enumerate() {
+            let t = (a + n) as f64 / RATE as f64;
+            *v += tones.iter().map(|(f, ph)| (std::f64::consts::TAU * f * t + ph).sin()).sum::<f64>() as f32 * 0.02;
+        }
+    }
+
+    /// Runs the engines for `secs` virtual seconds. Returns when engine 0 started each burst
+    /// (seconds from the start) and what was received.
+    fn run_lane(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[(usize, String, String)]) -> bool) -> (Vec<f32>, Vec<(usize, String, String)>) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let (mut starts, mut got) = (Vec::new(), Vec::new());
+        while clock.now() < t0 + Duration::from_secs(secs) && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    match ev {
+                        Event::Tx { state: TxState::Starting } if i == 0 => starts.push(clock.since(t0).as_secs_f32()),
+                        Event::Message { from, text } => got.push((i, from, text)),
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        (starts, got)
+    }
+
+    fn send_at(engines: &mut [Engine], secs: u64) {
+        let clock = engines[0].clock.clone();
+        clock.sleep(Duration::from_secs(secs));
+        engines[0].send_message("BB1BBB", "hello").unwrap();
+    }
+
+    #[test]
+    fn lane_sensing_lets_a_message_through_on_a_quiet_lane() {
+        let (mut e, _bus) = lane_engines("lane-quiet", &["AA1AAA", "BB1BBB"]);
+        send_at(&mut e, 10);
+        let (starts, got) = run_lane(&mut e, 120, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the message did not arrive on a quiet lane");
+        assert!(!starts.is_empty());
+    }
+
+    #[test]
+    fn a_foreign_signal_in_the_lane_holds_the_transmit_until_it_is_gone() {
+        let (mut e, bus) = lane_engines("lane-jam", &["AA1AAA", "BB1BBB"]);
+        put_noise(&bus, 1500.0, 20, 100);
+        send_at(&mut e, 30); // queued while the lane is jammed
+        let (starts, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the message never arrived after the lane cleared");
+        // The clock started at the engine's spawn, the send call came after 30 s of sleep.
+        let first = starts.first().copied().expect("no transmission");
+        assert!(first >= 70.0, "transmitted on a jammed lane: first burst at {first} s (jam ends at 100 s from the start)");
+    }
+
+    #[test]
+    fn a_foreign_signal_on_a_neighbour_lane_also_holds_the_transmit() {
+        let (mut e, bus) = lane_engines("lane-neighbour", &["AA1AAA", "BB1BBB"]);
+        // Lane C1 is at 1500 Hz of audio; the next lane up is at 2200 Hz.
+        put_noise(&bus, 2200.0, 20, 100);
+        send_at(&mut e, 30);
+        let (starts, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+        assert_eq!(got.len(), 1);
+        let first = starts.first().copied().expect("no transmission");
+        assert!(first >= 70.0, "transmitted beside a jammed neighbour lane: first burst at {first} s");
+    }
+
+    #[test]
+    fn occupancy_reports_name_the_busy_lane_once_a_minute() {
+        let (mut e, bus) = lane_engines("lane-report", &["AA1AAA"]);
+        put_noise(&bus, 2200.0, 30, 200);
+        test_clock_sleep_engines(&mut e, 190);
+        let reports = e[0].take_occupancy();
+        assert!(reports.len() >= 2, "{reports:?}");
+        let last = reports.last().unwrap();
+        // Lane index 6 (C2) is at 2200 Hz when the radio is on C1 (lane 5).
+        let c2 = last.lanes.iter().find(|(k, _)| *k == 6).expect("lane 6 missing");
+        assert!(c2.1 > 6, "the jammed lane was reported quiet: {last:?}");
+        let c1 = last.lanes.iter().find(|(k, _)| *k == 5).unwrap();
+        assert!(c1.1 <= 6, "the quiet lane was reported busy: {last:?}");
+        assert!(last.lanes.len() <= 12);
+    }
+
+    /// Lets virtual time pass while the engines run (events are drained so the queue stays small).
+    fn test_clock_sleep_engines(engines: &mut [Engine], secs: u64) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        while clock.now() < t0 + Duration::from_secs(secs) {
+            for e in engines.iter_mut() {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

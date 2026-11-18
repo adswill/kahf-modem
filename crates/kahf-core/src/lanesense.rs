@@ -22,6 +22,9 @@ const BINS: usize = 61;
 const LANE_BINS: std::ops::RangeInclusive<usize> = 6..=54;
 const HISTORY: usize = 400;
 const FLOOR_FRAMES: usize = 300;
+/// The noise floor is the lowest half-second level of the last 10 minutes, kept as 20 minima of 30 s
+/// each, so a foreign signal that stays on the lane is not mistaken for the noise floor.
+const SLOW_BUCKETS: usize = 20;
 pub const BUSY_OVER_DB: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +53,14 @@ pub struct LaneSense {
     window: Vec<f32>,
     pending: Vec<f32>,
     hist: Vec<VecDeque<Frame>>,
+    slow: Vec<Slow>,
+}
+
+#[derive(Default)]
+struct Slow {
+    cur: Option<f32>,
+    frames: usize,
+    done: VecDeque<f32>,
 }
 
 impl LaneSense {
@@ -74,6 +85,7 @@ impl LaneSense {
             window,
             pending: Vec::new(),
             hist: centres.iter().map(|_| VecDeque::new()).collect(),
+            slow: centres.iter().map(|_| Slow::default()).collect(),
         }
     }
 
@@ -107,6 +119,19 @@ impl LaneSense {
                 if h.len() > HISTORY {
                     h.pop_front();
                 }
+                if h.len() >= 5 {
+                    let m = mean(h.iter().rev().take(5).map(|f| f.db));
+                    let sl = &mut self.slow[k];
+                    sl.cur = Some(sl.cur.map_or(m, |c| c.min(m)));
+                    sl.frames += 1;
+                    if sl.frames >= FLOOR_FRAMES {
+                        sl.done.push_back(sl.cur.take().unwrap_or(m));
+                        sl.frames = 0;
+                        while sl.done.len() > SLOW_BUCKETS {
+                            sl.done.pop_front();
+                        }
+                    }
+                }
             }
         }
     }
@@ -117,13 +142,10 @@ impl LaneSense {
         (h.len() >= 5).then(|| mean(h.iter().rev().take(5).map(|f| f.db)))
     }
 
-    /// Noise floor of lane `k`: the lowest half-second level of the last 30 s.
+    /// Noise floor of lane `k`: the lowest half-second level of the last 10 minutes.
     pub fn floor_db(&self, k: usize) -> Option<f32> {
-        let v: Vec<f32> = self.hist[k].iter().rev().take(FLOOR_FRAMES).map(|f| f.db).collect();
-        if v.len() < 5 {
-            return None;
-        }
-        v.windows(5).map(|w| mean(w.iter().copied())).reduce(f32::min)
+        let sl = &self.slow[k];
+        sl.done.iter().copied().chain(sl.cur).reduce(f32::min)
     }
 
     /// How far above its floor lane `k` is, when that is over the busy limit.
