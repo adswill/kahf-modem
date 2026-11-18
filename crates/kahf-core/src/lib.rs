@@ -15,6 +15,7 @@ pub mod lanes;
 pub mod ldpc_std;
 pub mod link;
 pub mod mac;
+pub mod narrow;
 #[cfg(test)]
 pub mod sim;
 pub mod marker;
