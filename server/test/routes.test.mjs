@@ -120,8 +120,9 @@ test("GET /map: the CSP allows the one inline script by hash, and only the map's
   assert.ok(csp.includes(`'sha256-${hash}'`), `CSP should allow the script hash: ${csp}`);
   assert.doesNotMatch(csp, /'unsafe-eval'|script-src[^;]*'unsafe-inline'|script-src[^;]*\*/);
   assert.match(csp, /script-src [^;]*https:\/\/unpkg\.com/);
-  assert.match(csp, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
-  assert.match(csp, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
+  assert.match(csp, /connect-src 'self';/);
+  assert.match(csp, /img-src 'self' data: blob:;/);
+  assert.doesNotMatch(csp, /tile\.openstreetmap/);
 });
 
 test("GET /map with no reports still answers with a valid page", async () => {
@@ -488,5 +489,68 @@ test("an unexpected failure returns a plain JSON 500 with no details", async () 
     assert.doesNotMatch(String(log.mock.calls[0].arguments.join(" ")), /secret/);
   } finally {
     mock.restoreAll();
+  }
+});
+
+// ---- map tile proxy ---------------------------------------------------------
+
+function tileOptions(calls, reply) {
+  const stash = new Map();
+  return {
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return reply();
+    },
+    tileCache: {
+      match: async (req) => stash.get(req.url)?.clone(),
+      put: async (req, res) => void stash.set(req.url, res),
+    },
+  };
+}
+
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+const okTile = () => new Response(PNG, { headers: { "content-type": "image/png" } });
+
+test("GET /tiles/z/x/y.png fetches from OpenStreetMap with a KAHF user agent and caches", async () => {
+  const calls = [];
+  const options = tileOptions(calls, okTile);
+  const res = await handleRequest(new Request(`${BASE}/tiles/3/4/2.png`), fakeStore(), NOW, options);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.match(res.headers.get("cache-control"), /max-age=604800/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual([...new Uint8Array(await res.arrayBuffer())], [...PNG]);
+  assert.equal(calls[0].url, "https://tile.openstreetmap.org/3/4/2.png");
+  assert.match(calls[0].init.headers["user-agent"], /^KAHF-live-map\//);
+  const again = await handleRequest(new Request(`${BASE}/tiles/3/4/2.png`), fakeStore(), NOW, options);
+  assert.equal(again.status, 200);
+  assert.equal(calls.length, 1, "second request comes from the cache");
+});
+
+test("tile requests outside the grid or the allowed shape are refused without calling out", async () => {
+  const calls = [];
+  const options = tileOptions(calls, okTile);
+  for (const path of ["/tiles/20/0/0.png", "/tiles/2/4/0.png", "/tiles/2/0/4.png", "/tiles/1/0/0.jpg", "/tiles/a/b/c.png", "/tiles/../x.png"]) {
+    const res = await handleRequest(new Request(`${BASE}${path}`), fakeStore(), NOW, options);
+    assert.ok([404].includes(res.status), `${path} gave ${res.status}`);
+  }
+  const post = await handleRequest(new Request(`${BASE}/tiles/1/0/0.png`, { method: "POST" }), fakeStore(), NOW, options);
+  assert.equal(post.status, 405);
+  assert.equal(calls.length, 0);
+});
+
+test("a failing, wrong-type or oversize upstream tile gives a plain 502", async () => {
+  for (const reply of [
+    () => new Response("no", { status: 403, headers: { "content-type": "text/plain" } }),
+    () => new Response("<html>", { headers: { "content-type": "text/html" } }),
+    () => new Response(new Uint8Array(300_000), { headers: { "content-type": "image/png" } }),
+    () => {
+      throw new Error("down");
+    },
+  ]) {
+    const options = tileOptions([], reply);
+    const res = await handleRequest(new Request(`${BASE}/tiles/1/0/0.png`), fakeStore(), NOW, options);
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { error: "tile unavailable" });
   }
 });

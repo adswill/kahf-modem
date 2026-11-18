@@ -170,7 +170,7 @@ const LIVE = String.raw`
       container: mapEl,
       style: {
         version: 8,
-        sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256,
+        sources: { osm: { type: "raster", tiles: [window.location.origin + "/tiles/{z}/{x}/{y}.png"], tileSize: 256,
           attribution: "© OpenStreetMap contributors" } },
         layers: [{ id: "osm", type: "raster", source: "osm" }]
       },
