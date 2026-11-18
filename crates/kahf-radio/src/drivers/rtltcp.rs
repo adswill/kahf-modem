@@ -597,7 +597,7 @@ mod tests {
         expected.extend_from_slice(&command_bytes(CMD_AGC, 1));
         assert_eq!(sent, expected);
 
-        let mut out = vec![(0.0f32, 0.0f32); 8];
+        let mut out = [(0.0f32, 0.0f32); 8];
         let mut total = 0;
         while total < 8 {
             total += r.read_iq(&mut out[total..]).unwrap();

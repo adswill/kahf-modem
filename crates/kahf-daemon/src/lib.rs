@@ -94,12 +94,20 @@ pub enum TxState {
 // Constants
 // ---------------------------------------------------------------------------
 
-const MODULATION: Modulation = Modulation::Qpsk;
+/// Default transmit modulation: KAMI-32, the bottom rung of the ladder (see `MODULATIONS`).
+const MODULATION: Modulation = Modulation::Kami32;
+/// The OFDM modulation whose sync preamble the stream search looks for.
+const OFDM_PROBE: Modulation = Modulation::Qpsk;
 const LDPC_ITER: usize = 50;
 /// Largest payload one link frame carries (see frame::build_payload).
 const MAX_CHUNK: usize = 36;
 /// Preamble symbol length in audio samples (FFT 256 + cyclic prefix 32).
 const PREAMBLE_LEN: usize = 288;
+/// New samples between KAMI stream searches (0.75 s).
+const KAMI_STEP: usize = RATE as usize * 3 / 4;
+/// Audio searched for one KAMI-32 frame: the frame plus the search step, so every frame lies
+/// wholly inside at least one window.
+const KAMI_WINDOW: usize = kahf_core::kami::PRE + 135 * kahf_core::kami::L + KAMI_STEP;
 const PREAMBLE_THRESHOLD: f64 = 0.5;
 const LEAD_SILENCE: usize = RATE as usize / 5; // lets PTT and VOX settle
 const GAP_SILENCE: usize = RATE as usize / 10;
@@ -305,11 +313,14 @@ impl Engine {
 
     /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
-    /// The modulation used for the most recent transmission: "QPSK", "16QAM" or "64QAM".
+    /// The modulation used for the most recent transmission: "KAMI-32", "QPSK", "16QAM" or "64QAM".
     pub fn transmit_modulation(&self) -> &'static str {
         match self.shared.flags.tx_level_shown.load(Ordering::SeqCst) {
-            0 => "QPSK",
-            1 => "16QAM",
+            0 => "KAMI-32",
+            1 => "KAMI-16",
+            2 => "KAMI-8",
+            3 => "QPSK",
+            4 => "16QAM",
             _ => "64QAM",
         }
     }
@@ -1005,21 +1016,55 @@ fn sdr_iq_range(x: &[f32], m0: usize, m1: usize) -> Vec<(f32, f32)> {
 // Frame layer helpers (PHY + LDPC + frame), shared by TX and RX
 // ---------------------------------------------------------------------------
 
-/// The modulations a frame can use, in the order the receiver tries them.
-/// The id in the frame (0, 1, 2) is the index in this list.
-const MODULATIONS: [Modulation; 3] = [Modulation::Qpsk, Modulation::Qam16, Modulation::Qam64];
+/// The modulation ladder, lowest rung first: the transmit level indexes this list.
+/// The id carried in the frame is fixed per mode (`mod_id`), so the order here is free.
+const MODULATIONS: [Modulation; 6] = [
+    Modulation::Kami32,
+    Modulation::Kami16,
+    Modulation::Kami8,
+    Modulation::Qpsk,
+    Modulation::Qam16,
+    Modulation::Qam64,
+];
 
+/// The KAMI modes, longest frame first. They share one preamble, so one search finds any of them.
+const KAMI_MODES: [Modulation; 3] = [Modulation::Kami32, Modulation::Kami16, Modulation::Kami8];
+
+/// Wire id of a modulation, in the frame's id field. QPSK, 16QAM and 64QAM keep 0, 1 and 2.
 fn mod_id(m: Modulation) -> u8 {
-    MODULATIONS.iter().position(|&x| x == m).unwrap_or(0) as u8
+    match m {
+        Modulation::Qpsk => 0,
+        Modulation::Qam16 => 1,
+        Modulation::Qam64 => 2,
+        Modulation::Kami32 => kahf_core::kami::ID,
+        Modulation::Kami16 => kahf_core::kami::ID16,
+        Modulation::Kami8 => kahf_core::kami::ID8,
+    }
+}
+
+fn mod_level(m: Modulation) -> usize {
+    MODULATIONS.iter().position(|&x| x == m).unwrap_or(0)
 }
 
 /// Samples of one zero-payload frame at the transmit modulation. Used to find the preamble.
 fn frame_template() -> &'static [f32] {
     static FRAME: OnceLock<Vec<f32>> = OnceLock::new();
-    FRAME.get_or_init(|| phy::modulate_frame(&vec![0u8; ldpc::N], MODULATION))
+    FRAME.get_or_init(|| phy::modulate_frame(&vec![0u8; ldpc::N], OFDM_PROBE))
 }
 
 /// Samples of one zero-payload frame in the given modulation.
+/// Searches `audio` for one whole KAMI frame of any size. Returns where it ends and its payload.
+fn kami_scan(audio: &[f32]) -> Option<(usize, Vec<u8>)> {
+    let sizes: Vec<usize> = KAMI_MODES.iter().filter_map(|m| m.kami_bps()).collect();
+    let (start, tries) = kahf_core::kami::locate_and_demodulate_multi(audio, ldpc::N, &sizes)?;
+    tries.into_iter().find_map(|(bps, llr)| {
+        let m = *KAMI_MODES.iter().find(|m| m.kami_bps() == Some(bps))?;
+        let info = ldpc::decode(&llr, LDPC_ITER)?;
+        let (data, id) = frame::parse_payload_id(&info)?;
+        (id == mod_id(m)).then_some((start + frame_len_for(m), data))
+    })
+}
+
 fn frame_len_for(m: Modulation) -> usize {
     static LENS: OnceLock<Vec<usize>> = OnceLock::new();
     let lens = LENS.get_or_init(|| {
@@ -1028,13 +1073,13 @@ fn frame_len_for(m: Modulation) -> usize {
             .map(|&x| phy::modulate_frame(&vec![0u8; ldpc::N], x).len())
             .collect()
     });
-    lens[mod_id(m) as usize]
+    lens[mod_level(m)]
 }
 
 /// Samples of one frame at the transmit modulation.
 #[cfg(test)]
 fn frame_len() -> usize {
-    frame_len_for(MODULATION)
+    frame_len_for(OFDM_PROBE)
 }
 
 /// One frame, sent with the given modulation. The frame carries the modulation id.
@@ -1512,6 +1557,8 @@ struct Worker {
     control: VecDeque<Vec<Vec<u8>>>,
     tx: Option<TxJob>,
     rx_buf: Vec<f32>,
+    /// Samples since the last KAMI-32 stream search.
+    since_kami: usize,
     spec: Analyser,
     spec_due: Instant,
     since_scan: usize,
@@ -1627,7 +1674,7 @@ impl Worker {
             callsign: config.callsign.clone(),
             backend: None,
             link: Link::new(&config.callsign),
-            tx_level: 0,
+            tx_level: mod_level(MODULATION) as u8,
             tick_paused: Duration::ZERO,
             last_tick: Instant::now(),
             link_state: LinkState::Idle,
@@ -1639,6 +1686,7 @@ impl Worker {
             control: VecDeque::new(),
             tx: None,
             rx_buf: Vec::new(),
+            since_kami: 0,
             spec: Analyser::new(SPEC_FFT, RATE as f32),
             spec_due: Instant::now(),
             since_scan: 0,
@@ -2445,6 +2493,7 @@ impl Worker {
         }
 
         self.since_scan += n;
+        self.since_kami += n;
         if self.since_scan >= SCAN_HOP {
             self.since_scan = 0;
             self.decode_frames();
@@ -2468,7 +2517,12 @@ impl Worker {
         let weak_span = (WEAK_COPIES - 1) * weak_stride + qlen;
         loop {
             let Some(start) = find_preamble(&self.rx_buf) else {
-                let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
+                // No OFDM preamble. A KAMI-32 frame is found by its own search, so enough audio
+                // for one (plus the search step) stays in the buffer.
+                if self.try_kami() {
+                    continue;
+                }
+                let keep = self.rx_buf.len().saturating_sub(KAMI_WINDOW.max(PREAMBLE_LEN));
                 self.rx_buf.drain(..keep);
                 return;
             };
@@ -2477,6 +2531,9 @@ impl Worker {
             // waiting for the longest one.
             let mut found = None;
             for &m in &MODULATIONS {
+                if m.kami_bps().is_some() {
+                    continue; // found by its own search, not by the OFDM preamble
+                }
                 let len = frame_len_for(m);
                 if len <= avail {
                     if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
@@ -2502,6 +2559,29 @@ impl Worker {
             }
             // Nothing decodes here: step past this preamble.
             self.rx_buf.drain(..start + qlen);
+        }
+    }
+
+    /// KAMI-32 stream search. Every KAMI_STEP new samples, the last KAMI_WINDOW samples are
+    /// searched for a whole frame (joint start and frequency search). A decoded frame, and the
+    /// audio before its end, leave the buffer. Returns true when a frame was delivered.
+    fn try_kami(&mut self) -> bool {
+        let shortest = KAMI_MODES.iter().map(|&m| frame_len_for(m)).min().unwrap_or(0);
+        if self.since_kami < KAMI_STEP || self.rx_buf.len() < shortest {
+            return false;
+        }
+        self.since_kami = 0;
+        let from = self.rx_buf.len().saturating_sub(KAMI_WINDOW);
+        let found = kami_scan(&self.rx_buf[from..]).map(|(end, data)| (from + end, data));
+        match found {
+            Some((end, payload)) => {
+                self.rx_buf.drain(..end);
+                // The next frame of a burst may already be buffered: look again at once.
+                self.since_kami = KAMI_STEP;
+                self.on_frame(payload);
+                true
+            }
+            None => false,
         }
     }
 
@@ -2944,7 +3024,7 @@ mod tests {
         assert_eq!(frame_template()[..PREAMBLE_LEN].len(), PREAMBLE_LEN);
         let payload = b"hello kahf".to_vec();
         let mut air = vec![0f32; 1234];
-        air.extend(burst(&[payload.clone()], MODULATION).unwrap());
+        air.extend(burst(std::slice::from_ref(&payload), OFDM_PROBE).unwrap());
         air.extend(vec![0f32; 500]);
         let start = find_preamble(&air).expect("preamble found");
         let expected = 1234 + LEAD_SILENCE;
@@ -2952,14 +3032,30 @@ mod tests {
             start.abs_diff(expected) <= 1,
             "start {start}, expected {expected}"
         );
-        let got = decode_at(&air[start..start + frame_len()], MODULATION).expect("frame decodes");
+        let got = decode_at(&air[start..start + frame_len()], OFDM_PROBE).expect("frame decodes");
         assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn every_kami_mode_is_found_and_decoded() {
+        for m in KAMI_MODES {
+            let payload = format!("hello {m:?}").into_bytes();
+            let mut air = vec![0f32; 777];
+            air.extend(burst(std::slice::from_ref(&payload), m).unwrap());
+            air.extend(vec![0f32; 300]);
+            let (end, got) = kami_scan(&air).unwrap_or_else(|| panic!("{m:?} not found"));
+            assert_eq!(got, payload, "{m:?}");
+            assert_eq!(end, 777 + LEAD_SILENCE + frame_len_for(m), "{m:?} end");
+        }
+        // Faster modes have shorter frames.
+        assert!(frame_len_for(Modulation::Kami8) < frame_len_for(Modulation::Kami16));
+        assert!(frame_len_for(Modulation::Kami16) < frame_len_for(Modulation::Kami32));
     }
 
     #[test]
     fn back_to_back_frames_decode_in_order() {
         let payloads: Vec<Vec<u8>> = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
-        let air = burst(&payloads, MODULATION).unwrap();
+        let air = burst(&payloads, OFDM_PROBE).unwrap();
         let flen = frame_len();
         let mut pos = 0;
         let mut got = Vec::new();
@@ -2968,7 +3064,7 @@ mod tests {
             if start + flen > air.len() {
                 break;
             }
-            got.push(decode_at(&air[start..start + flen], MODULATION).expect("frame decodes"));
+            got.push(decode_at(&air[start..start + flen], OFDM_PROBE).expect("frame decodes"));
             pos = start + flen;
         }
         assert_eq!(got, payloads);
@@ -2977,7 +3073,7 @@ mod tests {
     #[test]
     fn weak_mode_decodes_where_one_copy_does_not() {
         let payload = b"weak mode".to_vec();
-        let clean = weak_burst(&[payload.clone()]).expect("weak burst builds");
+        let clean = weak_burst(std::slice::from_ref(&payload)).expect("weak burst builds");
         // The first copy starts after the lead-in silence.
         let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
         let copy_at = |i: usize| LEAD_SILENCE + i * stride;
@@ -3232,7 +3328,7 @@ mod tests {
             60
         )
         .is_some());
-        assert_eq!(a.transmit_modulation(), "QPSK");
+        assert_eq!(a.transmit_modulation(), "KAMI-32");
         for i in 0..4 {
             // Give the peer's ACK, which carries its error report, time to come back before
             // the next burst is built: the level only moves on a report that has arrived.
@@ -3253,7 +3349,7 @@ mod tests {
         // Each clean report from the peer moves the sender one level up.
         assert_ne!(
             a.transmit_modulation(),
-            "QPSK",
+            "KAMI-32",
             "the link should step up on a clean channel"
         );
     }
@@ -3713,7 +3809,7 @@ mod tests {
 
     #[test]
     fn relay_schedule_is_checked_and_held_outside_transmit_slots() {
-        let mut w = bare_worker("relay-gate", "AA1AAA");
+        let w = bare_worker("relay-gate", "AA1AAA");
         let now = now_unix_secs() as u64;
         let transmit = |start: u64| Slot {
             channel_khz: 14_000.0,
@@ -3785,7 +3881,7 @@ mod tests {
     #[test]
     fn relay_start_needs_both_acknowledgements() {
         let dir = temp_dir("relay-ack");
-        let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
+        let e = Engine::new(config("AA1AAA", dir)).unwrap();
         // No role yet: refused with a plain message.
         let both = RelayAck {
             licence_held: true,
@@ -3821,7 +3917,7 @@ mod tests {
     fn relay_start_is_per_run_and_not_saved() {
         let dir = temp_dir("relay-per-run");
         {
-            let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
+            let e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
             e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
                 .unwrap();
             e.start_relay(RelayAck {
@@ -3831,7 +3927,7 @@ mod tests {
             .unwrap();
         }
         // A new run starts with relay mode off, whatever the old run had.
-        let mut again = Engine::new(config("AA1AAA", dir)).unwrap();
+        let again = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(!again.relay_running());
         again
             .configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])

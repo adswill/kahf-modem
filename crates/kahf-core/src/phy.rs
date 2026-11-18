@@ -22,12 +22,43 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
+    /// KAMI-32 real Walsh signalling (see `kami`), the bottom rung of the ladder (frame id 3).
+    /// It is not an OFDM mode: `modulate_frame` / `demodulate_frame` hand it to `kami`.
+    Kami32,
+    /// KAMI-16: 4 bits per 16-chip Walsh symbol, 2000 bit/s raw (frame id 4).
+    Kami16,
+    /// KAMI-8: 3 bits per 8-chip Walsh symbol, 3000 bit/s raw (frame id 5).
+    Kami8,
     Qpsk,
     Qam16,
     Qam64,
 }
 
+impl Modulation {
+    /// Bits per Walsh symbol for the KAMI modes, None for the OFDM modes.
+    pub fn kami_bps(self) -> Option<usize> {
+        match self {
+            Modulation::Kami32 => Some(5),
+            Modulation::Kami16 => Some(4),
+            Modulation::Kami8 => Some(3),
+            _ => None,
+        }
+    }
+}
+
+/// SNR (dB, per real sample) below which KAMI-32 is chosen over QPSK. KAMI-32 clears 1 percent
+/// frame loss near -5 dB, QPSK only above this point (1 percent loss near 1 dB on awgn, measured 100 frames per point, see the
+/// integration report); above it QPSK is faster (about 0.36 s a frame against 0.65 s).
+pub const QPSK_FLOOR_DB: f32 = 1.0;
+
+/// SNR (dB) from which KAMI-16 (2000 bit/s, 0.46 s a frame) is chosen over KAMI-32: it clears
+/// 1 percent frame loss near -2 dB (100 frames per point, awgn). KAMI-8 clears it near +1 dB and is
+/// no faster than QPSK (0.35 s against 0.36 s), so the SNR chooser never picks it; it stays on
+/// the link ladder.
+pub const KAMI16_FLOOR_DB: f32 = -2.0;
+
 /// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`).
+/// The ladder, lowest rung first: KAMI-32, QPSK, 16QAM, 64QAM.
 /// Thresholds are the lowest 0.5 dB points where the frame error rate of the mode
 /// is below 1 percent (1000 frames per point, unit-power PHY, LDPC 50 iterations).
 /// 16QAM first clears 1 percent at 6.5 dB; 64QAM at 10.5 dB.
@@ -36,8 +67,12 @@ pub fn choose_modulation(snr_db: f32) -> Modulation {
         Modulation::Qam64
     } else if snr_db >= 6.5 {
         Modulation::Qam16
-    } else {
+    } else if snr_db >= QPSK_FLOOR_DB {
         Modulation::Qpsk
+    } else if snr_db >= KAMI16_FLOOR_DB {
+        Modulation::Kami16
+    } else {
+        Modulation::Kami32
     }
 }
 
@@ -214,6 +249,9 @@ fn is_pilot(i: usize) -> bool {
 
 fn bits_per_axis(m: Modulation) -> usize {
     match m {
+        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 => {
+            unreachable!("KAMI is not an OFDM mode")
+        }
         Modulation::Qpsk => 1,
         Modulation::Qam16 => 2,
         Modulation::Qam64 => 3,
@@ -222,6 +260,9 @@ fn bits_per_axis(m: Modulation) -> usize {
 
 fn mod_idx(m: Modulation) -> usize {
     match m {
+        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 => {
+            unreachable!("KAMI is not an OFDM mode")
+        }
         Modulation::Qpsk => 0,
         Modulation::Qam16 => 1,
         Modulation::Qam64 => 2,
@@ -507,6 +548,9 @@ fn slot_order(total: usize) -> Vec<usize> {
 
 /// Map coded bits to audio samples (frame = sync A + channel B + data symbols).
 pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
+    if let Some(bps) = m.kami_bps() {
+        return crate::kami::modulate_frame_bps(coded, bps);
+    }
     let p = phy();
     let bps = 2 * bits_per_axis(m);
     let per_sym = p.data.len() * bps;
@@ -541,6 +585,9 @@ pub fn modulate_frame(coded: &[u8], m: Modulation) -> Vec<f32> {
 
 /// Find the frame in `samples`, equalise, return coded-bit LLRs (positive = 0), or None.
 pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option<Vec<f32>> {
+    if let Some(bps) = m.kami_bps() {
+        return crate::kami::demodulate_frame_bps(samples, n_bits, bps);
+    }
     let p = phy();
     // Only the region this frame can occupy is analysed: the frame itself plus
     // SEARCH_MARGIN samples of search room. Converting and transforming the whole

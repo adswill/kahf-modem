@@ -9,6 +9,7 @@ pub mod frame;
 pub mod image;
 pub mod interf;
 pub mod io;
+pub mod kami;
 pub mod ldpc;
 pub mod ldpc_std;
 pub mod link;

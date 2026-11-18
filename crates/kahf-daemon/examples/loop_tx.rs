@@ -72,7 +72,7 @@ fn encode_audio(data: &[u8]) -> Result<Vec<f32>, String> {
     let mut out = Vec::new();
     for (n, chunk) in data.chunks(CHUNK_BYTES).enumerate() {
         if n > 0 {
-            out.extend(std::iter::repeat(0.0f32).take(GAP_SAMPLES));
+            out.extend(std::iter::repeat_n(0.0f32, GAP_SAMPLES));
         }
         let bits = frame::build_payload(chunk);
         if bits.len() != ldpc::K {
