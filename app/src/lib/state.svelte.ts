@@ -130,7 +130,10 @@ class AppState {
       return {
         tone: "busy",
         title: `Calling ${this.link.peer}`,
-        detail: `Try ${this.link.attempt} of ${this.link.of}. KAHF keeps trying by itself.`,
+        detail:
+          this.link.of > 0
+            ? `Try ${this.link.attempt} of ${this.link.of}. KAHF keeps trying by itself.`
+            : "KAHF keeps trying by itself. This can take a minute.",
       };
     }
     if (this.link.state === "linked") {

@@ -3,6 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { defaultSettings } from "./defaults";
 import type { Engine, EngineEvent, MessageKind, ModeInfo, Settings } from "./types";
 
 export class TauriEngine implements Engine {
@@ -10,8 +11,10 @@ export class TauriEngine implements Engine {
   private listeners = new Set<(e: EngineEvent) => void>();
   private started = false;
 
-  loadSettings(): Promise<Settings> {
-    return invoke("load_settings");
+  async loadSettings(): Promise<Settings> {
+    const saved = await invoke<Partial<Settings>>("load_settings");
+    const d = defaultSettings();
+    return { ...d, ...saved, location: { ...d.location, ...(saved.location ?? {}) } };
   }
   saveSettings(s: Settings): Promise<void> {
     return invoke("save_settings", { settings: s });

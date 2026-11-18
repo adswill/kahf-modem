@@ -484,6 +484,7 @@ impl App {
             Event::Spectrum(values) => self.push_spectrum(ctx, &values),
             Event::Tx { state } => self.on_tx(state),
             Event::Log(line) => self.log_line(line),
+            Event::Heard { .. } => {}
             // The status line shows the mode and SNR once the window exposes it; the log keeps it.
             Event::Metrics(s) => self.log_line(format!(
                 "Link: {} (auto {}), net {} bit/s, we hear {:?} dB, they hear {:?} dB, lost {:.0}%",

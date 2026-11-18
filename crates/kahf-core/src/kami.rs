@@ -775,6 +775,44 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
     Some((llr, (-10.0 * sigma2.log10() - SNR_OFFSET_DB).clamp(-30.0, 45.0)))
 }
 
+/// One row of the mode table shown to the operator.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModeRow {
+    pub name: &'static str,
+    /// SNR (dB, per real audio sample) at which under 5 percent of frames are lost.
+    pub need_snr: f32,
+    /// Raw coded bits per second while data slots are on the air.
+    pub raw_bps: u32,
+    /// Net information bits per second in a burst of 8 codewords, preamble and pilots included.
+    pub net_bps: u32,
+}
+
+/// The modes the app can use, slowest and most robust first. The SNR figures are the measured
+/// 5 percent frame-loss points from `docs/KAMI-MODES.md`.
+pub fn mode_table() -> Vec<ModeRow> {
+    let rows: [(&str, Shape, f32); 11] = [
+        ("KAMI-256", Shape::walsh(8), -16.0),
+        ("KAMI-128", Shape::walsh(7), -13.2),
+        ("KAMI-64", Shape::walsh(6), -10.5),
+        ("KAMI-32", Shape::walsh(5), -8.1),
+        ("KAMI-16", Shape::walsh(4), -5.3),
+        ("KAMI-8", Shape::walsh(3), -2.3),
+        ("KAMI-4", Shape::walsh(2), -1.8),
+        ("KAMI-1a", Shape { wb: 0, lb: 1 }, -0.2),
+        ("KAMI-1b", Shape { wb: 0, lb: 2 }, 4.8),
+        ("KAMI-1c", Shape { wb: 0, lb: 3 }, 8.9),
+        ("KAMI-1d", Shape { wb: 0, lb: 4 }, 13.0),
+    ];
+    rows.iter()
+        .map(|&(name, sh, need_snr)| ModeRow {
+            name,
+            need_snr,
+            raw_bps: sh.raw_bps().round() as u32,
+            net_bps: (8.0 * 324.0 * FS / burst_len_shape(648, 8, sh) as f64).round() as u32,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,6 +980,20 @@ mod tests {
             assert_eq!(frame::parse_payload_id(&bits), Some((d, ids[k])), "shape {sh:?}");
         }
         assert!(frame_len_bps(648, 1) < frame_len_bps(648, 5) && frame_len_bps(648, 5) < frame_len_bps(648, 8));
+    }
+
+    #[test]
+    fn mode_table_matches_the_ladder_and_rises_in_speed() {
+        let t = mode_table();
+        assert_eq!(t.len(), 11);
+        for w in t.windows(2) {
+            assert!(w[1].need_snr > w[0].need_snr, "{} to {}", w[0].name, w[1].name);
+            assert!(w[1].net_bps > w[0].net_bps, "{} to {}", w[0].name, w[1].name);
+        }
+        let d = t.iter().find(|m| m.name == "KAMI-1d").unwrap();
+        assert!(d.net_bps > 4000 && d.raw_bps == 16000, "{d:?}");
+        assert_eq!(t[3].name, "KAMI-32");
+        assert_eq!(t[3].raw_bps, 625);
     }
 
     #[test]

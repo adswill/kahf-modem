@@ -80,22 +80,19 @@ Status values: `planned`, `in progress`, `blocked`, `in review`, `done`.
 | ID | Who | Agent | Files / area | Branch | Status | Started | Notes |
 |---|---|---|---|---|---|---|---|
 | O7 | owner | claude | automatic KAMI and linking are merged; stress tests on branch `stress-net` (gated by `KAHF_STRESS`) | `stress-net` | in progress | 2026-11-18 | do not touch `kahf-daemon` internals |
+| O8 | owner | claude | the app: engine commands and events in `app/src-tauri`, report sending to the map | `app-tauri` | in progress | 2026-11-18 | UI screens are open to others (see UI-1) |
 
 ## 5. Tasks for the second person, available now
 
-### UI-1. Desktop UI for KAMI status (friend, takes this now)
-- **Files:** `crates/kahf-ui/src/` and `crates/kahf-gui/src/` only.
-- **Do:** the engine sends `Event::Metrics(LinkStatus)` with the mode in use, whether it is
-  automatic, net bit/s, SNR each way, frame loss and counters. Show them in the link panel.
-  Add a control for auto mode or a fixed mode using `Engine::set_auto_mode` and
-  `Engine::set_fixed_mode`, and a list from `Engine::mode_names()`. Today the events only
-  reach a log line.
-- **Done when:** the panel shows live values in a linked session, and `cargo test -p kahf-ui`
-  and `cargo clippy` pass.
-- **Branch:** `friend/ui-kami-status`.
-
-Pick one, claim it (section 3), and go. None needs a radio, a Cloudflare account, or any file
-from section 4. Ordered by how self-contained they are.
+### UI-1. The app window (friend, takes this now)
+- **Files:** `app/` only. This is the new Tauri and Svelte app. Read `app/README.md` first. The
+  older `crates/kahf-ui` (iced) and `crates/kahf-gui` (egui) are not the interface any more.
+- **Do:** run `npm run dev` in `app/` and try every screen with the built-in demo radio. Improve
+  what a new user would stumble on: wording, layout, empty states, the tour. Keep the design
+  rules in `app/README.md`. Add tests next to the code you change.
+- **Done when:** `npm run check`, `npm test` and `cd src-tauri && cargo test` pass, and you have
+  tried the first-run path (welcome, setup, first message) in the browser.
+- **Branch:** `friend/app-ui`.
 
 ### F1. More tests for small core modules (any OS)
 - **Files:** `crates/kahf-core/src/callsign.rs`, `forms.rs`, `outbox.rs`, `access.rs`,

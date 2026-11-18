@@ -77,6 +77,8 @@ pub enum Event {
     /// Link quality and the KAMI mode in use, every few seconds while linked and whenever the
     /// mode changes.
     Metrics(LinkStatus),
+    /// A station was heard on the air: its callsign and the SNR (dB) of the burst, if known.
+    Heard { call: String, snr_db: Option<f32> },
     Log(String),
     /// Transmit progress: Starting (PTT on), Sending (audio handed to the radio),
     /// Done (PTT off) or Failed (with the reason).
@@ -416,6 +418,20 @@ pub fn transmit_modulation(&self) -> &'static str {
     /// Starts relay mode for this run only (plan 4). Refused unless a relay role is set and
     /// both acknowledgements are true. Nothing is saved: relay stops on `stop_relay` or when
     /// the app quits.
+    /// Turns this station into a relay on `channel_khz`, with one transmit slot that covers the
+    /// next 24 hours. The operator must confirm the licence and the terms.
+    pub fn enable_relay(&self, channel_khz: f32, licence_held: bool, terms_accepted: bool) -> Result<(), String> {
+        self.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[channel_khz])?;
+        let now = now_unix_secs().max(0) as u64;
+        self.accept_relay_schedule(vec![Slot {
+            channel_khz,
+            start_unix: now,
+            duration_s: 24 * 3600,
+            direction: relay::Direction::Transmit,
+        }])?;
+        self.start_relay(RelayAck { licence_held, terms_accepted })
+    }
+
     pub fn start_relay(&self, ack: RelayAck) -> Result<(), String> {
         if !(ack.licence_held && ack.terms_accepted) {
             return Err(
@@ -2911,6 +2927,9 @@ impl Worker {
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
+        }
+        for call in self.link.take_heard() {
+            self.emit(Event::Heard { call, snr_db: self.link.own_snr_db() });
         }
     }
 

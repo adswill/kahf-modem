@@ -1171,6 +1171,7 @@ impl App {
                     self.live_spectrum = Some(now);
                 }
             }
+            EngineEvent::Heard { .. } => {}
             EngineEvent::Metrics(st) => {
                 self.engine_note = format!(
                     "Link: {} (auto {}), net {} bit/s, we hear {:?} dB, they hear {:?} dB, lost {:.0}%",

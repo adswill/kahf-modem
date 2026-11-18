@@ -113,6 +113,8 @@ pub struct Link {
     next_seq: u8,
     peer_fer: Option<u8>,
     peer_snr: Option<f32>,
+    /// Callsigns of stations heard in handshake frames, not yet handed to the caller.
+    heard: Vec<String>,
     // Receiver side.
     rx_snr: Option<f32>,
     rcv_base: u8,
@@ -139,6 +141,7 @@ impl Link {
             clock: 0,
             air_extra: 0,
             peer_snr: None,
+            heard: Vec::new(),
             rx_snr: None,
             hs_deadline: 0,
             hs_retries: 0,
@@ -203,6 +206,11 @@ impl Link {
 
     /// Feed one decoded frame payload from the air.
     pub fn on_receive(&mut self, payload: &[u8]) -> Vec<Action> {
+        if matches!(payload.first(), Some(&TAG_CONNECT) | Some(&TAG_CONNECT_ACK) | Some(&TAG_DISCONNECT)) {
+            if let Some((from, _)) = decode_hs(payload) {
+                self.note_heard(&from);
+            }
+        }
         match payload.first() {
             Some(&TAG_CONNECT) => self.on_connect(payload),
             Some(&TAG_CONNECT_ACK) => self.on_connect_ack(payload),
@@ -293,6 +301,21 @@ impl Link {
     pub fn note_rx_snr(&mut self, snr_db: f32) {
         let x = snr_db.clamp(-30.0, 90.0);
         self.rx_snr = Some(self.rx_snr.map_or(x, |p| 0.6 * p + 0.4 * x));
+    }
+
+    /// Remember a station we heard, once per burst of frames.
+    fn note_heard(&mut self, call: &str) {
+        if call != self.callsign && valid_callsign(call) && self.heard.last().map(|c| c.as_str()) != Some(call) {
+            if self.heard.len() >= 32 {
+                self.heard.remove(0);
+            }
+            self.heard.push(call.to_string());
+        }
+    }
+
+    /// Stations heard since the last call, oldest first. The caller reports them to the operator.
+    pub fn take_heard(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.heard)
     }
 
     /// SNR (dB) the peer last reported for our transmissions, if it has reported one.
@@ -995,5 +1018,17 @@ mod tests {
         // An ACK from an old peer without the byte leaves the value alone.
         let _ = n.a.on_receive(&[TAG_ACK, 1, 0, 0]);
         assert_eq!(n.a.peer_snr_db(), Some(heard));
+    }
+
+    #[test]
+    fn stations_heard_in_handshakes_are_reported_once() {
+        let mut n = connected_pair();
+        assert_eq!(n.a.take_heard(), vec!["BBB2".to_string()]);
+        assert_eq!(n.b.take_heard(), vec!["AAA1".to_string()]);
+        assert!(n.a.take_heard().is_empty(), "taken once");
+        // Our own callsign and junk are never reported.
+        let own = encode_hs(TAG_CONNECT, "AAA1", "BBB2");
+        let _ = n.a.on_receive(&own);
+        assert!(n.a.take_heard().is_empty());
     }
 }
