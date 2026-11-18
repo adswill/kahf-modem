@@ -307,6 +307,15 @@ pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: 
         phy::Modulation::Kami16 => kahf_core::kami::ID16,
         phy::Modulation::Kami8 => kahf_core::kami::ID8,
         phy::Modulation::Kami8H => kahf_core::kami::ID8H,
+        phy::Modulation::Kami64 => kahf_core::kami::ID64,
+        phy::Modulation::Kami128 => kahf_core::kami::ID128,
+        phy::Modulation::Kami256 => kahf_core::kami::ID256,
+        phy::Modulation::Kami4 => kahf_core::kami::ID4,
+        phy::Modulation::Kami2 => kahf_core::kami::ID2,
+        phy::Modulation::Kami1a => kahf_core::kami::ID1A,
+        phy::Modulation::Kami1b => kahf_core::kami::ID1B,
+        phy::Modulation::Kami1c => kahf_core::kami::ID1C,
+        phy::Modulation::Kami1d => kahf_core::kami::ID1D,
     };
     const PAYLOAD_BYTES: usize = 36;
     let errors = (0..frames)

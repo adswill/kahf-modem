@@ -93,6 +93,9 @@ struct InFlight {
 }
 
 pub struct Link {
+    /// Extra time added to every retransmit timer: the air time of a frame in both directions
+    /// plus the peer's processing delay. Zero until `set_air_ms` is called.
+    air_extra: u64,
     pub callsign: String,
     pub state: LinkState,
     clock: u64,
@@ -128,6 +131,7 @@ impl Link {
             callsign: callsign.to_string(),
             state: LinkState::Idle,
             clock: 0,
+            air_extra: 0,
             hs_deadline: 0,
             hs_retries: 0,
             tx_queue: VecDeque::new(),
@@ -152,13 +156,19 @@ impl Link {
 
     /// Start the handshake with `peer`. Returns nothing unless the link is Idle and both
     /// callsigns are 1..=15 bytes.
+    /// Tell the link how long one frame takes on the air (ms) in the current mode. The retransmit
+    /// timers grow by two frames (ours and the answer) plus a second for the peer's search.
+    pub fn set_air_ms(&mut self, frame_ms: u64) {
+        self.air_extra = 2 * frame_ms + 1000;
+    }
+
     pub fn connect(&mut self, peer: &str) -> Vec<Action> {
         if self.state != LinkState::Idle || !valid_callsign(peer) || !valid_callsign(&self.callsign) {
             return Vec::new();
         }
         self.begin_session();
         self.hs_retries = 0;
-        self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS;
+        self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS + self.air_extra;
         let mut out = vec![Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer))];
         self.set_state(
             LinkState::Connecting {
@@ -219,7 +229,7 @@ impl Link {
                 if now_ms >= self.hs_deadline {
                     if self.hs_retries < MAX_CONNECT_RETRIES {
                         self.hs_retries += 1;
-                        self.hs_deadline = now_ms + CONNECT_TIMEOUT_MS;
+                        self.hs_deadline = now_ms + CONNECT_TIMEOUT_MS + self.air_extra;
                         out.push(Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, &peer)));
                     } else {
                         self.reset_arq();
@@ -241,7 +251,7 @@ impl Link {
                                 break;
                             }
                             f.retries += 1;
-                            f.deadline = now_ms + DATA_TIMEOUT_MS;
+                            f.deadline = now_ms + DATA_TIMEOUT_MS + self.air_extra;
                             self.retransmits += 1;
                             out.push(Action::Transmit(encode_data(f.seq, &f.payload)));
                         }
@@ -483,7 +493,7 @@ impl Link {
             self.slots[seq as usize % WINDOW] = Some(InFlight {
                 seq,
                 payload: chunk.clone(),
-                deadline: self.clock + DATA_TIMEOUT_MS,
+                deadline: self.clock + DATA_TIMEOUT_MS + self.air_extra,
                 retries: 0,
             });
             out.push(Action::Transmit(encode_data(seq, &chunk)));

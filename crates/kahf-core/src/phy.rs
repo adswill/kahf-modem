@@ -22,16 +22,25 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
-    /// KAMI-32 real Walsh signalling (see `kami`), the bottom rung of the ladder (frame id 3).
-    /// It is not an OFDM mode: `modulate_frame` / `demodulate_frame` hand it to `kami`.
+    /// KAMI Walsh signalling in the same 2.4 kHz channel as the OFDM modes (see `kami`). The
+    /// number is the Walsh size in chips: the bigger, the lower the rate and the SNR needed.
+    /// Not OFDM modes: `modulate_frame` / `demodulate_frame` hand them to `kami`.
+    Kami256,
+    Kami128,
+    Kami64,
     Kami32,
-    /// KAMI-16: 4 bits per 16-chip Walsh symbol, 2000 bit/s raw (frame id 4).
     Kami16,
-    /// KAMI-8: 3 bits per 8-chip Walsh symbol, 3000 bit/s raw (frame id 5).
     Kami8,
-    /// KAMI-8H: 8-chip Walsh words with four amplitude levels, 5 bits per symbol, 5000 bit/s raw
-    /// (frame id 6). Needs about 3 dB; faster than QPSK.
+    Kami4,
+    Kami2,
+    /// KAMI-8H: 8-chip Walsh words with four amplitude levels per branch (frame id 6).
     Kami8H,
+    /// Single-chip symbols with 2, 4, 8 and 16 amplitude levels per branch (frame ids 13 to 16):
+    /// 4000, 8000, 12000 and 16000 bit/s raw in the same 2.4 kHz channel. The fast end of KAMI.
+    Kami1a,
+    Kami1b,
+    Kami1c,
+    Kami1d,
     Qpsk,
     Qam16,
     Qam64,
@@ -42,49 +51,47 @@ impl Modulation {
     pub fn kami_shape(self) -> Option<crate::kami::Shape> {
         use crate::kami::Shape;
         match self {
+            Modulation::Kami256 => Some(Shape::walsh(8)),
+            Modulation::Kami128 => Some(Shape::walsh(7)),
+            Modulation::Kami64 => Some(Shape::walsh(6)),
             Modulation::Kami32 => Some(Shape::walsh(5)),
             Modulation::Kami16 => Some(Shape::walsh(4)),
             Modulation::Kami8 => Some(Shape::walsh(3)),
+            Modulation::Kami4 => Some(Shape::walsh(2)),
+            Modulation::Kami2 => Some(Shape::walsh(1)),
             Modulation::Kami8H => Some(crate::kami::SHAPE_8H),
+            Modulation::Kami1a => Some(Shape { wb: 0, lb: 1 }),
+            Modulation::Kami1b => Some(Shape { wb: 0, lb: 2 }),
+            Modulation::Kami1c => Some(Shape { wb: 0, lb: 3 }),
+            Modulation::Kami1d => Some(Shape { wb: 0, lb: 4 }),
             _ => None,
         }
     }
 }
 
-/// SNR (dB, per real sample) below which KAMI-32 is chosen over QPSK. KAMI-32 clears 1 percent
-/// frame loss near -5 dB, QPSK only above this point (1 percent loss near 1 dB on awgn, measured 100 frames per point, see the
-/// integration report); above it QPSK is faster (about 0.36 s a frame against 0.65 s).
-pub const QPSK_FLOOR_DB: f32 = 1.0;
+/// The ladder for an awgn SNR, fastest mode first: the lowest SNR (dB, per real sample) at which
+/// the mode is used. Each floor is the mode's 5 percent frame-loss point plus 1 dB of margin
+/// (100 frames per point, LDPC 50 iterations, every mode in the same 2.4 kHz channel). The app
+/// uses KAMI only; KAMI-2 and KAMI-8H decode but are never chosen, as KAMI-4 and KAMI-1a are
+/// faster at the same SNR.
+pub const LADDER: [(Modulation, f32); 11] = [
+    (Modulation::Kami1d, 14.0),
+    (Modulation::Kami1c, 11.0),
+    (Modulation::Kami1b, 6.5),
+    (Modulation::Kami1a, 0.8),
+    (Modulation::Kami4, -0.8),
+    (Modulation::Kami8, -1.3),
+    (Modulation::Kami16, -4.3),
+    (Modulation::Kami32, -7.1),
+    (Modulation::Kami64, -9.5),
+    (Modulation::Kami128, -12.2),
+    (Modulation::Kami256, f32::NEG_INFINITY),
+];
 
-/// SNR (dB) from which KAMI-16 (2000 bit/s, 0.46 s a frame) is chosen over KAMI-32: it clears
-/// 1 percent frame loss near -2 dB (100 frames per point, awgn). KAMI-8 clears it near +1 dB and is
-/// no faster than QPSK (0.35 s against 0.36 s), so the SNR chooser never picks it; it stays on
-/// the link ladder.
-pub const KAMI16_FLOOR_DB: f32 = -2.0;
-
-/// SNR (dB) from which KAMI-8H (5000 bit/s raw, 0.26 s a frame against 0.36 s for QPSK) is chosen
-/// over QPSK: 10 percent frame loss near 4 dB, 2 percent near 5 dB (100 frames per point, awgn).
-pub const KAMI8H_FLOOR_DB: f32 = 5.5;
-
-/// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`).
-/// The ladder, lowest rung first: KAMI-32, QPSK, 16QAM, 64QAM.
-/// Thresholds are the lowest 0.5 dB points where the frame error rate of the mode
-/// is below 1 percent (1000 frames per point, unit-power PHY, LDPC 50 iterations).
-/// 16QAM first clears 1 percent at 6.5 dB; 64QAM at 10.5 dB.
+/// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`): the first
+/// rung of `LADDER` whose floor the SNR reaches.
 pub fn choose_modulation(snr_db: f32) -> Modulation {
-    if snr_db >= 10.5 {
-        Modulation::Qam64
-    } else if snr_db >= 6.5 {
-        Modulation::Qam16
-    } else if snr_db >= KAMI8H_FLOOR_DB {
-        Modulation::Kami8H
-    } else if snr_db >= QPSK_FLOOR_DB {
-        Modulation::Qpsk
-    } else if snr_db >= KAMI16_FLOOR_DB {
-        Modulation::Kami16
-    } else {
-        Modulation::Kami32
-    }
+    LADDER.iter().find(|&&(_, floor)| snr_db >= floor).map_or(Modulation::Kami256, |&(m, _)| m)
 }
 
 const FS: f64 = 8000.0;
@@ -264,23 +271,19 @@ fn is_pilot(i: usize) -> bool {
 
 fn bits_per_axis(m: Modulation) -> usize {
     match m {
-        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 | Modulation::Kami8H => {
-            unreachable!("KAMI is not an OFDM mode")
-        }
         Modulation::Qpsk => 1,
         Modulation::Qam16 => 2,
         Modulation::Qam64 => 3,
+        _ => unreachable!("KAMI is not an OFDM mode"),
     }
 }
 
 fn mod_idx(m: Modulation) -> usize {
     match m {
-        Modulation::Kami32 | Modulation::Kami16 | Modulation::Kami8 | Modulation::Kami8H => {
-            unreachable!("KAMI is not an OFDM mode")
-        }
         Modulation::Qpsk => 0,
         Modulation::Qam16 => 1,
         Modulation::Qam64 => 2,
+        _ => unreachable!("KAMI is not an OFDM mode"),
     }
 }
 
