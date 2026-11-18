@@ -1,30 +1,50 @@
-# Handover E (2026-11-18, session E): WP0 and WP1 done, WP2 to WP13 still open
+# Handover E (2026-11-18, session E)
 
 Read, in order: `docs/HANDOVER-2026-11-18-D.md` (definition of done section 2, work packages section 3, owner rules
-section 4, commands section 7), this file, `docs/NETWORK-STATUS.md` (last two sections), `docs/MESH-SPEC.md`.
-Same owner rules as D. Branch `app-rig-relay`, worktree `/Users/kristijonasadomaitis/kahf-work/wt-rig`.
+section 4), this file, `docs/NETWORK-STATUS.md` (the last sections, one per package), `docs/MESH-SPEC.md`.
+Branch `app-rig-relay`, worktree `/Users/kristijonasadomaitis/kahf-work/wt-rig`.
 
-## Done this session (committed and pushed)
+## Done this session (all committed and pushed unless noted)
 
-| Commit | Package | What |
-|---|---|---|
-| `9531444` | WP0 | Workspace clippy clean (unused import in `select.rs`), `crates/kahf-ui` fixed for 17 m, old 20/40/80 m tables removed from `bandplan.rs`, daemon logbook, kahf-gui, kahf-prop, kahf-log fixtures; SDR default 18.11344 MHz; old design docs marked "background only". All suites green: workspace tests, svelte-check 0, vitest 24, Tauri clippy and tests, server 1173 |
-| `b79d64e` | WP1 | Transmit gate in the engine: `lanes::permit_tx` before every burst with the real dial and the modem's audio span; unverified table refuses on a real radio; bench-only test table (`"testTable": true`, only BlackHole pairs or in-memory radios); app wiring and Radio screen notice; 7 daemon tests |
+| Package | State |
+|---|---|
+| WP0 green baseline, 17 m sweep | done (`9531444`) |
+| WP1 transmit gate and bench-only test table | done (`b79d64e`) |
+| WP2 lane sensing before every transmit, 10 minute noise floor, occupancy reports | done (`cd037f3`); reports are queued in memory, sending them is WP6/7 |
+| WP3 chat on bundle frames, multi-recipient bursts, ordered answers, duplicate control | done (`259a6a4`); mail and files still use the link |
+| WP4 lane mode in the engine (12 lanes, streaming lane receiver, two-lane receive, lane speeds in the app) | done except the **bonded waveform** (2 to 4 lanes) and an HF fading sweep of lane bursts |
+| WP5 relay as referee of its lane | built and tested with 1 and 3 hidden operators (6 took about 5 minutes); ten operators: see NETWORK-STATUS and `REF_OPS=10 cargo test -p kahf-daemon hidden_operators -- --nocapture` (about 15 minutes of real time). Not done: relay crash and restart, two relays on different lanes, grants on other lanes |
+| WP11 (part) | `docs/USER-GUIDE.md`, `docs/RELAY-GUIDE.md` rewritten for the lane app; the kahf.dev home page redesigned and **deployed** (owner asked): plotting-sheet world, lane ruler, a relay's round, honest status, a developer section; no old OFDM text on the page. Release notes not checked. No installer exists |
+| WP13 | `docs/ON-AIR-PLAN.md` written (do not transmit) |
+| Extras the owner asked for | Ko-fi link in README, Settings > About and the site; a support note in the app (not in the first week, then at most monthly, dismissible, "don't ask again") |
 
-## Not done (next, in order): WP2 to WP13 as listed in handover D section 3
+## Not done (in order)
 
-Important facts for WP2 and WP4:
-- The engine still sends the wide KAMI (312 to 2690 Hz). With a verified table it is refused as "not inside the lane",
-  so **no real transmit is possible until WP4 puts the lane mode (`narrow.rs`) in the engine** and calls
-  `Engine::set_tx_audio_span(1260, 1740)` (single lane). That is intended.
-- `gate_refusal` is in `kahf-daemon/src/lib.rs`; policy is `Flags.policy` (`TxPolicy`). Test engines start with the test table on
-  (`#[cfg(test)]` in `spawn_with_clock`); gate tests use `gate_station(tag, bench)`.
-- The owner's bench (`/tmp/kahf-ab`) needs `"testTable": true` and `"freqKhz":18113.44` in both settings files. Not edited (owner's folder).
-- Nothing was run in the real Tauri window; nothing has been on a radio; `plan_verified` is false.
+1. **WP6 server**: Durable Objects, WebSocket hub, signed plans, router and learner live; remove the old queued-message
+   backbone (`backbone.js`, `MAILBOXES`, `backbone.rs`). Needs the owner for: the signing key handling, a WebSocket
+   crate, removing the old backbone data. The old backbone still stores message bodies in Durable Objects: the "no
+   stored messages" claim is a design goal, not true of the live server.
+2. **WP7 transport** (WebSocket client in `push.rs`, wired to the engine).
+3. **WP8 delivery layer**: sender states beyond sent/failed (At relay, With the delivering relay, Waiting for receiver),
+   deliver-first routing in the engine, mail and voice over the mesh. The datagram acks already cut the resend storm
+   for chat.
+4. **WP9** hopping, diversity and HARQ on the air.
+5. **WP10 app UI** for relay, lanes and the 17 m closed notice; check the real Tauri window (nothing was run in it this
+   session, including the support note and the Ko-fi button).
+6. **WP11** release notes and installers; **WP12** soak, conformance, security review.
+7. Referee: ten-operator capacity, crash and restart, two relays.
 
-## Definition of done (handover D section 2), honestly
+## Facts worth knowing
 
-True: line 5 for code, settings and the app UI (17 m only; website text and release notes not yet checked, WP11); part of line 4 (gate on every
-burst, in the engine; sensing, slots, token and watchdog not yet).
-Not true: lines 1, 2, 3, 6, 7, 8 and the rest of 4. Only the owner can: on-air test, set `plan_verified`, D3, licence questions, deploy,
-signing key handling, WebSocket crate, removing the old backbone data, tagging a release.
+- The engine sends lane bursts (480 Hz, five times slower) whenever the radio's dial is a lane dial; any other dial is the
+  old wide modem and is refused by the gate on a verified table.
+- The test bus has no radio frequency translation (every station's 1500 Hz audio lands on 1500 Hz for all), so stations on
+  different lanes cannot be tested on it. Receive of other lanes is tested by injecting audio.
+- Lane air times (KAMI-1a, one codeword): 1.8 s; KAMI-1c: 0.95 s; KAMI-32: 7.2 s. A request slot of 2 s needs 1a or
+  faster, so a weak operator cannot use the referee's request slots yet.
+- `plan_verified` is false. Nothing has been on a radio. Never present simulated times as radio speed.
+
+## Owner decisions still open (ask once, plain words)
+
+Signing key handling; a WebSocket crate for the daemon; removing the old backbone data; tagging a release; anything on
+air (`docs/ON-AIR-PLAN.md`).
