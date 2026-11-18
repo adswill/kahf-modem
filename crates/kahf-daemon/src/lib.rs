@@ -4671,6 +4671,51 @@ mod tests {
         test_clock().sleep(Duration::from_secs(5));
         let again = b.poll_events().into_iter().filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay")).count();
         assert_eq!(again, 0, "no second copy");
+        // The relay only carried it: no file in its data folder may hold the text (MESH-SPEC 7).
+        let hits = files_containing(&r.config.data_dir, b"through the relay");
+        assert!(hits.is_empty(), "the relay wrote the message body to disk: {hits:?}");
+        // Sanity: the same scan does find it where it belongs, the sender's own outbox/log or the receiver's.
+        let _ = (&a, &b);
+    }
+
+    /// Paths under `dir` (recursively) whose bytes contain `needle`.
+    fn files_containing(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle)) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_file_scan_finds_a_body_where_one_is_kept() {
+        let dir = temp_dir("scan-self-test");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("x.log"), b"abc through the relay def").unwrap();
+        assert_eq!(files_containing(&dir, b"through the relay").len(), 1);
+        assert!(files_containing(&dir, b"nothing here").is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The raw scan is only worth something if it would catch the body in the outbox, where it
+    /// is kept on purpose (the sender's own copy).
+    #[test]
+    fn the_scan_finds_a_queued_body_in_the_senders_own_outbox() {
+        let mut st = mesh("scan-outbox", &["AA1AAA", "BB1BBB"], &[(0, 1), (1, 0)], 0.0);
+        let a = &mut st[0];
+        a.send_message("BB1BBB", "needle-in-the-outbox").unwrap();
+        test_clock().sleep(Duration::from_millis(200));
+        let hits = files_containing(&a.config.data_dir, b"needle-in-the-outbox");
+        assert!(!hits.is_empty(), "outbox files: {:?}", fs::read_dir(&a.config.data_dir).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
     }
 
     #[test]

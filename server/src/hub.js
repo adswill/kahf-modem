@@ -3,6 +3,14 @@
 // socket wait in RAM for 60 s (the HTTPS poll fetches them); nothing is written to disk and
 // message bodies never pass through (ids and sizes only). Not yet wired into wrangler.toml.
 
+// Message text must never pass through the server: only ids, sizes, hashes and routing facts.
+export const FORBIDDEN_KEYS = ['body', 'text', 'subject', 'payload', 'content', 'data', 'message'];
+
+function assertNoBody(msg) {
+  const bad = Object.keys(msg ?? {}).find((k) => FORBIDDEN_KEYS.includes(k));
+  if (bad) throw new Error(`hub: message field "${bad}" would carry content; only ids and sizes may pass`);
+}
+
 export const HOLD_MS = 60e3;
 export const HEARTBEAT_MS = 30e3;
 export const DEAD_AFTER_MS = 75e3; // two missed heartbeats and a bit
@@ -41,6 +49,7 @@ export class Hub {
 
   // Push now if the relay has a socket, otherwise hold in RAM.
   push(relay, msg, now) {
+    assertNoBody(msg);
     const cur = this.sockets.get(relay);
     if (cur) {
       cur.socket.send(msg);
