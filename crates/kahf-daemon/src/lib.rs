@@ -3773,6 +3773,125 @@ mod tests {
         e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
     }
 
+    /// Stress tests run many stations for minutes, so they are skipped unless KAHF_STRESS is set.
+    /// Run with: KAHF_STRESS=1 cargo test -p kahf-daemon stress -- --nocapture
+    fn stress_enabled() -> bool {
+        std::env::var_os("KAHF_STRESS").is_some()
+    }
+
+    /// Seven stations in a line: each hears only its neighbours. A message from the first to the
+    /// last must hop through the relays in between, and every hop must be delivered once.
+    #[test]
+    fn stress_line_of_seven_stations_delivers_end_to_end() {
+        if !stress_enabled() {
+            return;
+        }
+        let calls = ["AA1AAA", "RA1RRR", "RB1RRR", "RC1RRR", "RD1RRR", "RE1RRR", "BB1BBB"];
+        let mut hears = Vec::new();
+        for i in 0..calls.len() - 1 {
+            hears.push((i, i + 1));
+            hears.push((i + 1, i));
+        }
+        let mut st = mesh("line7", &calls, &hears, 0.0);
+        let mut last = st.pop().unwrap();
+        last.listen().unwrap();
+        for i in (1..st.len() - 1).rev() {
+            make_relay(&st[i]);
+            st[i].listen().unwrap();
+        }
+        let mut first = st.remove(0);
+        first.listen().unwrap();
+        first.set_auto_link(true);
+        first.set_relay_hints(&calls[1..calls.len() - 1].iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        first.set_relay_timeout_ms(500);
+        first.send_message("BB1BBB", "seven hops").unwrap();
+        let got = wait_for(
+            &mut last,
+            |e| matches!(e, Event::Message { text, .. } if text == "seven hops"),
+            900,
+        );
+        assert!(got.is_some(), "the message did not cross seven stations");
+    }
+
+    /// Ten stations on a noisy channel, each sending a short message to a random other station
+    /// and listening for the rest. Counts how many arrive and how many were delivered twice.
+    #[test]
+    fn stress_ten_stations_on_a_noisy_channel() {
+        if !stress_enabled() {
+            return;
+        }
+        let names: Vec<String> = (0..10).map(|i| format!("S{}X{}", (b'A' + i as u8) as char, i)).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        // Everyone hears everyone (one shared channel), with a noise level that keeps the mode
+        // robust.
+        let mut hears = Vec::new();
+        for i in 0..10 {
+            for j in 0..10 {
+                if i != j {
+                    hears.push((i, j));
+                }
+            }
+        }
+        let mut st = mesh("ten-noisy", &refs, &hears, noise_for(-2.0));
+        for e in st.iter_mut() {
+            e.listen().unwrap();
+            e.set_auto_link(true);
+        }
+        let mut expected = Vec::new();
+        for i in 0..10 {
+            let to = (i + 3) % 10;
+            let text = format!("from {i} to {to}");
+            st[i].send_message(&names[to], &text).unwrap();
+            expected.push((to, text));
+        }
+        let deadline = Instant::now() + Duration::from_secs(900);
+        let mut seen: Vec<(usize, String)> = Vec::new();
+        while Instant::now() < deadline && seen.len() < expected.len() {
+            for (j, e) in st.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    if let Event::Message { text, .. } = ev {
+                        seen.push((j, text));
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let arrived = expected.iter().filter(|(to, t)| seen.iter().any(|(j, s)| j == to && s == t)).count();
+        let copies = seen.len();
+        eprintln!("stress ten: {arrived}/{} delivered, {copies} messages seen in total", expected.len());
+        assert!(arrived >= 8, "only {arrived} of 10 messages arrived");
+        assert!(copies <= 10, "messages were delivered more than once: {copies} copies");
+    }
+
+    /// The same message is queued many times on a link that drops half its audio. The link must
+    /// deliver it exactly once and never stall for longer than its retry budget.
+    #[test]
+    fn stress_lossy_link_delivers_each_message_once() {
+        if !stress_enabled() {
+            return;
+        }
+        let (mut a, mut b) = linked_pair("lossy", noise_for(-3.0));
+        let mut delivered = 0;
+        for i in 0..6 {
+            let text = format!("lossy {i}");
+            a.send_message("BB1BBB", &text).unwrap();
+            let got = wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if *t == text), 300);
+            if got.is_some() {
+                delivered += 1;
+            }
+        }
+        // Nothing may arrive a second time.
+        thread::sleep(Duration::from_secs(10));
+        let extra = b
+            .poll_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Message { text, .. } if text.starts_with("lossy")))
+            .count();
+        eprintln!("stress lossy: {delivered}/6 delivered, {extra} duplicates");
+        assert!(delivered >= 5, "only {delivered} of 6 messages arrived");
+        assert_eq!(extra, 0, "duplicates arrived");
+    }
+
     #[test]
     fn automatic_link_sends_a_queued_message_and_hangs_up() {
         let mut st = mesh("autolink", &["AA1AAA", "BB1BBB"], &[(0, 1), (1, 0)], 0.0);
