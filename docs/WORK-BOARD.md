@@ -79,9 +79,20 @@ Status values: `planned`, `in progress`, `blocked`, `in review`, `done`.
 
 | ID | Who | Agent | Files / area | Branch | Status | Started | Notes |
 |---|---|---|---|---|---|---|---|
-| (none right now) | | | | | | | The 0.2 work is merged into `release-0.1`. |
+| O7 | owner | claude | automatic KAMI and linking are merged; stress tests on branch `stress-net` (gated by `KAHF_STRESS`) | `stress-net` | in progress | 2026-11-18 | do not touch `kahf-daemon` internals |
 
 ## 5. Tasks for the second person, available now
+
+### UI-1. Desktop UI for KAMI status (friend, takes this now)
+- **Files:** `crates/kahf-ui/src/` and `crates/kahf-gui/src/` only.
+- **Do:** the engine sends `Event::Metrics(LinkStatus)` with the mode in use, whether it is
+  automatic, net bit/s, SNR each way, frame loss and counters. Show them in the link panel.
+  Add a control for auto mode or a fixed mode using `Engine::set_auto_mode` and
+  `Engine::set_fixed_mode`, and a list from `Engine::mode_names()`. Today the events only
+  reach a log line.
+- **Done when:** the panel shows live values in a linked session, and `cargo test -p kahf-ui`
+  and `cargo clippy` pass.
+- **Branch:** `friend/ui-kami-status`.
 
 Pick one, claim it (section 3), and go. None needs a radio, a Cloudflare account, or any file
 from section 4. Ordered by how self-contained they are.
