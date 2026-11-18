@@ -7,6 +7,8 @@
   import RigPicker from "../components/RigPicker.svelte";
   import Tip from "../components/Tip.svelte";
   import { BANDS, roleWords } from "../lib/bands";
+  import { reachNotice } from "../lib/geo";
+  const reach = $derived(reachNotice(app.settings.location.lat, app.settings.location.lon, new Date()));
 
   // 17 m only: the 12 lanes, lowest frequency first.
   const BAND_TABS = BANDS;
@@ -44,6 +46,9 @@
 
 <div class="view">
   <div class="main">
+    {#if reach}
+      <section class="gate {reach.tone === 'good' ? 'off' : 'bench'}" role="status">{reach.text}</section>
+    {/if}
     {#if app.txGate.mode === "bench"}
       <section class="gate bench" role="status">
         <b>TEST TABLE ON.</b> This is a bench radio: nothing reaches an antenna. A real radio never uses the test table.

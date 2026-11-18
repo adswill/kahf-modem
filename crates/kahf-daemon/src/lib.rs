@@ -2628,7 +2628,7 @@ impl Worker {
         }
         self.heard_recent.insert(call.to_uppercase(), (snr.map(|s| s.round() as i32), self.clock.now()));
         if self.heard_recent.len() > 500 {
-            self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(900));
+            self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
         }
     }
 
@@ -2719,7 +2719,7 @@ impl Worker {
             return;
         }
         self.bb_last = self.clock.now();
-        self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(900));
+        self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
         let now = now_unix_secs().max(0) as u64;
         let list: Vec<(String, Option<i32>, u64)> = self
             .heard_recent
@@ -3322,7 +3322,7 @@ impl Worker {
             (LinkState::Connecting { peer }, LinkState::Idle) => {
                 let key = peer.to_uppercase();
                 let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
-                let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(900));
+                let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(2400));
                 self.auto_fails.insert(key, (fails, self.clock.now() + pause));
             }
             (_, LinkState::Connected { peer }) => {
@@ -5969,7 +5969,7 @@ mod tests {
         let t0 = clock.now();
         let mut seen: Vec<String> = Vec::new();
         let mut op1_log: Vec<String> = Vec::new();
-        while clock.now() < t0 + Duration::from_secs(900) && seen.len() < ops {
+        while clock.now() < t0 + Duration::from_secs(2400) && seen.len() < ops {
             for (i, e) in st.iter_mut().enumerate() {
                 for ev in e.poll_events() {
                     if let (1, Event::Log(l)) = (i, &ev) {

@@ -161,3 +161,10 @@ Not done: relay forwarding of bundles over the air to a second relay is WP9; `h2
 | Found while doing it | classifier | KAHF's own regular beacons looked like a periodic narrow signal and the sensing put the lane in quarantine for 10 minutes. A lane (and its neighbours) where a KAHF frame was decoded in the last 90 s is no longer classified as a foreign signal |
 
 The ten-operator run is available with `REF_OPS=10 cargo test -p kahf-daemon hidden_operators -- --nocapture`.
+
+## WP10 (part): 17 m by the sun in the app (2026-11-18, session E)
+
+The Radio screen shows a plain note from the sun's height at the person's own place (`app/src/lib/geo.ts` `reachNotice`):
+daylight (17 m usually works on 1000 to 4000 km paths), dawn or dusk, or night (usually closed, the outbox keeps the message and KAHF keeps
+listening). It is a rule of thumb from the sun, not a measurement or a forecast, and it needs a shared place. Tests: vitest (26). The model learner on the server is not used yet.
+Not done in WP10: the relay screen's referee status, lane occupancy bars from the sensing reports, first-run wizard changes, accessibility pass, and a check in the real Tauri window.

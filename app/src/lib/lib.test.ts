@@ -129,3 +129,18 @@ describe("file transfer estimates", () => {
     expect(FILE_LIMIT_BYTES).toBe(102400);
   });
 });
+
+import { sunElevation, reachNotice } from "./geo";
+describe("17 m by the sun", () => {
+  it("puts the sun high at noon on the equator at the equinox and low on the far side", () => {
+    const noon = new Date(Date.UTC(2026, 2, 20, 12, 0));
+    expect(sunElevation(0, 0, noon)).toBeGreaterThan(80);
+    expect(sunElevation(0, 180, noon)).toBeLessThan(-80);
+  });
+  it("says nothing without a place, and warns at night", () => {
+    const noon = new Date(Date.UTC(2026, 2, 20, 12, 0));
+    expect(reachNotice(null, null, noon)).toBeNull();
+    expect(reachNotice(0, 0, noon)?.tone).toBe("good");
+    expect(reachNotice(0, 180, noon)?.text).toMatch(/night/);
+  });
+});

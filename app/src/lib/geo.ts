@@ -48,3 +48,29 @@ export function sharingSummary(mode: string, lat: number | null, lon: number | n
   if (mode === "precise") return "Your position is shown on the public map to about 200 metres.";
   return `The public map shows a circle about ${radiusKm} km wide around you. Your exact position is never sent.`;
 }
+
+/** Height of the sun above the horizon (degrees) at a place and time, from the usual low-precision solar formulas. */
+export function sunElevation(lat: number, lon: number, when: Date): number {
+  const rad = Math.PI / 180;
+  const day = (when.getTime() - Date.UTC(when.getUTCFullYear(), 0, 1)) / 86_400_000;
+  const g = (2 * Math.PI / 365) * (day - 0.5);
+  const dec =
+    0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) +
+    0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const eq =
+    229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const utcMin = when.getUTCHours() * 60 + when.getUTCMinutes() + when.getUTCSeconds() / 60;
+  const sunLon = (720 - utcMin - eq) / 4;
+  const h = (lon - sunLon) * rad;
+  const s = Math.sin(lat * rad) * Math.sin(dec) + Math.cos(lat * rad) * Math.cos(dec) * Math.cos(h);
+  return (Math.asin(Math.max(-1, Math.min(1, s))) * 180) / Math.PI;
+}
+
+/** A plain-words note about 17 metres at the person's place right now, or null when the place is not known. */
+export function reachNotice(lat: number | null, lon: number | null, when: Date): { tone: "good" | "warn"; text: string } | null {
+  if (lat == null || lon == null) return null;
+  const el = sunElevation(lat, lon, when);
+  if (el > 5) return { tone: "good", text: "It is daylight at your place. 17 m usually works on paths of about 1000 to 4000 km now." };
+  if (el > -6) return { tone: "warn", text: "Dawn or dusk at your place. 17 m may open or close on a path at any time." };
+  return { tone: "warn", text: "It is night at your place. 17 m is usually closed now: your messages wait in your outbox and KAHF keeps listening for it to open." };
+}
