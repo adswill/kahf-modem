@@ -390,6 +390,11 @@ impl Link {
     }
 
     /// SNR (dB) the peer last reported for our transmissions, if it has reported one.
+    /// Sets the peer's reported SNR from another carrier (a datagram acknowledgement).
+    pub fn set_peer_snr(&mut self, snr_db: Option<f32>) {
+        self.peer_snr = snr_db;
+    }
+
     pub fn peer_snr_db(&self) -> Option<f32> {
         self.peer_snr
     }

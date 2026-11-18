@@ -122,3 +122,17 @@ Decision (owner said "you decide"): the bench is defined by the device names (Bl
 | Tests | 4 new daemon tests (88 total) | quiet lane passes a message; a noise signal in the lane holds the transmit until it is gone and the message then arrives; noise on the next lane up also holds it; the report names the busy lane and not the quiet one. Background noise is on the test bus (an all-zero bus has an infinite floor) |
 
 Not done or not verified: a voice or CW interferer in an engine test (the class rules are only unit tested), the wide modem still cannot pass the gate on a verified table (WP4), no real band has been heard. The daemon suite now takes about 15 s because the lane tests run long virtual spans.
+
+## WP3 frame header, bundles and ordered answers on the air (2026-11-18, session E)
+
+| Item | State | Evidence |
+|---|---|---|
+| Chat on bundle frames | built, bench only | `kahf-daemon/src/datagram.rs`. Every chat of up to 400 bytes now goes out without a link: the session chunks (26 bytes, `session::try_encode_sized`) travel one per codeword as `bundle` Message frames with the 9 byte header (next hop = 24 bit hash of the destination or of the relay, source hash, burst index and count) and a sequence byte. A station that is not the next hop drops the frame after the header. The receiver answers once per burst with an Ack frame (bitmap of the codewords it got, the sequence, its own SNR). The sender repeats only the chunks not acknowledged, after a random back-off that doubles |
+| Bundles for several recipients | built | up to 4 messages are in flight; one burst of up to 8 codewords carries chunks for different stations. Test: a hub queues three messages for three stations, sends **one** burst, and all three arrive once |
+| Ordered answers | built, **spec changed** | each recipient answers in the order the burst lists it. MESH-SPEC 8.3 says 300 ms apart. Found by the test: an answer is a whole burst (preamble and a codeword, about 1.7 s at the test speed), so 300 ms spacing would overlap. The gap is now one answer length plus 300 ms (`dg_ack_air`). The test shows the three answers in order and not overlapping |
+| Duplicates | built | a message already delivered (its answer was lost) is answered again and not shown again (kept 10 min per source and sequence); frames not for this station get no answer. Unit tests |
+| Link kept for | mail and files, and an explicit "Connect" | chats sent while the operator holds a link still go over the link. Mail and files move to the mesh in WP8. The auto-connect no longer opens a link for a chat |
+| Mode choice | works | the ack carries the receiver's SNR; the sender uses it like a link report |
+| Tests | 4 new daemon tests (92 total) | hub bundle to three stations in order; three stations talking at once, every message once and in order; repeat answered again but shown once; frame for another station ignored. Three older tests were adapted (a chat no longer opens a link; a relay forward is counted after the next hop's answer) |
+
+Not done: relay forwarding of bundles over the air to a second relay is WP9; `h24` collisions are not handled beyond the callsign in the message; acknowledgement frames are not sent in the "next beacon window" (WP5, resend storm WP8); the multi-station tests run on the test bus with plain noise, no fading; no real radio. Mail with attachments and voice notes still use the link until WP8.

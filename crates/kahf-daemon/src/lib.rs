@@ -18,6 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
+mod datagram;
+use datagram::{is_answer_payload, is_dg_item, DgState};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
@@ -1936,6 +1938,8 @@ struct Worker {
     /// radio's dial is a lane dial; then it decides every transmit instead of `channel_busy`.
     lanes: Option<LaneWatch>,
     quarantine: Quarantine,
+    /// Chat as bundle frames without a link (`datagram.rs`).
+    dg: DgState,
     /// Next whole-segment occupancy report, on the worker clock (ms).
     occupancy_due_ms: u64,
     /// Channel plan for transmit selection (plan 2.2).
@@ -2130,6 +2134,7 @@ impl Worker {
             sense: Sense::new(RATE as f32),
             lanes: None,
             quarantine: Quarantine::default(),
+            dg: DgState::new(&config.callsign),
             occupancy_due_ms: OCCUPANCY_PERIOD_MS,
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
@@ -2217,6 +2222,7 @@ impl Worker {
             self.check_relays();
             self.backbone_step();
             self.auto_link();
+            self.datagram_step();
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
                 if !self.tx_step() {
@@ -2447,7 +2453,7 @@ impl Worker {
                     return;
                 }
                 let now = self.now_ms();
-                let Some((id, _)) = self.outbox.next(now) else {
+                let Some((id, _)) = self.outbox.next_matching(now, |_, i| !is_dg_item(i)) else {
                     return;
                 };
                 let Some(peer) = self.route_peer_of(id) else {
@@ -2469,7 +2475,7 @@ impl Worker {
             LinkState::Connecting { peer } if self.auto_initiated => {
                 // The route changed (a relay was chosen) while we were calling the old peer: stop.
                 let now = self.now_ms();
-                let want = self.outbox.next(now).and_then(|(id, _)| self.route_peer_of(id));
+                let want = self.outbox.next_matching(now, |_, i| !is_dg_item(i)).and_then(|(id, _)| self.route_peer_of(id));
                 if want.is_some_and(|w| !w.eq_ignore_ascii_case(&peer)) {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
@@ -2481,7 +2487,10 @@ impl Worker {
                     .outbox
                     .pending()
                     .iter()
-                    .any(|(id, _, _)| self.route_peer_of(*id).is_some_and(|p| p.eq_ignore_ascii_case(&peer)));
+                    .any(|(id, _, _)| {
+                        self.outbox.get(*id).is_some_and(|i| !is_dg_item(i))
+                            && self.route_peer_of(*id).is_some_and(|p| p.eq_ignore_ascii_case(&peer))
+                    });
                 if !waiting && self.clock.since(self.last_activity) >= AUTO_HANGUP {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
@@ -3024,7 +3033,7 @@ impl Worker {
             .control
             .front()
             .and_then(|f| f.first())
-            .is_some_and(|p| matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)));
+            .is_some_and(|p| is_answer_payload(p));
         match self.pick_channel(None, false, answer) {
             Pick::Go => {
                 // One answer burst for everything waiting: eight codewords received give one
@@ -3035,7 +3044,7 @@ impl Worker {
                         .control
                         .front()
                         .and_then(|f| f.first())
-                        .is_some_and(|p| matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)) == answer);
+                        .is_some_and(|p| is_answer_payload(p) == answer);
                     match self.control.front() {
                         Some(f) if same && frames.len() + f.len() <= BURST_MAX => {
                             let f = self.control.pop_front().unwrap_or_default();
@@ -3817,6 +3826,7 @@ impl Worker {
 
     /// Drops the audio up to `end` and goes back to looking for a preamble.
     fn end_kami_burst(&mut self, end: usize) {
+        self.dg_burst_end();
         let end = end.min(self.rx_buf.len());
         if self.rx_locked {
             self.rx_locked = false;
@@ -3835,6 +3845,14 @@ impl Worker {
 
     fn on_frame(&mut self, payload: Vec<u8>) {
         self.last_activity = self.clock.now();
+        if matches!(payload.first(), Some(0x30..=0x37)) {
+            // A bundle frame: not the link's. An answer proves the channel works, as on the link.
+            if payload.first() == Some(&0x32) {
+                self.mac.success();
+            }
+            self.dg_on_frame(&payload, self.link.own_snr_db());
+            return;
+        }
         if matches!(payload.first(), Some(0x11) | Some(0x02)) {
             self.mac.success();
         }
@@ -3858,20 +3876,7 @@ impl Worker {
         match guard("session decode", || session::decode_signed(&self.rx_chunks)) {
             Ok(Some(signed)) => {
                 self.rx_chunks.clear();
-                // Our own message coming back (a cable, a leaky rig, someone repeating it) is not
-                // news: never show it, never forward it.
-                if sender_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
-                    self.log("Ignored a message of ours heard back on the air.");
-                    return;
-                }
-                let for_me = dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign);
-                if !for_me {
-                    // A relay passes it on. Nobody else shows it: a message belongs in the inbox
-                    // of the station it was written to, not of everyone who happens to hear it.
-                    self.forward_third_party(&signed.message, signed.private);
-                    return;
-                }
-                self.on_message(signed.message);
+                self.on_signed(signed);
             }
             Ok(None) => {}
             Err(e) => {
@@ -3879,6 +3884,24 @@ impl Worker {
                 self.log(e);
             }
         }
+    }
+
+    /// A whole message arrived (from the link or from bundle frames).
+    fn on_signed(&mut self, signed: session::Signed) {
+        // Our own message coming back (a cable, a leaky rig, someone repeating it) is not
+        // news: never show it, never forward it.
+        if sender_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
+            self.log("Ignored a message of ours heard back on the air.");
+            return;
+        }
+        let for_me = dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign);
+        if !for_me {
+            // A relay passes it on. Nobody else shows it: a message belongs in the inbox
+            // of the station it was written to, not of everyone who happens to hear it.
+            self.forward_third_party(&signed.message, signed.private);
+            return;
+        }
+        self.on_message(signed.message);
     }
 
     fn on_message(&mut self, msg: Message) {
@@ -4946,9 +4969,11 @@ mod tests {
             wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "no connect needed"), 120).is_some(),
             "the queued message was not sent by itself"
         );
-        // Nothing is waiting any more: the station closes its own link.
-        let closed = wait_for(&mut a, |e| matches!(e, Event::Link(kahf_core::link::LinkState::Idle)), 120);
-        assert!(closed.is_some(), "the automatic link was not closed");
+        // A chat needs no connection: it went out as bundle frames and the link stayed idle.
+        assert!(
+            !a.poll_events().iter().any(|e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. }))),
+            "a chat should not open a link"
+        );
     }
 
     #[test]
@@ -4967,7 +4992,10 @@ mod tests {
             wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "through the relay"), 400).is_some(),
             "the relayed message did not arrive"
         );
-        assert_eq!(r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64), 1, "one forward counted");
+        // The forward is counted when B has acknowledged it, a moment after B showed the message.
+        let counted = |r: &Engine| r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64);
+        assert!(wait_until(30, || counted(&r) == 1), "one forward counted");
+        assert_eq!(counted(&r), 1);
         // Delivered once only.
         test_clock().sleep(Duration::from_secs(5));
         let again = b.poll_events().into_iter().filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay")).count();
@@ -5443,6 +5471,140 @@ mod tests {
             }
             clock.sleep(Duration::from_millis(50));
         }
+    }
+
+    // ---- chat as bundle frames (WP3) ----------------------------------------------------------
+
+    type Heard3 = (usize, String, String);
+
+    /// Runs the engines for `secs` virtual seconds and returns every chat received as
+    /// `(receiver index, sender, text)` and when each engine started a burst, in seconds.
+    fn run_dg(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[Heard3]) -> bool) -> (Vec<Heard3>, Vec<Vec<f32>>) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let mut got = Vec::new();
+        let mut starts: Vec<Vec<f32>> = vec![Vec::new(); engines.len()];
+        while clock.now() < t0 + Duration::from_secs(secs) && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    match ev {
+                        Event::Tx { state: TxState::Starting } => starts[i].push(clock.since(t0).as_secs_f32()),
+                        Event::Message { from, text } => got.push((i, from, text)),
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        (got, starts)
+    }
+
+    #[test]
+    fn one_bundle_reaches_three_stations_and_they_answer_in_the_listed_order() {
+        let mut e = bus_engines("dg-hub", &["HH1HHH", "AA1AAA", "BB1BBB", "CC1CCC"]);
+        for (i, call) in ["AA1AAA", "BB1BBB", "CC1CCC"].iter().enumerate() {
+            e[0].send_message(call, &format!("for {i}")).unwrap();
+        }
+        let (got, starts) = run_dg(&mut e, 60, |_| false);
+        let mut texts: Vec<(usize, String)> = got.iter().map(|(i, f, t)| {
+            assert_eq!(f, "HH1HHH");
+            (*i, t.clone())
+        }).collect();
+        texts.sort();
+        assert_eq!(texts, vec![(1, "for 0".to_string()), (2, "for 1".to_string()), (3, "for 2".to_string())], "{got:?}");
+        // One burst from the hub carried all three. Each station answered once, A then B then C.
+        assert_eq!(starts[0].len(), 1, "the hub sent {} bursts: {:?}", starts[0].len(), starts[0]);
+        let first = |i: usize| starts[i][0];
+        assert!(first(1) < first(2) && first(2) < first(3), "answers out of order: {starts:?}");
+        // Each answer waits for the one before it to finish.
+        assert!(first(2) - first(1) > 1.0 && first(3) - first(2) > 1.0, "answers overlap: {starts:?}");
+    }
+
+    #[test]
+    fn three_stations_talk_at_once_and_every_message_arrives_once_and_in_order() {
+        let mut e = bus_engines("dg-three", &["AA1AAA", "BB1BBB", "CC1CCC"]);
+        let calls = ["AA1AAA", "BB1BBB", "CC1CCC"];
+        for round in 0..3 {
+            for (from, eng) in e.iter_mut().enumerate() {
+                let to = (from + 1) % 3;
+                eng.send_message(calls[to], &format!("{from}>{to} #{round}")).unwrap();
+            }
+        }
+        let (got, _) = run_dg(&mut e, 900, |g| g.len() >= 9);
+        assert_eq!(got.len(), 9, "{got:?}");
+        for (from, call) in calls.iter().enumerate() {
+            let to = (from + 1) % 3;
+            let seen: Vec<(String, String)> = got.iter().filter(|(i, _, _)| *i == to).map(|(_, f, t)| (f.clone(), t.clone())).collect();
+            let want: Vec<(String, String)> = (0..3).map(|r| (call.to_string(), format!("{from}>{to} #{r}"))).collect();
+            assert_eq!(seen, want, "station {to}");
+        }
+        assert!(got.iter().all(|(i, f, _)| f != calls[*i]), "a station heard itself");
+    }
+
+    #[test]
+    fn a_repeated_burst_is_answered_again_but_shown_once() {
+        let mut w = bare_worker("dg-dup", "BB1BBB");
+        let msg = chat("AA1AAA", "BB1BBB", "once only");
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        let frames: Vec<Vec<u8>> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut body = vec![7u8];
+                body.extend_from_slice(c);
+                kahf_core::bundle::Frame {
+                    header: kahf_core::bundle::Header {
+                        kind: kahf_core::bundle::Kind::Message,
+                        flags: 0,
+                        hops: 0,
+                        next_hop: kahf_core::bundle::h24("BB1BBB"),
+                        source: kahf_core::bundle::h24("AA1AAA"),
+                        index: i as u8,
+                        count: chunks.len() as u8,
+                    },
+                    body,
+                }
+                .encode()
+                .unwrap()
+            })
+            .collect();
+        for _ in 0..2 {
+            for f in &frames {
+                w.dg_on_frame(f, None);
+            }
+            w.dg_burst_end();
+        }
+        assert_eq!(messages_seen(&w), vec!["once only".to_string()]);
+        assert_eq!(w.dg.waiting_acks(), 2, "both bursts are answered");
+    }
+
+    #[test]
+    fn a_frame_for_another_station_is_ignored_after_its_header() {
+        let mut w = bare_worker("dg-other", "BB1BBB");
+        let msg = chat("AA1AAA", "CC1CCC", "not for B");
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        for (i, c) in chunks.iter().enumerate() {
+            let mut body = vec![1u8];
+            body.extend_from_slice(c);
+            let f = kahf_core::bundle::Frame {
+                header: kahf_core::bundle::Header {
+                    kind: kahf_core::bundle::Kind::Message,
+                    flags: 0,
+                    hops: 0,
+                    next_hop: kahf_core::bundle::h24("CC1CCC"),
+                    source: kahf_core::bundle::h24("AA1AAA"),
+                    index: i as u8,
+                    count: chunks.len() as u8,
+                },
+                body,
+            }
+            .encode()
+            .unwrap();
+            w.dg_on_frame(&f, None);
+        }
+        w.dg_burst_end();
+        assert!(messages_seen(&w).is_empty());
+        assert_eq!(w.dg.waiting_acks(), 0, "B must not answer a burst that is not for it");
     }
 
     #[test]

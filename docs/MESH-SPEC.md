@@ -604,7 +604,7 @@ own items. Waiting to collect would slow the first item for nothing.
 ### 8.3 Ordered answers (no collisions on the way back)
 
 After a bundle, recipients answer in **the order the bundle lists them**, each in its own mini-slot
-(300 ms apart, starting 300 ms after the burst; `SIFS_MS` in `mac.rs`). Nobody's answer is left to
+(300 ms apart, starting 300 ms after the burst; `SIFS_MS` in `mac.rs`). **Changed 2026-11-18 after the bench test:** an answer is a burst with a preamble, about 1.7 s at the test speed, so the gap between two answers is the length of one answer plus 300 ms, not 300 ms alone. Nobody's answer is left to
 chance, and a missing answer is a missing item. Acks of several items travel in one codeword.
 
 ### 8.4 Two lanes at once

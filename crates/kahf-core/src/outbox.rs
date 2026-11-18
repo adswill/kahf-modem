@@ -87,6 +87,20 @@ impl Outbox {
             .map(|e| (e.id, e.item.clone()))
     }
 
+    /// As `next`, but only items for which `want(id, item)` is true.
+    pub fn next_matching(&mut self, now_ms: u64, want: impl Fn(u64, &OutItem) -> bool) -> Option<(u64, OutItem)> {
+        self.entries
+            .iter()
+            .filter(|e| e.next_try_ms <= now_ms && want(e.id, &e.item))
+            .min_by_key(|e| (e.priority, e.id))
+            .map(|e| (e.id, e.item.clone()))
+    }
+
+    /// The queued item with this id.
+    pub fn get(&self, id: u64) -> Option<&OutItem> {
+        self.entries.iter().find(|e| e.id == id).map(|e| &e.item)
+    }
+
     /// Records a failed send. The item is retried after an exponential wait
     /// (5 s, 10 s, 20 s, ... capped at 10 min). After 8 failed attempts it is dropped.
     pub fn failed(&mut self, id: u64, now_ms: u64) {

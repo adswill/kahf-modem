@@ -116,7 +116,18 @@ pub fn try_encode_signed(
     key: Option<&StationKey>,
     private: bool,
 ) -> Result<Vec<Vec<u8>>, EncodeError> {
-    try_encode_inner(msg, true, key, private)
+    try_encode_inner(msg, true, key, private, CHUNK_MAX)
+}
+
+/// As `try_encode_signed`, with chunks of at most `chunk_max` bytes (at least 8), for a carrier
+/// whose frames are smaller than a link data frame. `decode_signed` reads any chunk size up to `CHUNK_MAX`.
+pub fn try_encode_sized(
+    msg: &Message,
+    key: Option<&StationKey>,
+    private: bool,
+    chunk_max: usize,
+) -> Result<Vec<Vec<u8>>, EncodeError> {
+    try_encode_inner(msg, true, key, private, chunk_max.clamp(HEADER + CRC_LEN + 1, CHUNK_MAX))
 }
 
 /// As `encode`, with compression switched on or off.
@@ -135,7 +146,7 @@ pub fn encode_signed(msg: &Message, key: Option<&StationKey>, private: bool) -> 
 }
 
 fn encode_inner(msg: &Message, compress: bool, key: Option<&StationKey>, private: bool) -> Vec<Vec<u8>> {
-    try_encode_inner(msg, compress, key, private).unwrap_or_else(|e| panic!("{e}"))
+    try_encode_inner(msg, compress, key, private, CHUNK_MAX).unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn try_encode_inner(
@@ -143,6 +154,7 @@ fn try_encode_inner(
     compress: bool,
     key: Option<&StationKey>,
     private: bool,
+    chunk_max: usize,
 ) -> Result<Vec<Vec<u8>>, EncodeError> {
     let kind = match msg {
         Message::Chat { .. } => KIND_CHAT,
@@ -175,7 +187,7 @@ fn try_encode_inner(
         stream.extend_from_slice(block);
     }
     stream.extend_from_slice(&payload);
-    to_chunks(&stream)
+    to_chunks(&stream, chunk_max)
 }
 
 /// A decoded message with its signature and routing status.
@@ -286,17 +298,18 @@ struct Parsed<'a> {
     data: &'a [u8],
 }
 
-fn to_chunks(stream: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn to_chunks(stream: &[u8], chunk_max: usize) -> Result<Vec<Vec<u8>>, EncodeError> {
+    let chunk_data = chunk_max - HEADER - CRC_LEN;
     let id = Sha256::digest(stream).as_slice()[0];
-    let n = stream.len().div_ceil(CHUNK_DATA);
+    let n = stream.len().div_ceil(chunk_data);
     if n > MAX_CHUNKS {
         return Err(EncodeError::TooManyChunks(n));
     }
     Ok(stream
-        .chunks(CHUNK_DATA)
+        .chunks(chunk_data)
         .enumerate()
         .map(|(i, data)| {
-            let mut c = Vec::with_capacity(CHUNK_MAX);
+            let mut c = Vec::with_capacity(chunk_max);
             c.push(id);
             c.extend_from_slice(&(i as u16).to_be_bytes());
             c.extend_from_slice(&((n - 1) as u16).to_be_bytes());
@@ -502,6 +515,18 @@ fn crc16(bytes: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn small_chunks_decode_like_big_ones() {
+        let msg = Message::Chat { from: "AA1AAA".into(), to: "BB1BBB".into(), text: "The quick brown fox jumps over the lazy dog, twice: the quick brown fox jumps again.".into() };
+        for max in [26usize, 20, 34] {
+            let chunks = try_encode_sized(&msg, None, true, max).unwrap();
+            assert!(chunks.iter().all(|c| c.len() <= max), "{max}");
+            let got = decode_signed(&chunks).unwrap();
+            assert_eq!(got.message, msg);
+            assert!(got.private);
+        }
+        assert_eq!(try_encode_sized(&msg, None, false, 34).unwrap(), try_encode_signed(&msg, None, false).unwrap());
+    }
     fn ser(msg: &Message) -> Vec<u8> {
         serialise(msg).unwrap()
     }
@@ -624,7 +649,7 @@ mod tests {
         body[last] ^= 0x01;
         let mut stream = vec![KIND_FILE << 1];
         stream.extend_from_slice(&body);
-        assert_eq!(decode(&to_chunks(&stream).unwrap()), None);
+        assert_eq!(decode(&to_chunks(&stream, CHUNK_MAX).unwrap()), None);
     }
 
     /// Bytes of a file message's fields other than its data (the stream adds one meta byte).
@@ -766,7 +791,7 @@ mod tests {
         let mut stream = vec![meta];
         stream.extend_from_slice(auth_block);
         stream.extend_from_slice(body);
-        to_chunks(&stream).expect("test stream fits")
+        to_chunks(&stream, CHUNK_MAX).expect("test stream fits")
     }
 
     #[test]
