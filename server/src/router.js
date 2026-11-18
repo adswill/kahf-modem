@@ -102,7 +102,8 @@ export class Router {
   // Start paging `dest`. Plausible online relays take their own (epoch, slot) cells in the next
   // paging windows, 12 per window, so pages never share a cell. Up to three windows (about 30
   // minutes); after that the destination is "not reachable".
-  page(dest, now) {
+  // `opts.pattern` (a ListenPattern) makes the windows the ones the operator usually listens in.
+  page(dest, now, opts = {}) {
     const h = typeof dest === "number" ? dest : h24(dest);
     const existing = this.pages.get(h);
     if (existing && !existing.done) return existing;
@@ -112,10 +113,11 @@ export class Router {
     // into groups and the windows take the groups in turn; each page has its own cell.
     const groups = Math.max(1, Math.ceil(relays.length / PAGE_CELLS_PER_CYCLE));
     const job = { hash: h, started: now, windows: [], found: null, done: false, notReachable: false };
+    const starts = opts.pattern?.bestWindows(now, PAGE_CYCLES) ?? Array.from({ length: PAGE_CYCLES }, (_, w) => first + w * PAGE_PERIOD_MS);
     for (let w = 0; w < PAGE_CYCLES; w++) {
       const g = w % groups;
       const members = relays.slice(g * PAGE_CELLS_PER_CYCLE, (g + 1) * PAGE_CELLS_PER_CYCLE);
-      const start = first + w * PAGE_PERIOD_MS;
+      const start = starts[w];
       job.windows.push({
         start,
         pages: members.map((id, c) => ({ relay: id, at: start + Math.floor(c / 6) * EPOCH_MS, slot: c % 6 })),
