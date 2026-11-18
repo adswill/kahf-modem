@@ -79,12 +79,7 @@ Status values: `planned`, `in progress`, `blocked`, `in review`, `done`.
 
 | ID | Who | Agent | Files / area | Branch | Status | Started | Notes |
 |---|---|---|---|---|---|---|---|
-| O1 | owner | claude | `crates/kahf-core/src/session.rs`, test lints in `blank.rs`, `ldpc.rs`, `tests/robustness.rs`, radio drivers' tests | `fix-session-clippy` | in review | 2026-11-18 | ready to merge |
-| O2 | owner | claude | `crates/kahf-daemon/src/lib.rs` (link timers, decode scan) | `fix-step-up` | in review | 2026-11-18 | merge before O3 |
-| O3 | owner | claude | KAMI modes: `crates/kahf-core/src/kami.rs`, `phy.rs`, daemon ladder, `crates/kahf-sim` | `kami-mode` | in review | 2026-11-18 | KAMI-32/16/8 and KAMI-8H, based on O2 |
-| O4 | owner | claude | receive frequency search in `phy.rs` | `rx-pilot-freq` | in review | 2026-11-18 | |
-| O5 | owner | claude | live map tile proxy: `server/src/web/live-map.js`, `server/src/routes.js`, `server/test/` | `fix-map-tiles` | in review | 2026-11-18 | needs the owner's Cloudflare to deploy |
-| O6 | owner | claude | trial merge of O1 to O5 plus docs and release fixes: all combine, tests and clippy pass | `integ-02` | in review | 2026-11-18 | owner decides the real merge |
+| (none right now) | | | | | | | The 0.2 work is merged into `release-0.1`. |
 
 ## 5. Tasks for the second person, available now
 
@@ -154,6 +149,11 @@ functions, dead code, slow tests.
 |---|---|---|---|---|
 | D1 | owner | docs contradictions fixed | `fix-docs-contradictions` | 2026-11-18 |
 | D2 | owner | SDR libraries added to the release workflow | `fix-release-workflow` | 2026-11-18 |
+| D3 | owner | session errors instead of panics; clippy clean on all targets | merged in `release-0.1` | 2026-11-18 |
+| D4 | owner | link timers skip transmit time; step-up test fixed | merged in `release-0.1` | 2026-11-18 |
+| D5 | owner | KAMI as main modulation (KAMI-32, 16, 8, 8H), QAM fallback | merged in `release-0.1` | 2026-11-18 |
+| D6 | owner | receive frequency search up to 100 Hz | merged in `release-0.1` | 2026-11-18 |
+| D7 | owner | live map tiles through a cached proxy, deployed | merged in `release-0.1` | 2026-11-18 |
 
 ## 7. Conflicts and questions
 
