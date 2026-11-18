@@ -71,6 +71,10 @@ pub const PRE_CHIPS: usize = 512;
 pub const MAX_OFFSET_HZ: f64 = 60.0;
 const FS: f64 = 8000.0;
 const PEAK: f64 = 0.95;
+/// The pilot noise estimate reads this many dB above the SNR the simulator and the ladder use
+/// (white noise over the whole 4 kHz audio band, per real sample): the receiver only sees the
+/// noise inside its 2.4 kHz filter. Measured with `kami_snr_est`, within 0.5 dB from -12 dB up.
+const SNR_OFFSET_DB: f64 = 4.0;
 /// Largest soft-decision magnitude handed to the LDPC decoder.
 const LLR_MAX: f64 = 40.0;
 
@@ -381,6 +385,13 @@ pub fn modulate_burst_shape(codewords: &[Vec<u8>], sh: Shape) -> Vec<f32> {
     modulate_frame_shape(&all, sh)
 }
 
+/// A demodulated burst: one LLR vector per codeword and the SNR estimated from its pilots.
+pub struct BurstRx {
+    pub llrs: Vec<Vec<f32>>,
+    /// Estimated SNR in dB per real audio sample (clamped to -30 to 45).
+    pub snr_db: f64,
+}
+
 /// Demodulate the burst of `n_cw` codewords that starts at `start` in `samples`. One LLR vector
 /// of `n_bits` per codeword, in order, or None when the burst does not fit in `samples`.
 pub fn demodulate_burst_at(
@@ -392,14 +403,27 @@ pub fn demodulate_burst_at(
     n_cw: usize,
     sh: Shape,
 ) -> Option<Vec<Vec<f32>>> {
+    demodulate_burst_rx(samples, start, hz, tau, n_bits, n_cw, sh).map(|b| b.llrs)
+}
+
+/// As `demodulate_burst_at`, also returning the SNR estimate.
+pub fn demodulate_burst_rx(
+    samples: &[f32],
+    start: usize,
+    hz: f64,
+    tau: f64,
+    n_bits: usize,
+    n_cw: usize,
+    sh: Shape,
+) -> Option<BurstRx> {
     let len = burst_len_shape(n_bits, n_cw, sh);
     if n_cw == 0 || start + len > samples.len() {
         return None;
     }
     let z = baseband(samples)?;
     let pb = padded_bits(n_bits, sh);
-    let llr = demod_at(&z[start..start + len], hz, tau, n_cw * pb, sh)?;
-    Some((0..n_cw).map(|j| llr[j * pb..j * pb + n_bits].to_vec()).collect())
+    let (llr, snr_db) = demod_at(&z[start..start + len], hz, tau, n_cw * pb, sh)?;
+    Some(BurstRx { llrs: (0..n_cw).map(|j| llr[j * pb..j * pb + n_bits].to_vec()).collect(), snr_db })
 }
 
 /// Map coded bits (0/1) to audio samples: preamble, then pilots and Walsh symbols, on the
@@ -602,7 +626,7 @@ fn demod_shapes(z: &[C], start: usize, hz: f64, tau: f64, n_bits: usize, sizes: 
     for &sh in sizes {
         let len = frame_len_shape(n_bits, sh);
         if start + len <= z.len() {
-            if let Some(llr) = demod_at(&z[start..start + len], hz, tau, n_bits, sh) {
+            if let Some((llr, _)) = demod_at(&z[start..start + len], hz, tau, n_bits, sh) {
                 out.push((sh, llr));
             }
         }
@@ -611,7 +635,8 @@ fn demod_shapes(z: &[C], start: usize, hz: f64, tau: f64, n_bits: usize, sizes: 
 }
 
 /// Demodulate the frame that starts at `zs[0]` (baseband), given the coarse frequency `coarse`.
-fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option<Vec<f32>> {
+/// Soft decisions and the SNR estimate of one demodulated frame or burst.
+fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option<(Vec<f32>, f64)> {
     let l = sh.chips();
     // Matched filter centred tau samples after the integer start estimate.
     let norm = rrc_norm();
@@ -745,7 +770,9 @@ fn demod_at(zs: &[C], coarse: f64, tau: f64, n_bits: usize, sh: Shape) -> Option
         }
     }
     llr.truncate(n_bits);
-    Some(llr)
+    // SNR per real audio sample: chip amplitudes are normalised to the pilot, so the mean signal
+    // power per real sample is 1 and the noise power is sigma2.
+    Some((llr, (-10.0 * sigma2.log10() - SNR_OFFSET_DB).clamp(-30.0, 45.0)))
 }
 
 #[cfg(test)]

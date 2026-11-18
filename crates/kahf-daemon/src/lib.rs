@@ -74,12 +74,36 @@ pub enum Event {
         total: u64,
     },
     Spectrum(Vec<f32>),
+    /// Link quality and the KAMI mode in use, every few seconds while linked and whenever the
+    /// mode changes.
+    Metrics(LinkStatus),
     Log(String),
     /// Transmit progress: Starting (PTT on), Sending (audio handed to the radio),
     /// Done (PTT off) or Failed (with the reason).
     Tx {
         state: TxState,
     },
+}
+
+/// What the operator sees of the link: the mode we send in, how well each side hears the other,
+/// and the net speed of that mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkStatus {
+    /// KAMI mode of the last burst we sent, for example "KAMI-32".
+    pub mode: &'static str,
+    /// True when the mode is chosen automatically from the peer's SNR report.
+    pub auto: bool,
+    /// Net information rate of that mode in a full burst, bit/s.
+    pub net_bps: u32,
+    /// SNR (dB) at which we hear the peer.
+    pub own_snr_db: Option<f32>,
+    /// SNR (dB) at which the peer hears us.
+    pub peer_snr_db: Option<f32>,
+    /// Share of recent frames we lost, percent.
+    pub fer_pct: f32,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub retransmits: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +211,10 @@ struct Flags {
     weak_mode: AtomicBool,
     /// Index into MODULATIONS of the modulation used for the last burst (shown to the operator).
     tx_level_shown: AtomicU8,
+    /// Choose the KAMI mode automatically (default). Off: always send `fixed_level`.
+    auto_mode: AtomicBool,
+    /// Index into MODULATIONS used when `auto_mode` is off.
+    fixed_level: AtomicU8,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; no effect yet.
@@ -203,6 +231,8 @@ impl Flags {
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
             tx_level_shown: AtomicU8::new(0),
+            auto_mode: AtomicBool::new(true),
+            fixed_level: AtomicU8::new(mod_level(MODULATION) as u8),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -305,27 +335,33 @@ impl Engine {
     /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
     /// The KAMI mode used for the most recent transmission, for example "KAMI-32" or "KAMI-1c".
-    pub fn transmit_modulation(&self) -> &'static str {
+pub fn transmit_modulation(&self) -> &'static str {
         let level = self.shared.flags.tx_level_shown.load(Ordering::SeqCst) as usize;
-        match MODULATIONS.get(level) {
-            Some(Modulation::Kami256) => "KAMI-256",
-            Some(Modulation::Kami128) => "KAMI-128",
-            Some(Modulation::Kami64) => "KAMI-64",
-            Some(Modulation::Kami32) => "KAMI-32",
-            Some(Modulation::Kami16) => "KAMI-16",
-            Some(Modulation::Kami8) => "KAMI-8",
-            Some(Modulation::Kami4) => "KAMI-4",
-            Some(Modulation::Kami2) => "KAMI-2",
-            Some(Modulation::Kami8H) => "KAMI-8H",
-            Some(Modulation::Kami1a) => "KAMI-1a",
-            Some(Modulation::Kami1b) => "KAMI-1b",
-            Some(Modulation::Kami1c) => "KAMI-1c",
-            Some(Modulation::Kami1d) => "KAMI-1d",
-            _ => "KAMI-32",
-        }
+        mode_name(MODULATIONS.get(level).copied().unwrap_or(MODULATION))
     }
 
-    pub fn set_weak_mode(&self, on: bool) {
+    /// Names of the modes the transmitter can use, slowest and most robust first.
+    pub fn mode_names() -> Vec<&'static str> {
+        MODULATIONS.iter().map(|&m| mode_name(m)).collect()
+    }
+
+    /// Automatic mode choice from the peer's SNR report (the default) or a fixed mode.
+    pub fn set_auto_mode(&self, on: bool) {
+        self.shared.flags.auto_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Always send in the named mode, for example "KAMI-32". Turns automatic choice off.
+    pub fn set_fixed_mode(&self, name: &str) -> Result<(), String> {
+        let level = MODULATIONS
+            .iter()
+            .position(|&m| mode_name(m).eq_ignore_ascii_case(name))
+            .ok_or_else(|| format!("unknown mode {name}"))?;
+        self.shared.flags.fixed_level.store(level as u8, Ordering::SeqCst);
+        self.shared.flags.auto_mode.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+        pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
     }
 
@@ -1048,6 +1084,34 @@ const KAMI_MODES: [Modulation; 13] = [
     Modulation::Kami1c,
     Modulation::Kami1d,
 ];
+
+/// Display name of a mode.
+fn mode_name(m: Modulation) -> &'static str {
+    match m {
+        Modulation::Kami256 => "KAMI-256",
+        Modulation::Kami128 => "KAMI-128",
+        Modulation::Kami64 => "KAMI-64",
+        Modulation::Kami32 => "KAMI-32",
+        Modulation::Kami16 => "KAMI-16",
+        Modulation::Kami8 => "KAMI-8",
+        Modulation::Kami4 => "KAMI-4",
+        Modulation::Kami2 => "KAMI-2",
+        Modulation::Kami8H => "KAMI-8H",
+        Modulation::Kami1a => "KAMI-1a",
+        Modulation::Kami1b => "KAMI-1b",
+        Modulation::Kami1c => "KAMI-1c",
+        Modulation::Kami1d => "KAMI-1d",
+        _ => "KAMI-32",
+    }
+}
+
+/// Index into MODULATIONS of the fastest mode a reported SNR (dB) supports.
+fn ladder_level(snr_db: f32) -> usize {
+    kahf_core::phy::LADDER
+        .iter()
+        .find(|&&(_, floor)| snr_db >= floor)
+        .map_or(0, |&(m, _)| mod_level(m))
+}
 
 /// Wire id of a modulation, in the frame's id field. QPSK, 16QAM and 64QAM keep 0, 1 and 2.
 fn mod_id(m: Modulation) -> u8 {
@@ -2280,7 +2344,7 @@ impl Worker {
                     self.emit(Event::Link(state));
                 }
                 // Link quality snapshots have no event yet.
-                Action::Metrics(_) => {}
+                Action::Metrics(_) => self.emit_status(),
             }
         }
         if frames.is_empty() {
@@ -2302,14 +2366,59 @@ impl Worker {
         }
     }
 
+    /// Chooses the KAMI mode for the next burst. Fixed when the operator asked for one. Otherwise
+    /// the peer's SNR report picks the fastest mode that SNR supports (with the ladder's margin):
+    /// up at once when frames are getting through, down at once when the SNR drops, and one rung
+    /// down when frames are being lost. Before any report the level stays where it is.
+    fn pick_level(&mut self) {
+        let flags = &self.shared.flags;
+        if !flags.auto_mode.load(Ordering::SeqCst) {
+            self.tx_level = (flags.fixed_level.load(Ordering::SeqCst) as usize).min(MODULATIONS.len() - 1) as u8;
+            return;
+        }
+        let cur = self.tx_level as usize;
+        let fer = self.link.peer_frame_error_pct();
+        let mut next = cur;
+        match self.link.peer_snr_db() {
+            Some(snr) => {
+                let want = ladder_level(snr);
+                next = match fer {
+                    Some(f) if f >= 8 => cur.saturating_sub(1).min(want),
+                    Some(f) if f >= 2 => want.min(cur),
+                    _ => want,
+                };
+            }
+            None => match fer {
+                Some(f) if f < 2 && cur + 1 < MODULATIONS.len() => next = cur + 1,
+                Some(f) if f >= 8 && cur > 0 => next = cur - 1,
+                _ => {}
+            },
+        }
+        self.tx_level = next as u8;
+    }
+
+    /// Sends the operator a snapshot of the link.
+    fn emit_status(&self) {
+        let m = self.link.metrics();
+        let mode = MODULATIONS[self.tx_level as usize];
+        let net_bps = (8.0 * 324.0 * RATE as f64 / burst_len_for(mode, 8).max(1) as f64) as u32;
+        self.emit(Event::Metrics(LinkStatus {
+            mode: mode_name(mode),
+            auto: self.shared.flags.auto_mode.load(Ordering::SeqCst),
+            net_bps,
+            own_snr_db: m.own_snr_db,
+            peer_snr_db: m.peer_snr_db,
+            fer_pct: m.frame_error_pct,
+            frames_sent: m.frames_sent,
+            frames_received: m.frames_received,
+            retransmits: m.retransmits,
+        }));
+    }
+
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
-        // Step the modulation one level at a time: up after a clean report, down after a poor one.
-        match self.link.peer_frame_error_pct() {
-            Some(f) if f < 2 && (self.tx_level as usize) + 1 < MODULATIONS.len() => self.tx_level += 1,
-            Some(f) if f >= 8 && self.tx_level > 0 => self.tx_level -= 1,
-            _ => {}
-        }
+        let before = self.tx_level;
+        self.pick_level();
         let m = MODULATIONS[self.tx_level as usize];
         // Weak mode: the most robust KAMI mode, for stations that cannot answer.
         let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) { Modulation::Kami256 } else { m };
@@ -2319,6 +2428,9 @@ impl Worker {
             .tx_level_shown
             .store(self.tx_level, Ordering::SeqCst);
         let built = burst(frames, m);
+        if self.tx_level != before {
+            self.emit_status();
+        }
         match built {
             Ok(samples) => self.bursts.push_back(samples),
             Err(e) => self.log(format!("cannot build transmission: {e}")),
@@ -2546,11 +2658,12 @@ impl Worker {
             if n <= self.kami_next {
                 continue;
             }
-            let Some(llrs) = kahf_core::kami::demodulate_burst_at(&self.rx_buf[start..], 0, hz, tau, ldpc::N, n, sh)
+            let Some(rx) = kahf_core::kami::demodulate_burst_rx(&self.rx_buf[start..], 0, hz, tau, ldpc::N, n, sh)
             else {
                 continue;
             };
-            for (j, llr) in llrs.into_iter().enumerate().skip(self.kami_next) {
+            let snr = rx.snr_db as f32;
+            for (j, llr) in rx.llrs.into_iter().enumerate().skip(self.kami_next) {
                 let decoded = ldpc::decode(&llr, LDPC_ITER).and_then(|info| frame::parse_payload_id(&info));
                 let Some((data, id)) = decoded else { break };
                 if id & ID_MODE_MASK != mod_id(m) {
@@ -2565,6 +2678,7 @@ impl Worker {
                     break;
                 }
                 self.kami_next = j + 1;
+                self.link.note_rx_snr(snr);
                 self.on_frame(data);
                 if self.kami_next == self.kami_total {
                     break;
@@ -3304,6 +3418,134 @@ mod tests {
             60,
         );
         assert!(got.is_some(), "message did not arrive");
+    }
+
+    /// A radio whose receive path adds white Gaussian noise of a fixed level to the samples it
+    /// hands over, like a band with a constant noise floor.
+    struct NoisyRadio {
+        inner: FakeRadio,
+        sigma: f32,
+        state: u64,
+    }
+
+    impl NoisyRadio {
+        fn gauss(&mut self) -> f32 {
+            let mut u = || {
+                self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+            };
+            let (a, b) = (u(), u());
+            ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32
+        }
+    }
+
+    impl Backend for NoisyRadio {
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            let from = out.len();
+            self.inner.read_audio(out)?;
+            for i in from..out.len() {
+                out[i] += self.sigma * self.gauss();
+            }
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.inner.tx_start()
+        }
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            self.inner.tx_write(samples, start, end)
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            self.inner.tx_stop()
+        }
+    }
+
+    /// Noise level that puts a KAMI-32 burst at `snr_db` (per real sample).
+    fn noise_for(snr_db: f32) -> f32 {
+        let air = burst(&[b"ref".to_vec()], Modulation::Kami32).unwrap();
+        let body = &air[LEAD_SILENCE..air.len() - TAIL_SILENCE];
+        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt();
+        rms * 10f32.powf(-snr_db / 20.0)
+    }
+
+    fn noisy_factory(rx: Pipe, tx: Pipe, sigma: f32, seed: u64) -> Factory {
+        Box::new(move || {
+            Ok(Box::new(NoisyRadio { inner: FakeRadio { rx: rx.clone(), tx: tx.clone() }, sigma, state: seed })
+                as Box<dyn Backend>)
+        })
+    }
+
+    /// Two engines over a channel with the given noise; a is linked to b.
+    fn linked_pair(tag: &str, sigma: f32) -> (Engine, Engine) {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir(&format!("{tag}-a"))),
+            noisy_factory(b_to_a.clone(), a_to_b.clone(), sigma, 11),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir(&format!("{tag}-b"))),
+            noisy_factory(a_to_b.clone(), b_to_a.clone(), sigma, 22),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(
+            wait_for(&mut a, |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })), 120).is_some(),
+            "link did not come up"
+        );
+        (a, b)
+    }
+
+    fn send_and_wait(a: &mut Engine, b: &mut Engine, text: &str) {
+        a.send_message("BB1BBB", text).unwrap();
+        assert!(
+            wait_for(b, |e| matches!(e, Event::Message { text: t, .. } if t == text), 120).is_some(),
+            "{text:?} did not arrive at {}",
+            a.transmit_modulation()
+        );
+    }
+
+    #[test]
+    fn automatic_mode_climbs_to_the_fastest_on_a_clean_link() {
+        let (mut a, mut b) = linked_pair("auto-clean", 0.0);
+        let mut status = None;
+        for i in 0..5 {
+            thread::sleep(Duration::from_millis(1500));
+            send_and_wait(&mut a, &mut b, &format!("clean {i}"));
+            for ev in a.poll_events() {
+                if let Event::Metrics(s) = ev {
+                    status = Some(s);
+                }
+            }
+        }
+        assert_eq!(a.transmit_modulation(), "KAMI-1d", "a clean link should use the fastest mode");
+        let s = status.expect("a metrics event");
+        assert!(s.auto && s.net_bps > 4000, "{s:?}");
+        assert!(s.peer_snr_db.unwrap_or(0.0) > 30.0, "{s:?}");
+    }
+
+    #[test]
+    fn automatic_mode_stays_robust_on_a_noisy_link_and_still_delivers() {
+        let (mut a, mut b) = linked_pair("auto-noisy", noise_for(-4.0));
+        for i in 0..4 {
+            thread::sleep(Duration::from_millis(1500));
+            send_and_wait(&mut a, &mut b, &format!("noisy {i}"));
+        }
+        let robust = ["KAMI-256", "KAMI-128", "KAMI-64", "KAMI-32", "KAMI-16", "KAMI-8", "KAMI-4"];
+        assert!(robust.contains(&a.transmit_modulation()), "mode {}", a.transmit_modulation());
+    }
+
+    #[test]
+    fn a_fixed_mode_overrides_automatic_choice() {
+        let (mut a, mut b) = linked_pair("fixed", 0.0);
+        assert!(a.set_fixed_mode("KAMI-99").is_err());
+        assert!(Engine::mode_names().contains(&"KAMI-64"));
+        a.set_fixed_mode("kami-64").unwrap();
+        thread::sleep(Duration::from_millis(1500));
+        send_and_wait(&mut a, &mut b, "fixed rate");
+        assert_eq!(a.transmit_modulation(), "KAMI-64");
+        a.set_auto_mode(true);
     }
 
     #[test]

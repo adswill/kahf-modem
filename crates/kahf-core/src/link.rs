@@ -78,6 +78,10 @@ pub struct LinkMetrics {
     pub retransmits: u64,
     /// Share of the last `FER_WINDOW_FRAMES` received frames that were lost, in percent.
     pub frame_error_pct: f32,
+    /// SNR (dB) of what we receive, smoothed over recent frames, when a KAMI frame has been heard.
+    pub own_snr_db: Option<f32>,
+    /// SNR (dB) the peer last reported for what it receives from us.
+    pub peer_snr_db: Option<f32>,
     /// Suggested modulation level: 0 = robust, 1 = normal, 2 = fast.
     pub suggested_modulation: u8,
     /// Text name of `suggested_modulation`: "robust", "normal" or "fast".
@@ -108,7 +112,9 @@ pub struct Link {
     send_base: u8,
     next_seq: u8,
     peer_fer: Option<u8>,
+    peer_snr: Option<f32>,
     // Receiver side.
+    rx_snr: Option<f32>,
     rcv_base: u8,
     rx_buf: Vec<Option<Vec<u8>>>,
     /// Highest sequence number accepted so far (used for gap-based FER).
@@ -132,6 +138,8 @@ impl Link {
             state: LinkState::Idle,
             clock: 0,
             air_extra: 0,
+            peer_snr: None,
+            rx_snr: None,
             hs_deadline: 0,
             hs_retries: 0,
             tx_queue: VecDeque::new(),
@@ -280,6 +288,23 @@ impl Link {
         }
     }
 
+    /// Record the SNR (dB) the receiver measured on a frame it has just decoded. It is smoothed
+    /// and sent back to the peer in every ACK, so the peer can pick its mode.
+    pub fn note_rx_snr(&mut self, snr_db: f32) {
+        let x = snr_db.clamp(-30.0, 90.0);
+        self.rx_snr = Some(self.rx_snr.map_or(x, |p| 0.6 * p + 0.4 * x));
+    }
+
+    /// SNR (dB) the peer last reported for our transmissions, if it has reported one.
+    pub fn peer_snr_db(&self) -> Option<f32> {
+        self.peer_snr
+    }
+
+    /// SNR (dB) of what we receive from the peer, smoothed, if known.
+    pub fn own_snr_db(&self) -> Option<f32> {
+        self.rx_snr
+    }
+
     /// Frame error rate (percent) the peer last reported for our transmissions.
     pub fn peer_frame_error_pct(&self) -> Option<u8> {
         self.peer_fer
@@ -305,6 +330,8 @@ impl Link {
             frames_received: self.frames_received,
             retransmits: self.retransmits,
             frame_error_pct,
+            own_snr_db: self.rx_snr,
+            peer_snr_db: self.peer_snr,
             suggested_modulation: level,
             suggested_modulation_name: name,
         }
@@ -448,6 +475,8 @@ impl Link {
             self.rcv_base,
             bitmap,
             self.measured_fer_pct(),
+            // SNR report: half dB steps from -30 dB, 0 means unknown.
+            self.rx_snr.map_or(0, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8),
         ]));
         out
     }
@@ -458,6 +487,9 @@ impl Link {
         }
         let (base, bitmap, fer) = (p[1], p[2], p[3]);
         self.peer_fer = Some(fer.min(100));
+        if let Some(&b) = p.get(4) {
+            self.peer_snr = (b > 0).then(|| b as f32 / 2.0 - 30.0);
+        }
         let inflight = self.next_seq.wrapping_sub(self.send_base);
         let adv = base.wrapping_sub(self.send_base);
         // Cumulative part; a stale or out-of-range base is ignored.
@@ -535,6 +567,8 @@ impl Link {
         self.send_base = 0;
         self.next_seq = 0;
         self.peer_fer = None;
+        self.peer_snr = None;
+        self.rx_snr = None;
         self.rcv_base = 0;
         self.rx_buf = vec![None; WINDOW];
         self.hi_seen = 255; // so that sequence 0 is the first expected frame without a gap
@@ -942,5 +976,24 @@ mod tests {
 
         n.a.state = LinkState::Disconnecting;
         assert_eq!(n.a.describe(), "Disconnecting");
+    }
+
+    #[test]
+    fn snr_travels_in_the_ack_and_is_smoothed() {
+        let mut n = connected_pair();
+        assert_eq!(n.a.peer_snr_db(), None);
+        n.b.note_rx_snr(10.0);
+        n.b.note_rx_snr(20.0);
+        let own = n.b.own_snr_db().unwrap();
+        assert!((own - 14.0).abs() < 0.01, "smoothed {own}");
+        // b answers a data frame with an ACK that carries its SNR.
+        n.send_a(b"x");
+        let heard = n.a.peer_snr_db().expect("a hears b's snr");
+        assert!((heard - own).abs() <= 0.5, "heard {heard} vs {own}");
+        let m = n.a.metrics();
+        assert_eq!(m.peer_snr_db, Some(heard));
+        // An ACK from an old peer without the byte leaves the value alone.
+        let _ = n.a.on_receive(&[TAG_ACK, 1, 0, 0]);
+        assert_eq!(n.a.peer_snr_db(), Some(heard));
     }
 }
