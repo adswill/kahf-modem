@@ -14,6 +14,32 @@ Built and tested (the numbers are from the tests, not promises):
 | Server backbone: heard, submit (first id wins), pull, receipt, wanted; worldwide slot planning | `server/src/backbone.js`, deployed to kahf.dev | 1139 server tests; client round trip through a local copy of the server code |
 | Relay carries messages for stations it cannot hear through the server, delivers the ones the server holds for stations it hears, sends receipts back as a short message | `kahf-daemon/src/backbone.rs`, daemon | unit tests; `backbone_round_trip_through_a_local_server` (needs `node server/tools/serve-local.mjs`) |
 
+## What the HF channel tests showed (new, and the most important)
+
+`cargo run --release -p kahf-sim --example hf_sweep` runs every mode through the ITU-R F.1487 HF
+channels (two Rayleigh paths with Doppler spread; good 0.5 ms and 0.1 Hz, moderate 1 ms and 0.5 Hz,
+poor 2 ms and 1 Hz). SNR in dB for 10 percent frame loss (">30" means never reached):
+
+| mode | plain noise | HF good | HF moderate | HF poor |
+|---|---:|---:|---:|---:|
+| KAMI-256, 64, 32 | -16, -10, -8 | >30 | >30 | >30 |
+| KAMI-16, 8 | -4 | 0 | >30 | >30 |
+| KAMI-4 | -2 | 2 | >30 | >30 |
+| KAMI-1a | 0 | 10 | 6 | >30 |
+| KAMI-1b, 1c, 1d | 6, 10, 12 | >30 | >30 | >30 |
+
+1. **Before this work KAMI could not take any echo.** Two equal paths 0.5 to 2 ms apart (ordinary HF) lost
+   72 to 82 percent of KAMI-32 frames at 30 dB SNR. A preamble-trained MMSE equalizer fixed that (0 to 2
+   percent lost); on a channel without echoes it does nothing, and plain-noise results are unchanged.
+2. **The slow modes are the fragile ones on HF.** Their bursts last 2 to 8 s and the channel changes during a
+   burst, so the single channel estimate from the preamble goes stale. KAMI-256/64/32 never reach 10 percent
+   loss on any HF channel; KAMI-16 to KAMI-1a do on "good" and "moderate". The link now never falls below
+   KAMI-16 while the signal is not weak (-3 dB or better).
+3. **Not solved:** the poor channel (1 Hz Doppler) for everything, and the slow modes everywhere. The fix is
+   tracking the channel through a burst: short known training blocks inside the burst, or decision-directed
+   re-estimation. That changes the frame format and is the next PHY task. Until it is done, quote HF
+   performance from this table, not from the plain-noise table in docs/KAMI-MODES.md.
+
 Not built yet (designs are in NETWORK-DESIGN.md, NETWORK-SCENARIOS.md, NETWORK-CHANNELS.md):
 
 - Relay as traffic controller: request window, grants (the last hidden-station cases), virtual carrier sense.
@@ -23,6 +49,6 @@ Not built yet (designs are in NETWORK-DESIGN.md, NETWORK-SCENARIOS.md, NETWORK-C
 - Mailbox codes in the beacon (a station hearing its own code asks for its mail). Today the relay delivers
   waiting mail when it hears the station (any frame, an advert, a beacon answer).
 - Delivery states beyond what exists, a channel busy strip, queue position in the app.
-- A Watterson HF channel model in the simulator (kahf-sim has channel models to reuse).
-- Transmit level safeguards, and any test on a real HF channel.
+- Channel tracking inside a burst (see above), then a re-measured mode table and ladder.
+- Any test on a real HF channel. (Transmit level: a setting with a 50 percent default and a 5 second test tone is in; automatic drive control is not.)
 - Relay mode needs the area shared (location not off) to register; without it the relay is radio only.

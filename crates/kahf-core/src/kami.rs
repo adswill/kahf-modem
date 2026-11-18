@@ -650,6 +650,7 @@ const EQ_HALF: isize = 8;
 /// Taps that cannot be told from the estimate's own noise are dropped; with only the main path
 /// left (any channel without echoes) the chips are returned untouched, so a plain noise channel
 /// behaves exactly as before.
+#[allow(clippy::needless_range_loop)]
 fn equalise(r: &mut [C], pn: &[f64]) {
     let p = pn.len();
     if r.len() < p + 32 || p < 64 {
@@ -720,7 +721,7 @@ fn equalise(r: &mut [C], pn: &[f64]) {
     let hi = EQ_POST + EQ_HALF;
     let nj = (hi - lo + 1) as usize;
     let hval = |d: isize| -> C {
-        if d >= -EQ_PRE && d <= EQ_POST {
+        if (-EQ_PRE..=EQ_POST).contains(&d) {
             h[(d + EQ_PRE) as usize]
         } else {
             (0.0, 0.0)

@@ -1233,6 +1233,11 @@ const MODULATIONS: [Modulation; 11] = [
     Modulation::Kami1d,
 ];
 
+/// Index in `MODULATIONS` of KAMI-16, the slowest mode used while the signal is not weak.
+const HF_MIN_LEVEL: usize = 4;
+/// Below this reported SNR (dB) the slowest rungs are allowed.
+const HF_SLOW_FLOOR_SNR_DB: f32 = -3.0;
+
 /// Every KAMI mode the receiver recognises, ladder or not. They share one preamble.
 const KAMI_MODES: [Modulation; 13] = [
     Modulation::Kami256,
@@ -3056,6 +3061,13 @@ impl Worker {
                 _ => {}
             },
         }
+        // On HF the slowest modes are not the safest: their bursts last many seconds, and the
+        // channel changes during one (fading), so a burst that long often fails where a shorter
+        // one gets through (measured: crates/kahf-sim hf_sweep). While the signal is not weak,
+        // never fall below KAMI-16, whatever the losses; the lower rungs are for weak signals.
+        if self.link.peer_snr_db().is_some_and(|snr| snr >= HF_SLOW_FLOOR_SNR_DB) {
+            next = next.max(HF_MIN_LEVEL);
+        }
         self.tx_level = next as u8;
     }
 
@@ -4217,7 +4229,8 @@ mod tests {
     fn noise_for(snr_db: f32) -> f32 {
         let air = burst(&[b"ref".to_vec()], Modulation::Kami32).unwrap();
         let body = &air[LEAD_SILENCE..air.len() - TAIL_SILENCE];
-        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt();
+        // The engine sends at its transmit level, below full scale.
+        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt() * DEFAULT_TX_LEVEL_PCT as f32 / 100.0;
         rms * 10f32.powf(-snr_db / 20.0)
     }
 
