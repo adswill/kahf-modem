@@ -1188,7 +1188,7 @@ fn save_file(inbox: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
 
 /// Session chunks for one message as they go on air. The private bit is set when `private`.
 fn air_chunks(msg: &Message, private: bool) -> Result<Vec<Vec<u8>>, String> {
-    guard("session encode", || session::encode_signed(msg, None, private))
+    session::try_encode_signed(msg, None, private).map_err(|e| e.to_string())
 }
 
 fn kind_of(msg: &Message) -> &'static str {
@@ -2914,7 +2914,7 @@ mod tests {
         assert_eq!(frame_template()[..PREAMBLE_LEN].len(), PREAMBLE_LEN);
         let payload = b"hello kahf".to_vec();
         let mut air = vec![0f32; 1234];
-        air.extend(burst(&[payload.clone()], MODULATION).unwrap());
+        air.extend(burst(std::slice::from_ref(&payload), MODULATION).unwrap());
         air.extend(vec![0f32; 500]);
         let start = find_preamble(&air).expect("preamble found");
         let expected = 1234 + LEAD_SILENCE;
@@ -2947,7 +2947,7 @@ mod tests {
     #[test]
     fn weak_mode_decodes_where_one_copy_does_not() {
         let payload = b"weak mode".to_vec();
-        let clean = weak_burst(&[payload.clone()]).expect("weak burst builds");
+        let clean = weak_burst(std::slice::from_ref(&payload)).expect("weak burst builds");
         // The first copy starts after the lead-in silence.
         let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
         let copy_at = |i: usize| LEAD_SILENCE + i * stride;
@@ -3635,7 +3635,7 @@ mod tests {
 
     #[test]
     fn relay_schedule_is_checked_and_held_outside_transmit_slots() {
-        let mut w = bare_worker("relay-gate", "AA1AAA");
+        let w = bare_worker("relay-gate", "AA1AAA");
         let now = now_unix_secs() as u64;
         let transmit = |start: u64| Slot {
             channel_khz: 14_000.0,
@@ -3707,7 +3707,7 @@ mod tests {
     #[test]
     fn relay_start_needs_both_acknowledgements() {
         let dir = temp_dir("relay-ack");
-        let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
+        let e = Engine::new(config("AA1AAA", dir)).unwrap();
         // No role yet: refused with a plain message.
         let both = RelayAck {
             licence_held: true,
@@ -3743,7 +3743,7 @@ mod tests {
     fn relay_start_is_per_run_and_not_saved() {
         let dir = temp_dir("relay-per-run");
         {
-            let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
+            let e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
             e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
                 .unwrap();
             e.start_relay(RelayAck {
@@ -3753,7 +3753,7 @@ mod tests {
             .unwrap();
         }
         // A new run starts with relay mode off, whatever the old run had.
-        let mut again = Engine::new(config("AA1AAA", dir)).unwrap();
+        let again = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(!again.relay_running());
         again
             .configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])

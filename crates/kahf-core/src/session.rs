@@ -84,6 +84,41 @@ pub fn encode(msg: &Message) -> Vec<Vec<u8>> {
     encode_with(msg, true)
 }
 
+/// Why a message cannot be serialised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeError {
+    /// A text field is longer than its 16-bit length field allows.
+    StringTooLong(usize),
+    /// More attachments than the 16-bit count allows.
+    TooManyAttachments(usize),
+    /// File data longer than the 32-bit length field allows.
+    FileTooLarge(usize),
+    /// The message needs more chunks than the link format allows.
+    TooManyChunks(usize),
+}
+
+impl std::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StringTooLong(n) => write!(f, "session: string of {n} bytes exceeds 65535"),
+            Self::TooManyAttachments(n) => write!(f, "session: {n} attachments exceed 65535"),
+            Self::FileTooLarge(n) => write!(f, "session: file of {n} bytes is too large"),
+            Self::TooManyChunks(n) => write!(f, "session: message needs {n} chunks, limit is {MAX_CHUNKS}"),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+/// As `encode_signed`, but returns an error instead of panicking when the message does not fit.
+pub fn try_encode_signed(
+    msg: &Message,
+    key: Option<&StationKey>,
+    private: bool,
+) -> Result<Vec<Vec<u8>>, EncodeError> {
+    try_encode_inner(msg, true, key, private)
+}
+
 /// As `encode`, with compression switched on or off.
 pub fn encode_with(msg: &Message, compress: bool) -> Vec<Vec<u8>> {
     encode_inner(msg, compress, None, false)
@@ -100,12 +135,21 @@ pub fn encode_signed(msg: &Message, key: Option<&StationKey>, private: bool) -> 
 }
 
 fn encode_inner(msg: &Message, compress: bool, key: Option<&StationKey>, private: bool) -> Vec<Vec<u8>> {
+    try_encode_inner(msg, compress, key, private).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_encode_inner(
+    msg: &Message,
+    compress: bool,
+    key: Option<&StationKey>,
+    private: bool,
+) -> Result<Vec<Vec<u8>>, EncodeError> {
     let kind = match msg {
         Message::Chat { .. } => KIND_CHAT,
         Message::Mail { .. } => KIND_MAIL,
         Message::File { .. } => KIND_FILE,
     };
-    let body = serialise(msg);
+    let body = serialise(msg)?;
     let auth_block = key.map(|k| auth::sign(k, sender(msg), &body));
     let compressed = if compress {
         zstd::encode_all(&body[..], ZSTD_LEVEL)
@@ -208,7 +252,7 @@ pub fn decode_signed(chunks: &[Vec<u8>]) -> Option<Signed> {
 /// the signature covers this exact message and the signer is the message's `from` station.
 /// Any change to the body, the sender or the signature returns None.
 pub fn verify_signature(msg: &Message, block: &[u8]) -> Option<String> {
-    let body = serialise(msg);
+    let body = serialise(msg).ok()?;
     let (callsign, _public) = auth::verify(block, &body).ok()?;
     (callsign == sender(msg)).then_some(callsign)
 }
@@ -242,14 +286,13 @@ struct Parsed<'a> {
     data: &'a [u8],
 }
 
-fn to_chunks(stream: &[u8]) -> Vec<Vec<u8>> {
+fn to_chunks(stream: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
     let id = Sha256::digest(stream).as_slice()[0];
     let n = stream.len().div_ceil(CHUNK_DATA);
-    assert!(
-        n <= MAX_CHUNKS,
-        "session: message needs {n} chunks, limit is {MAX_CHUNKS}"
-    );
-    stream
+    if n > MAX_CHUNKS {
+        return Err(EncodeError::TooManyChunks(n));
+    }
+    Ok(stream
         .chunks(CHUNK_DATA)
         .enumerate()
         .map(|(i, data)| {
@@ -262,7 +305,7 @@ fn to_chunks(stream: &[u8]) -> Vec<Vec<u8>> {
             c.extend_from_slice(&crc.to_be_bytes());
             c
         })
-        .collect()
+        .collect())
 }
 
 fn parse_chunk(c: &[u8]) -> Option<Parsed<'_>> {
@@ -326,13 +369,13 @@ fn decode_group(id: u8, valid: &[Parsed<'_>]) -> Option<Decoded> {
     })
 }
 
-fn serialise(msg: &Message) -> Vec<u8> {
+fn serialise(msg: &Message) -> Result<Vec<u8>, EncodeError> {
     let mut out = Vec::new();
     match msg {
         Message::Chat { from, to, text } => {
-            put_str(&mut out, from);
-            put_str(&mut out, to);
-            put_str(&mut out, text);
+            put_str(&mut out, from)?;
+            put_str(&mut out, to)?;
+            put_str(&mut out, text)?;
         }
         Message::Mail {
             from,
@@ -341,33 +384,35 @@ fn serialise(msg: &Message) -> Vec<u8> {
             body,
             attachments,
         } => {
-            put_str(&mut out, from);
-            put_str(&mut out, to);
-            put_str(&mut out, subject);
-            put_str(&mut out, body);
-            let count = u16::try_from(attachments.len()).expect("session: too many attachments");
+            put_str(&mut out, from)?;
+            put_str(&mut out, to)?;
+            put_str(&mut out, subject)?;
+            put_str(&mut out, body)?;
+            let count = u16::try_from(attachments.len())
+                .map_err(|_| EncodeError::TooManyAttachments(attachments.len()))?;
             out.extend_from_slice(&count.to_le_bytes());
             for a in attachments {
-                put_str(&mut out, a);
+                put_str(&mut out, a)?;
             }
         }
         Message::File { from, to, name, data } => {
-            put_str(&mut out, from);
-            put_str(&mut out, to);
-            put_str(&mut out, name);
+            put_str(&mut out, from)?;
+            put_str(&mut out, to)?;
+            put_str(&mut out, name)?;
             out.extend_from_slice(Sha256::digest(data).as_slice());
-            let len = u32::try_from(data.len()).expect("session: file too large");
+            let len = u32::try_from(data.len()).map_err(|_| EncodeError::FileTooLarge(data.len()))?;
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(data);
         }
     }
-    out
+    Ok(out)
 }
 
-fn put_str(out: &mut Vec<u8>, s: &str) {
-    let len = u16::try_from(s.len()).expect("session: string longer than 65535 bytes");
+fn put_str(out: &mut Vec<u8>, s: &str) -> Result<(), EncodeError> {
+    let len = u16::try_from(s.len()).map_err(|_| EncodeError::StringTooLong(s.len()))?;
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(s.as_bytes());
+    Ok(())
 }
 
 struct Reader<'a> {
@@ -457,6 +502,10 @@ fn crc16(bytes: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    fn ser(msg: &Message) -> Vec<u8> {
+        serialise(msg).unwrap()
+    }
+
     use super::*;
 
     fn lcg(s: &mut u32) -> u32 {
@@ -570,17 +619,17 @@ mod tests {
     fn session_file_hash_mismatch_returns_none() {
         // Build a file stream whose data was altered after hashing, then re-chunk it with valid CRCs.
         let msg = file(300);
-        let mut body = serialise(&msg);
+        let mut body = ser(&msg);
         let last = body.len() - 1;
         body[last] ^= 0x01;
         let mut stream = vec![KIND_FILE << 1];
         stream.extend_from_slice(&body);
-        assert_eq!(decode(&to_chunks(&stream)), None);
+        assert_eq!(decode(&to_chunks(&stream).unwrap()), None);
     }
 
     /// Bytes of a file message's fields other than its data (the stream adds one meta byte).
     fn file_overhead() -> usize {
-        serialise(&file(0)).len()
+        ser(&file(0)).len()
     }
 
     /// A file whose uncompressed stream is exactly `stream_len` bytes.
@@ -717,7 +766,7 @@ mod tests {
         let mut stream = vec![meta];
         stream.extend_from_slice(auth_block);
         stream.extend_from_slice(body);
-        to_chunks(&stream)
+        to_chunks(&stream).expect("test stream fits")
     }
 
     #[test]
@@ -738,12 +787,12 @@ mod tests {
     #[test]
     fn session_signed_changed_body_fails() {
         let msg = chat();
-        let auth_block = auth::sign(&signing_key(), "KA1ABC", &serialise(&msg));
+        let auth_block = auth::sign(&signing_key(), "KA1ABC", &ser(&msg));
         let mut tampered = msg.clone();
         if let Message::Chat { text, .. } = &mut tampered {
             *text = "hello over the lint".into();
         }
-        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &auth_block, &serialise(&tampered));
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &auth_block, &ser(&tampered));
         let got = decode_signed(&chunks).unwrap();
         assert_eq!(got.message, tampered);
         assert!(!got.verified);
@@ -756,8 +805,8 @@ mod tests {
     fn session_signature_from_other_station_fails() {
         // Valid signature by KA9ZZZ over a message sent from KA1ABC: not the sender, so unverified.
         let msg = chat();
-        let auth_block = auth::sign(&signing_key(), "KA9ZZZ", &serialise(&msg));
-        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &auth_block, &serialise(&msg));
+        let auth_block = auth::sign(&signing_key(), "KA9ZZZ", &ser(&msg));
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &auth_block, &ser(&msg));
         let got = decode_signed(&chunks).unwrap();
         assert!(!got.verified);
         assert_eq!(got.signer, None);
@@ -783,7 +832,7 @@ mod tests {
 
     /// Serialised auth block for `msg`, signed by `signer` with the test key.
     fn auth_for(msg: &Message, signer: &str) -> Vec<u8> {
-        auth::sign(&signing_key(), signer, &serialise(msg))
+        auth::sign(&signing_key(), signer, &ser(msg))
     }
 
     #[test]
@@ -794,7 +843,7 @@ mod tests {
         let mut bad_sig = base.clone();
         let last = bad_sig.len() - 1;
         bad_sig[last] ^= 0x01;
-        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &bad_sig, &serialise(&msg));
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &bad_sig, &ser(&msg));
         let got = decode_signed(&chunks).unwrap();
         assert!(!got.verified);
         assert!(got.has_signature);
@@ -809,7 +858,7 @@ mod tests {
         // Public key starts after the callsign length byte and the callsign.
         let key_at = 1 + "KA1ABC".len();
         block[key_at] ^= 0x80;
-        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &serialise(&msg));
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &ser(&msg));
         let got = decode_signed(&chunks).unwrap();
         assert!(!got.verified);
         assert_eq!(signature_label(&got), "Signature not verified");
@@ -824,7 +873,7 @@ mod tests {
         if let Message::Chat { from, .. } = &mut forged {
             *from = "KA9ZZZ".into();
         }
-        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &serialise(&forged));
+        let chunks = raw_stream(META_SIGNED | (KIND_CHAT << 1), &block, &ser(&forged));
         let got = decode_signed(&chunks).unwrap();
         assert!(!got.verified);
         assert_eq!(signature_label(&got), "Signature not verified");
@@ -834,8 +883,8 @@ mod tests {
     fn session_signed_file_with_wrong_hash_is_dropped() {
         // A signed file whose data changed after hashing: the hash check rejects the whole message.
         let msg = file(300);
-        let block = auth::sign(&signing_key(), "a", &serialise(&msg));
-        let mut body = serialise(&msg);
+        let block = auth::sign(&signing_key(), "a", &ser(&msg));
+        let mut body = ser(&msg);
         let last = body.len() - 1;
         body[last] ^= 0x01;
         let chunks = raw_stream(META_SIGNED | (KIND_FILE << 1), &block, &body);
@@ -855,7 +904,7 @@ mod tests {
         let forged = decode_signed(&raw_stream(
             META_SIGNED | (KIND_CHAT << 1),
             &forged_block,
-            &serialise(&msg),
+            &ser(&msg),
         ))
         .unwrap();
         assert_eq!(signature_label(&forged), "Signature not verified");
@@ -894,5 +943,32 @@ mod tests {
         assert_eq!(both.message, msg);
 
         assert!(!decode_signed(&encode(&msg)).unwrap().private);
+    }
+
+    #[test]
+    fn malformed_sizes_return_error_not_panic() {
+        let long = "x".repeat(65536);
+        let chat = Message::Chat {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            text: long,
+        };
+        let r = std::panic::catch_unwind(|| serialise(&chat));
+        assert_eq!(r.unwrap(), Err(EncodeError::StringTooLong(65536)));
+        let r = std::panic::catch_unwind(|| try_encode_signed(&chat, None, false));
+        assert!(r.unwrap().is_err());
+        let mail = Message::Mail {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            subject: String::new(),
+            body: String::new(),
+            attachments: vec![String::new(); 65536],
+        };
+        assert_eq!(serialise(&mail), Err(EncodeError::TooManyAttachments(65536)));
+        let big = file_with_stream_len(MAX_MESSAGE + 1);
+        assert!(matches!(
+            try_encode_signed(&big, None, false),
+            Err(EncodeError::TooManyChunks(_))
+        ));
     }
 }
