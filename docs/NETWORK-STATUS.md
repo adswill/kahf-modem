@@ -172,3 +172,22 @@ Not done in WP10: the relay screen's referee status, lane occupancy bars from th
 ### WP5 update: ten operators
 
 After the relay's downlink was limited to the first data slot, with the next slot left free for the answer (the answer of the station that receives it had collided with granted slots), `REF_OPS=10 cargo test -p kahf-daemon hidden_operators` **passes**: ten operators that cannot hear each other, one relay, every message delivered once, the last after 2038 virtual seconds (about 34 minutes; six operators took 314 s). That is simulation, with the spec's own slot plan, and it is slow: one lane gives two data slots per 12 s round and requests collide in two window slots. Capacity needs the planner's other lanes (WP6) or a bigger round. Still not done: relay crash and restart, two relays on different lanes.
+
+## WP6 and WP7: the server mesh and the relay's link to it (2026-11-19, session E)
+
+Owner decisions (asked once, 2026-11-19): the project signing key is a Cloudflare secret (`PROJECT_KEY`, base64 32 byte seed) with the public key in the
+app; a WebSocket crate may be added (tungstenite, with rustls); the old queued-message backbone and its stored data may be removed.
+
+| Item | State | Evidence |
+|---|---|---|
+| Mesh brain | built, tested | `server/src/mesh.js`: one socket per relay key, heartbeats, presence, routing with deliver-first, paging, duplicate control, receipts, plans four epochs ahead signed with the project key, relay suspension (three off-plan reports in ten minutes). 12 tests in `server/test/mesh.test.mjs` |
+| Durable Object and routes | built, **not deployed** | `src/mesh-object.js` (`MeshObject`, RAM only; the one thing on disk is the learner's counts), signed `GET /mesh/ws`, `POST /mesh/frames`, `POST /mesh/poll` (`mesh-routes.test.mjs`: bad signature, old time, unregistered relay, another key, content-carrying frames, WebSocket upgrade). `wrangler deploy --dry-run` bundles |
+| What passes through | decision | frames carry ids, sizes and hashes; a message travels as one opaque `blob` (at most 12 000 base64 characters) that only passes through the object's memory to the delivering relay and is never stored (tests: nothing of it remains after the receipt; the mesh object's only `storage.put` is the learner). Any field named body, text, subject, payload, content, data or message is refused |
+| Old backbone | removed in code | `backbone.js`, `/msg/*`, `/relay/*`, `MAILBOXES`, `BACKBONE` and their tests are gone; migration v3 deletes the `MailObject` and `IndexObject` data **when deployed** (not undoable). The "known exception" in the no-storage test is gone |
+| Planner twins | done | `bond`, `bondCount`, `hopGrants` in `server/src/planner.js` give exactly the strings the Rust planner gives (`known_bonds_and_hops_for_the_js_twin`). Plans carry bonded runs and hop grants (`P1|epoch|seed|grants|runs|hops`) |
+| Learner and sun | built | per (relay, receiver hash, hour) counts, forgotten over about a week, saved by the object; today's NOAA solar flux and K index (hourly cron `7 * * * *`, not yet run live) scale the first guess |
+| Relay side (daemon) | built | `backbone.rs` now speaks the mesh: signed HTTPS (`heard` as hashes, `submit` with the blob, poll, receipts) and a WebSocket push link (tungstenite, reconnect with back-off, HTTPS while it is down, one socket per key). A message nobody in the mesh hears goes on the radio. Plans are used only when signed by the project key (`PROJECT_PUBLIC_KEY_B64` in `backbone.rs`; the seed is in `server/.project-key`, git-ignored). Tests: signed call, frame parsing, plan signature (3 cases), plus two ignored tests against a local server: a round trip through two relays and the push latency |
+| Latency | measured on loopback only | relay to relay over loopback with the local WebSocket server: 53 to 63 ms (limit 100). That is not internet latency |
+| **Not done** | | the relay does not yet use the server's plan to decide when to transmit (its own 12 s referee round still runs; plans are verified and kept); the clash-domain graph and colouring (all relays are still one domain); the learner is fed by `heard` frames and receipts only; the NOAA job and the WebSocket path have not run on the live Worker; sending the occupancy reports to the server |
+
+**To deploy (owner asks first):** `cd server && npx wrangler secret put PROJECT_KEY < .project-key && npx wrangler deploy`. Rollback of the code: `npx wrangler rollback`; the deleted backbone data cannot come back. Old app versions that call `/msg/*` will get 404.

@@ -157,3 +157,87 @@ test("a message blob passes through to the delivering relay and is kept nowhere"
   mesh.onFrame("BB1BBB", { t: "receipt", id: "m9", status: "delivered" }, 3000);
   assert.ok(!JSON.stringify([...mesh.origin.entries()]).includes("aGVsbG8="));
 });
+
+test("a relay that asks to bond lanes or to hop gets them in the signed plan, from the same code as the Rust planner", async () => {
+  const { kp, mesh } = await setup();
+  const a = sock(), b = sock();
+  mesh.connect("AA1AAA", a, 0);
+  mesh.connect("BB1BBB", b, 0);
+  mesh.onFrame("AA1AAA", { t: "queue", bytes: 1500, urgency: 0, items: 3, lanes: 3, hops: [h24("BB1BBB")] }, 0);
+  // BB1BBB listens only (it has nothing to send), so lanes next to AA1AAA are free and it can be hopped to.
+  mesh.onFrame("BB1BBB", { t: "queue", bytes: 0, urgency: 0, items: 0 }, 0);
+  await mesh.publish(60_000);
+  const frames = a.sent.filter((m) => m.t === "plan");
+  assert.ok(frames.length === LOOKAHEAD_EPOCHS);
+  for (const f of frames) {
+    assert.equal(await verifyText(kp.publicKey, f.plan, f.sig), true);
+    const parts = f.plan.split("|");
+    assert.equal(parts.length, 6, f.plan);
+  }
+  assert.ok(frames.some((f) => f.plan.split("|")[4].length > 0), "no bonded run in any epoch");
+  // Every run is at most 4 lanes and never the calling lanes (physical 5 and 6).
+  for (const f of frames) {
+    for (const run of f.plan.split("|")[4].split(",").filter(Boolean)) {
+      const [, , first, count] = run.split(":").map(Number);
+      assert.ok(count >= 2 && count <= 4);
+      for (let l = first; l < first + count; l++) assert.ok(l !== 5 && l !== 6);
+    }
+  }
+});
+
+test("the network learns which relay reaches a receiver, and keeps counts only", async () => {
+  const { mesh } = await setup();
+  const [a, b, c] = [sock(), sock(), sock()];
+  mesh.connect("AA1AAA", a, 0);
+  mesh.connect("BB1BBB", b, 0);
+  mesh.connect("CC1CCC", c, 0);
+  const dest = h24("ZZ9ZZZ");
+  // Two relays hear the receiver; BB1BBB fails to deliver twice, CC1CCC succeeds.
+  mesh.onFrame("BB1BBB", { t: "heard", dest, snr: 6, lane: 5 }, 1000);
+  mesh.onFrame("CC1CCC", { t: "heard", dest, snr: 6, lane: 5 }, 1000);
+  for (const [id, via] of [["l1", "BB1BBB"], ["l2", "BB1BBB"], ["l3", "CC1CCC"], ["l4", "CC1CCC"]]) {
+    mesh.origin.set(id, { call: "AA1AAA", dest });
+    mesh.onFrame(via, { t: "receipt", id, status: via === "BB1BBB" ? "failed" : "delivered" }, 2000);
+  }
+  const hour = new Date(2000).getUTCHours();
+  assert.ok(mesh.learner.p("CC1CCC", `h${dest}`, hour, 2000, 0.5) > mesh.learner.p("BB1BBB", `h${dest}`, hour, 2000, 0.5));
+  assert.equal(mesh.dirty, true);
+  // What is kept is counts per pair and hour, and nothing else.
+  const saved = JSON.stringify(mesh.learner.toJSON());
+  assert.ok(!/AA1AAA|ZZ9ZZZ|l1/.test(saved.replace(/CC1CCC|BB1BBB/g, "")), saved);
+  const again = (await import("../src/propagation.js")).Learner.fromJSON(JSON.parse(saved));
+  assert.equal(again.p("CC1CCC", `h${dest}`, hour, 2000, 0.5), mesh.learner.p("CC1CCC", `h${dest}`, hour, 2000, 0.5));
+});
+
+test("solar conditions move the first guess for every path", async () => {
+  const { mesh } = await setup();
+  const dest = h24("ZZ9ZZZ");
+  const p = (m) => m.router.pOf("AA1AAA", dest, 5000);
+  const normal = p(mesh);
+  mesh.setSolar({ sfi: 160, kp: 1 });
+  const good = p(mesh);
+  mesh.setSolar({ sfi: 80, kp: 6 });
+  const bad = p(mesh);
+  assert.ok(good > normal && normal > bad, `${good} ${normal} ${bad}`);
+});
+
+test("a relay reported off plan three times in ten minutes is suspended and gets no cells", async () => {
+  const { mesh } = await setup();
+  const [a, b, c] = [sock(), sock(), sock()];
+  mesh.connect("AA1AAA", a, 0);
+  mesh.connect("BB1BBB", b, 0);
+  mesh.connect("CC1CCC", c, 0);
+  for (const call of ["AA1AAA", "BB1BBB", "CC1CCC"]) mesh.onFrame(call, { t: "queue", bytes: 900, urgency: 0, items: 1 }, 0);
+  mesh.onFrame("AA1AAA", { t: "clash", lane: 2, slot: 3, other: "CC1CCC" }, 1000);
+  mesh.onFrame("BB1BBB", { t: "clash", lane: 2, slot: 3, other: "CC1CCC" }, 2000);
+  assert.equal(c.sent.find((m) => m.t === "suspended"), undefined, "two reports are not enough");
+  mesh.onFrame("AA1AAA", { t: "clash", lane: 2, slot: 4, other: "CC1CCC" }, 3000);
+  assert.equal(c.sent.find((m) => m.t === "suspended").why, "off plan");
+  mesh.onFrame("CC1CCC", { t: "queue", bytes: 900, urgency: 0, items: 1 }, 4000);
+  await mesh.publish(60_000);
+  const text = a.sent.find((m) => m.t === "plan").plan;
+  assert.ok(!text.split("|")[3].split(",").some((g) => Number(g.split(":")[0]) === h24("CC1CCC")), "a suspended relay got cells");
+  // A report about oneself is ignored.
+  mesh.onFrame("AA1AAA", { t: "clash", lane: 0, slot: 0, other: "AA1AAA" }, 5000);
+  assert.equal(mesh.strikes.has("AA1AAA"), false);
+});

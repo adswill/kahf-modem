@@ -16,7 +16,7 @@ test('the mesh modules import nothing but node:crypto and name no storage', () =
     const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
     const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
     const imports = [...code.matchAll(/^import .* from ['"](.+)['"]/gm)].map((m) => m[1]);
-    for (const i of imports) assert.ok(i === 'node:crypto' || /^\.\/(hub|router|planner)\.js$/.test(i), `${f} imports ${i}`);
+    for (const i of imports) assert.ok(i === 'node:crypto' || /^\.\/(hub|router|planner|propagation)\.js$/.test(i), `${f} imports ${i}`);
     assert.ok(!STORAGE_WORDS.test(code), `${f} mentions storage`);
   }
 });
@@ -54,4 +54,13 @@ test('the hub refuses a message that carries content', () => {
     assert.throws(() => hub.push('A', { t: 'deliver', id: 1, [k]: 'hello' }, 0), /only ids and sizes/, k);
   }
   assert.equal(hub.push('A', { t: 'deliver', id: 1, size: 5 }, 0), 'held');
+});
+
+test('the mesh object writes one thing to disk: the learner counts, and only those', () => {
+  const src = readFileSync(new URL('../src/mesh-object.js', import.meta.url), 'utf8');
+  const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  const puts = [...code.matchAll(/storage\.(put|set|setAlarm|delete)\(\s*([^,)]*)/g)].map((m) => `${m[1]} ${m[2]}`);
+  assert.deepEqual(puts, ['put "learner"']);
+  const gets = [...code.matchAll(/storage\.get\(\s*([^)]*)\)/g)].map((m) => m[1]);
+  assert.deepEqual(gets, ['"learner"']);
 });

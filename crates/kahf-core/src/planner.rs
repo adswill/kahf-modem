@@ -539,6 +539,22 @@ mod bonding_tests {
         ids.iter().map(|&id| RelayIn { id, queue_bytes: 800, urgency: 0 }).collect()
     }
 
+    /// What the JS twin (server/src/planner.js) must give for the same input: run with `--nocapture`.
+    #[test]
+    fn known_bonds_and_hops_for_the_js_twin() {
+        let rs: Vec<RelayIn> = (0..20u32).map(|i| RelayIn { id: 10 + i, queue_bytes: (i * 37 % 11) * 250, urgency: (i % 3) as u8 }).collect();
+        let p = plan(77, 42, &rs);
+        let wants: Vec<(u32, u8)> = rs.iter().map(|r| (r.id, 1 + (r.id % 4) as u8)).collect();
+        let b: Vec<String> = bond(&p, &wants).iter().map(|b| format!("{}:{}:{}:{}", b.relay, b.slot, b.first, b.count)).collect();
+        eprintln!("TWINB {}", b.join(","));
+        let h: Vec<String> = hop_grants(&p, &[(10, 11), (12, 13), (14, 15), (10, 15), (16, 17), (18, 19)])
+            .iter()
+            .map(|h| format!("{}>{}:{}:{}", h.relay, h.target, h.lane, h.slot))
+            .collect();
+        eprintln!("TWINH {}", h.join(","));
+        eprintln!("TWINC {}", [(25.0, 50), (5.0, 5000), (10.0, 500), (16.0, 500), (30.0, 500), (9.0, 108), (15.0, 108), (21.0, 108)].iter().map(|(s, b)| bond_count(*s, *b).to_string()).collect::<Vec<_>>().join(","));
+    }
+
     #[test]
     fn eligibility_needs_a_strong_link_and_a_large_transfer() {
         assert_eq!(bond_count(25.0, 50), 1, "too small");

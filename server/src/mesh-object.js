@@ -4,6 +4,7 @@
 // checked; the object trusts the x-relay header the Worker sets, and nothing else reaches it from outside.
 import { Mesh, meshOp } from "./mesh.js";
 import { signText } from "./sign.js";
+import { Learner } from "./propagation.js";
 
 const TICK_MS = 3000;
 export const FRAMES_PER_MINUTE = 600;
@@ -14,9 +15,22 @@ export const seedFor = (nowMs) => Math.floor(nowMs / 86_400_000) >>> 0;
 export class MeshObject {
   constructor(state, env) {
     this.env = env;
+    this.state = state;
     this.mesh = new Mesh({ sign: (t) => signText(env.PROJECT_KEY, t), seed: seedFor(Date.now()) });
     this.rate = new Map(); // relay -> { minute, n }
     this.timer = null;
+    // The one thing kept on disk: what the network learned about which relay reaches which receiver hash
+    // at which hour (counts, never a message and never a callsign of an operator).
+    state.blockConcurrencyWhile(async () => {
+      this.mesh.learner = Learner.fromJSON(await state.storage.get("learner"));
+    });
+  }
+
+  /** Saves the learner when it changed. */
+  async save() {
+    if (!this.mesh.dirty) return;
+    this.mesh.dirty = false;
+    await this.state.storage.put("learner", this.mesh.learner.toJSON());
   }
 
   /** Counts frames per relay per minute; false when over the limit. */
@@ -37,6 +51,10 @@ export class MeshObject {
       this.mesh.seed = seedFor(now);
       this.mesh.tick(now);
       await this.mesh.publish(now);
+      if (now - (this.saved ?? 0) > 60_000) {
+        this.saved = now;
+        await this.save();
+      }
       if (this.mesh.hub.sockets.size === 0) {
         clearInterval(this.timer);
         this.timer = null;

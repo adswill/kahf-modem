@@ -51,6 +51,13 @@ export function modelP({ distKm, elevMid, sfi = 100, kp = 2 }) {
   return Math.min(1, dist * day * flux * k);
 }
 
+// How much the sun's output and the field's disturbance change any path today (1 = a normal day).
+export function solarFactor({ sfi = 100, kp = 2 } = {}) {
+  const flux = ramp(sfi, 70, 0.7, 170, 1);
+  const k = kp >= 5 ? 0.4 : kp >= 4 ? 0.7 : 1;
+  return flux * k;
+}
+
 export function pathModelP(a, b, ms, solar = {}) {
   const distKm = greatCircleKm(a.lat, a.lon, b.lat, b.lon);
   const m = midpoint(a.lat, a.lon, b.lat, b.lon);
@@ -79,6 +86,15 @@ export class Learner {
   }
   _key(a, b, hour) {
     return `${[a, b].sort().join('|')}|${hour}`;
+  }
+  // Aggregates only (counts per pair and hour): this is what the mesh object may keep on disk.
+  toJSON() {
+    return { cells: [...this.cells] };
+  }
+  static fromJSON(j) {
+    const l = new Learner();
+    for (const [k, c] of j?.cells ?? []) if (Number.isFinite(c?.s) && Number.isFinite(c?.f) && Number.isFinite(c?.at)) l.cells.set(k, { s: c.s, f: c.f, at: c.at });
+    return l;
   }
   _decayed(c, now) {
     const k = Math.exp(-(now - c.at) / TAU_MS);

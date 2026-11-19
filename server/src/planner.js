@@ -99,3 +99,70 @@ export function localPlan(epoch, seed, relayIds) {
   p.grants = p.grants.filter((g) => (epoch + g.relay) % LOCAL_DUTY_DIV === 0);
   return p;
 }
+
+// ---- bonding and hopping: JS twins of bond_count, bond and hop_grants (planner.rs) -------------
+
+/** Physical lane (the 12 of lanes.rs) of each relay lane R1 to R8. */
+export const PHYS = [0, 1, 2, 3, 8, 9, 10, 11];
+const PHYS_LANES = 12;
+const CALLING = [5, 6];
+
+/** How many lanes a transfer should ask for: one unless the link is strong and the transfer is more than a few frames. */
+export function bondCount(snrDb, bytes) {
+  if (bytes < 4 * 27 || snrDb < 9) return 1;
+  if (snrDb < 15) return 2;
+  if (snrDb < 21) return 3;
+  return 4;
+}
+
+/**
+ * Widen grants into runs of adjacent physical lanes. `wants` is [[relay, lanes wanted]], at most 4
+ * (five lanes would be 3280 Hz, over the 2700 Hz cap). Never the calling lanes, never over another run.
+ * Returns [{relay, slot, first, count}].
+ */
+export function bond(p, wants) {
+  const taken = Array.from({ length: SLOTS }, () => new Array(PHYS_LANES).fill(false));
+  for (const g of p.grants) taken[g.slot][PHYS[g.lane]] = true;
+  const out = [];
+  for (const [relay, w] of wants) {
+    const want = Math.min(4, Math.max(1, w));
+    for (const g of p.grants.filter((x) => x.relay === relay)) {
+      const own = PHYS[g.lane];
+      const free = (slot, l) => !CALLING.includes(l) && (l === own || !taken[slot][l]);
+      let best = [own, 1];
+      search: for (let n = want; n >= 1; n--) {
+        for (let first = Math.max(0, own - (n - 1)); first <= own; first++) {
+          let ok = first + n <= PHYS_LANES;
+          for (let l = first; ok && l < first + n; l++) ok = free(g.slot, l);
+          if (ok) {
+            best = [first, n];
+            break search;
+          }
+        }
+      }
+      for (let l = best[0]; l < best[0] + best[1]; l++) taken[g.slot][l] = true;
+      out.push({ relay, slot: g.slot, first: best[0], count: best[1] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Give each [from, to] request one cell of `from`'s grants: the earliest slot in which `to` holds no
+ * grant of its own and is not already the target of another hop. Returns [{relay, target, lane, slot}].
+ */
+export function hopGrants(p, requests) {
+  const receiving = new Set();
+  const used = new Set();
+  const out = [];
+  for (const [from, to] of requests) {
+    const mine = p.grants.filter((g) => g.relay === from).sort((a, b) => a.slot - b.slot);
+    const pick = mine.find((g) => !p.grants.some((x) => x.relay === to && x.slot === g.slot) && !receiving.has(`${g.slot}:${to}`) && !used.has(`${from}:${g.slot}`));
+    if (pick) {
+      receiving.add(`${pick.slot}:${to}`);
+      used.add(`${from}:${pick.slot}`);
+      out.push({ relay: from, target: to, lane: pick.lane, slot: pick.slot });
+    }
+  }
+  return out;
+}

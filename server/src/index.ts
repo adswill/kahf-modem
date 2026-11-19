@@ -15,12 +15,23 @@
 //   GET  /mesh/ws, POST /mesh/frames, /mesh/poll: the relay mesh (src/mesh.js), signed calls from registered relays
 import { handleRequest } from "./routes.js";
 import { kvStore, objectStore } from "./store";
+import { fetchSolar } from "./propagation.js";
 import type { Env } from "./types";
 
 export { CallsignObject, AreaObject } from "./objects.js";
 export { MeshObject } from "./mesh-object.js";
 
 export default {
+  // Hourly (see wrangler.toml): today's solar flux and K index from NOAA go to the mesh, which moves its first guesses.
+  async scheduled(_event: unknown, env: Env): Promise<void> {
+    try {
+      const solar = await fetchSolar(fetch);
+      await objectStore(env).meshOp("solar", solar);
+    } catch {
+      // NOAA is down or changed its format: the mesh keeps the last values, and its first guesses stay as they were.
+    }
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     return handleRequest(
       request,

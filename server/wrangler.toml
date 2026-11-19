@@ -4,6 +4,10 @@ compatibility_date = "2025-01-01"
 # node:crypto is used by the router (24 bit callsign hashes).
 compatibility_flags = ["nodejs_compat"]
 
+# Hourly: the mesh reads today's solar flux and K index from NOAA.
+[triggers]
+crons = ["7 * * * *"]
+
 # Public address: kahf.dev, served by this Worker.
 routes = [{ pattern = "kahf.dev", custom_domain = true }]
 
