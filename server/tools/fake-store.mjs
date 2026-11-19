@@ -46,7 +46,8 @@ export function fakeStore({ slow = false } = {}) {
   return {
     mesh,
     meshOp: (op, args) => one(async () => meshOp(mesh, op, args, args.nowMs)),
-    meshSocket: async () => new Response(JSON.stringify({ error: "no WebSocket in the test store" }), { status: 426 }),
+    // The test store has no socket of its own: it answers "authenticated" and tools/serve-local.mjs runs the socket.
+    meshSocket: async (call) => new Response(JSON.stringify({ call }), { status: 200 }),
     recs,
     owners,
     relays,

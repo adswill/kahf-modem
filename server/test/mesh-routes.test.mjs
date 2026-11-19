@@ -89,8 +89,9 @@ test("the WebSocket endpoint needs an upgrade and a valid signed hello", async (
   const bad = await handleRequest(new Request("https://kahf.test/mesh/ws" + q("A".repeat(86) + "=="), { headers: { upgrade: "websocket" } }), store, NOW);
   assert.equal(bad.status, 401);
   const good = await handleRequest(new Request("https://kahf.test/mesh/ws" + q(await signText(a.seed, `mesh1|AA1AAA|${ts}|ws`)), { headers: { upgrade: "websocket" } }), store, NOW);
-  // The test store has no WebSocket; the call got through authentication to the store.
-  assert.equal(good.status, 426);
+  // The test store has no WebSocket of its own: it answers once the hello was authenticated.
+  assert.equal(good.status, 200);
+  assert.deepEqual(await good.json(), { call: "AA1AAA" });
 });
 
 test("the old queued-message routes are gone", async () => {

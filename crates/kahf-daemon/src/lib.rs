@@ -2111,6 +2111,11 @@ struct Worker {
     bb: Option<BbHandle>,
     /// Outbox id -> server message id, for messages taken from the server and sent on the radio.
     bb_pending: HashMap<u64, String>,
+    /// Newest verified plan from the server: its epoch and text (`P1|epoch|seed|relay:lane:slot,...`).
+    plan_epoch: Option<u64>,
+    plan_text: String,
+    /// The key plans must be signed with (the project's; tests use their own).
+    plan_key: [u8; 32],
     /// Destination callsign of each message handed to the mesh, by its id (the receipt names only a hash).
     bb_sent: HashMap<String, String>,
     bb_last: Instant,
@@ -2280,6 +2285,9 @@ impl Worker {
             heard_recent: HashMap::new(),
             bb: None,
             bb_pending: HashMap::new(),
+            plan_epoch: None,
+            plan_text: String::new(),
+            plan_key: backbone::project_public_key(),
             bb_sent: HashMap::new(),
             bb_last: clock.now(),
             refusal_logged: None,
@@ -2709,6 +2717,21 @@ impl Worker {
         bb.send(BbJob::Submit(q, now, if kind == "chat" { 6 * 3600 } else { 24 * 3600 }));
     }
 
+    /// A plan the server pushed: used only when its signature checks against the project key.
+    fn bb_plan(&mut self, epoch: u64, text: &str, sig_b64: &str) {
+        let ok = backbone::b64_decode(sig_b64)
+            .and_then(|s| <[u8; 64]>::try_from(s).ok())
+            .is_some_and(|sig| kahf_core::auth::verify_raw(&self.plan_key, text.as_bytes(), &sig));
+        if !ok {
+            self.log("A plan from the server had a bad signature and was ignored.");
+            return;
+        }
+        if self.plan_epoch.is_none_or(|e| epoch > e) {
+            self.plan_epoch = Some(epoch);
+            self.plan_text = text.to_string();
+        }
+    }
+
     /// The mesh found no relay that hears the destination: this relay sends the message on the radio itself.
     fn bb_unrouted(&mut self, q: Queued) {
         let msg = if q.kind == "mail" {
@@ -2746,6 +2769,7 @@ impl Worker {
                     }
                 }
                 BbResult::Unrouted(q) => self.bb_unrouted(q),
+                BbResult::Plan(epoch, text, sig) => self.bb_plan(epoch, &text, &sig),
                 BbResult::Log(t) => self.log(t),
             }
         }
@@ -6033,6 +6057,28 @@ mod tests {
         // Nothing arrives twice afterwards.
         clock.sleep(Duration::from_secs(120));
         assert!(z.poll_events().into_iter().all(|e| !matches!(e, Event::Message { .. })), "a duplicate arrived");
+    }
+
+    #[test]
+    fn a_pushed_plan_is_used_only_when_the_project_key_signed_it() {
+        let key = kahf_core::auth::StationKey::generate();
+        let mut w = bare_worker("plan-sig", "RR1RRR");
+        w.plan_key = key.to_public();
+        let text = "P1|100|7|5:0:0,6:1:0";
+        let good = backbone::b64_encode(&key.sign_raw(text.as_bytes()));
+        // A signature by another key, and a changed plan, are refused.
+        let other = backbone::b64_encode(&kahf_core::auth::StationKey::generate().sign_raw(text.as_bytes()));
+        w.bb_plan(100, text, &other);
+        assert!(w.plan_epoch.is_none(), "a plan with the wrong key was taken");
+        w.bb_plan(100, "P1|100|7|5:0:1", &good);
+        assert!(w.plan_epoch.is_none(), "a changed plan was taken");
+        w.bb_plan(100, text, &good);
+        assert_eq!(w.plan_epoch, Some(100));
+        assert_eq!(w.plan_text, text);
+        // An older plan does not replace a newer one.
+        let older = "P1|99|7|";
+        w.bb_plan(99, older, &backbone::b64_encode(&key.sign_raw(older.as_bytes())));
+        assert_eq!(w.plan_epoch, Some(100));
     }
 
     #[test]

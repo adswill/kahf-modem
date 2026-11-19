@@ -8,10 +8,11 @@
 //! HTTP goes through the system `curl` (present on every supported system) so the engine needs
 //! no TLS stack of its own. Nothing here runs unless relay mode is on and a server is set.
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::process::{Command, Stdio};
 
 use kahf_core::auth::StationKey;
@@ -105,6 +106,15 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The project's public signing key (base64). The matching private seed is the server secret `PROJECT_KEY`
+/// (server/README.md); it signs the relay plans. Changing the key means a new app version.
+pub const PROJECT_PUBLIC_KEY_B64: &str = "F52kG5qSH4UDBdMsflIWctLs49hpyaYFQV94IcmU2Fs=";
+
+/// The project public key as bytes.
+pub fn project_public_key() -> [u8; 32] {
+    b64_decode(PROJECT_PUBLIC_KEY_B64).and_then(|v| <[u8; 32]>::try_from(v).ok()).unwrap_or([0; 32])
+}
+
 fn now_s() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -190,16 +200,7 @@ impl Backbone {
     /// `Ok(Unrouted)` when nobody does yet (the caller sends it on the radio), `Ok(Duplicate)` when
     /// another relay already handed over the same id.
     pub fn submit(&self, m: &Queued) -> Result<Submitted, String> {
-        let blob = json!({
-            "origin": m.origin, "dest": m.dest, "kind": m.kind, "subject": m.subject,
-            "body": b64_encode(&m.body), "urgent": m.urgent,
-        })
-        .to_string();
-        let frame = json!({
-            "t": "submit", "id": m.id, "dest": kahf_core::bundle::h24(&m.dest),
-            "size": m.body.len(), "blob": b64_encode(blob.as_bytes()),
-        });
-        let replies = self.post_frames(vec![frame])?;
+        let replies = self.post_frames(vec![submit_frame(m)])?;
         Ok(match replies.first().map(|r| r["t"].as_str().unwrap_or("")) {
             Some("dup") => Submitted::Duplicate,
             Some("routed") => Submitted::Routed,
@@ -222,6 +223,17 @@ impl Backbone {
     pub fn queue(&self, items: usize, bytes: usize) -> Result<(), String> {
         self.post_frames(vec![json!({ "t": "queue", "items": items, "bytes": bytes, "urgency": 0 })]).map(|_| ())
     }
+}
+
+/// The mesh frame for a message: ids, size, and the message itself as an opaque blob that only passes
+/// through the server's memory to the delivering relay.
+fn submit_frame(m: &Queued) -> Value {
+    let blob = json!({
+        "origin": m.origin, "dest": m.dest, "kind": m.kind, "subject": m.subject,
+        "body": b64_encode(&m.body), "urgent": m.urgent,
+    })
+    .to_string();
+    json!({ "t": "submit", "id": m.id, "dest": kahf_core::bundle::h24(&m.dest), "size": m.body.len(), "blob": b64_encode(blob.as_bytes()) })
 }
 
 /// What `Backbone::submit` found out.
@@ -282,6 +294,78 @@ pub fn message_id(origin: &str, stream: &[u8], now_s: u64) -> String {
     format!("{}-{}", origin.to_uppercase(), h % 4_000_000_000)
 }
 
+/// Percent-encodes a query value (base64 uses + / =).
+fn pct(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+impl Backbone {
+    /// The signed WebSocket address: `ws(s)://host/mesh/ws?relay=..&ts=..&key=..&sig=..`.
+    pub fn ws_url(&self) -> String {
+        let ts = now_s();
+        let sig = self.key.sign_raw(format!("mesh1|{}|{ts}|ws", self.relay).as_bytes());
+        let base = if let Some(rest) = self.server.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.server.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            self.server.clone()
+        };
+        format!("{base}/mesh/ws?relay={}&ts={ts}&key={}&sig={}", pct(&self.relay), pct(&b64_encode(&self.key.to_public())), pct(&b64_encode(&sig)))
+    }
+}
+
+type Socket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+
+/// The push link: one blocking WebSocket with short read waits. The server pushes deliveries,
+/// receipts and plans the moment they exist.
+struct Ws {
+    socket: Socket,
+}
+
+impl Ws {
+    fn open(url: &str) -> Result<Ws, String> {
+        let (socket, _) = tungstenite::connect(url).map_err(|e| format!("no WebSocket: {e}"))?;
+        let ws = Ws { socket };
+        // Small frames must not wait for each other (Nagle): a push is only useful if it leaves at once.
+        if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.socket.get_ref() {
+            let _ = s.set_nodelay(true);
+        }
+        ws.set_wait(Duration::from_millis(4));
+        Ok(ws)
+    }
+
+    fn set_wait(&self, d: Duration) {
+        use tungstenite::stream::MaybeTlsStream;
+        match self.socket.get_ref() {
+            MaybeTlsStream::Plain(s) => {
+                let _ = s.set_read_timeout(Some(d));
+            }
+            MaybeTlsStream::Rustls(s) => {
+                let _ = s.get_ref().set_read_timeout(Some(d));
+            }
+            _ => {}
+        }
+    }
+
+    fn send(&mut self, v: &Value) -> Result<(), String> {
+        self.socket.send(tungstenite::Message::text(v.to_string())).map_err(|e| e.to_string())
+    }
+
+    /// The next frame, `Ok(None)` when nothing arrived within the wait, `Err` when the socket is gone.
+    fn recv(&mut self) -> Result<Option<Value>, String> {
+        match self.socket.read() {
+            Ok(tungstenite::Message::Text(t)) => Ok(serde_json::from_str(t.as_str()).ok()),
+            Ok(tungstenite::Message::Close(_)) => Err("closed".into()),
+            Ok(_) => Ok(None),
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 /// Work for the server thread.
 pub enum BbJob {
     Heard(Vec<(String, Option<i32>, u64)>),
@@ -296,6 +380,8 @@ pub enum BbResult {
     Pulled(Pulled),
     /// Nobody in the mesh hears the destination yet: the relay sends it on the radio itself.
     Unrouted(Queued),
+    /// A signed plan the server pushed: epoch, plan text, signature (base64). Checked by the engine.
+    Plan(u64, String, String),
     Log(String),
 }
 
@@ -325,7 +411,120 @@ impl BbHandle {
                     Ok(()) => last.clear(),
                 }
             }
-            while let Ok(job) = rx.recv() {
+            let mut ws: Option<Ws> = None;
+            let mut stopped = false;
+            let mut next_connect = Instant::now();
+            let mut backoff = Duration::from_secs(2);
+            let mut last_beat = Instant::now();
+            // Messages sent over the socket whose answer (routed, unknown, dup) has not come yet.
+            let mut awaiting: HashMap<String, Queued> = HashMap::new();
+            let push = |out: &Arc<Mutex<Vec<BbResult>>>, r: BbResult| {
+                if let Ok(mut o) = out.lock() {
+                    o.push(r);
+                }
+            };
+            loop {
+                let job = match rx.recv_timeout(Duration::from_millis(1)) {
+                    Ok(j) => Some(j),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                // Keep the socket up (the server pushes through it); fall back to HTTPS while it is down.
+                if ws.is_none() && !stopped && Instant::now() >= next_connect {
+                    match Ws::open(&bb.ws_url()) {
+                        Ok(w) => {
+                            ws = Some(w);
+                            backoff = Duration::from_secs(2);
+                            last_beat = Instant::now();
+                            push(&out, BbResult::Log("Push link to the network is up.".into()));
+                        }
+                        Err(_) => {
+                            next_connect = Instant::now() + backoff;
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                }
+                if let Some(w) = ws.as_mut() {
+                    if last_beat.elapsed() >= Duration::from_secs(25) {
+                        last_beat = Instant::now();
+                        let _ = w.send(&json!({ "t": "beat" }));
+                    }
+                    loop {
+                        match w.recv() {
+                            Ok(Some(f)) => match f["t"].as_str() {
+                                Some("deliver") | Some("receipt") => {
+                                    let p = parse_frames(std::slice::from_ref(&f));
+                                    if !p.messages.is_empty() || !p.receipts.is_empty() {
+                                        push(&out, BbResult::Pulled(p));
+                                    }
+                                }
+                                Some("plan") => push(
+                                    &out,
+                                    BbResult::Plan(f["epoch"].as_u64().unwrap_or(0), f["plan"].as_str().unwrap_or("").into(), f["sig"].as_str().unwrap_or("").into()),
+                                ),
+                                Some("unknown") => {
+                                    if let Some(q) = f["id"].as_str().and_then(|id| awaiting.remove(id)) {
+                                        push(&out, BbResult::Unrouted(q));
+                                    }
+                                }
+                                Some("routed") | Some("dup") => {
+                                    if let Some(id) = f["id"].as_str() {
+                                        awaiting.remove(id);
+                                    }
+                                }
+                                Some("kicked") => {
+                                    stopped = true;
+                                    ws = None;
+                                    push(&out, BbResult::Log("Another copy of this relay connected to the network; this one stopped using it.".into()));
+                                    break;
+                                }
+                                _ => {}
+                            },
+                            Ok(None) => break,
+                            Err(_) => {
+                                ws = None;
+                                next_connect = Instant::now() + backoff;
+                                // What was waiting for an answer goes on the radio.
+                                for (_, q) in awaiting.drain() {
+                                    push(&out, BbResult::Unrouted(q));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                let Some(job) = job else { continue };
+                // Over the socket when it is up.
+                if let Some(w) = ws.as_mut() {
+                    let sent = match &job {
+                        BbJob::Heard(list) => {
+                            let frames: Vec<Value> = list
+                                .iter()
+                                .take(40)
+                                .map(|(c, snr, _)| json!({ "t": "heard", "dest": kahf_core::bundle::h24(c), "snr": snr.unwrap_or(0), "lane": 0 }))
+                                .collect();
+                            frames.iter().try_for_each(|f| w.send(f)).is_ok()
+                        }
+                        BbJob::Queue(items, bytes) => w.send(&json!({ "t": "queue", "items": items, "bytes": bytes, "urgency": 0 })).is_ok(),
+                        BbJob::Submit(q, _, _) => {
+                            let ok = w.send(&submit_frame(q)).is_ok();
+                            if ok {
+                                awaiting.insert(q.id.clone(), q.clone());
+                            }
+                            ok
+                        }
+                        BbJob::Receipt(id, ok, why) => {
+                            w.send(&json!({ "t": "receipt", "id": id, "status": if *ok { "delivered" } else { "failed" }, "reason": why })).is_ok()
+                        }
+                        // The server pushes: nothing to fetch while the socket is up.
+                        BbJob::Pull => true,
+                    };
+                    if sent {
+                        continue;
+                    }
+                    ws = None;
+                    next_connect = Instant::now() + backoff;
+                }
                 match job {
                     BbJob::Heard(list) => report(&out, &mut last_error, bb.heard(&list), "reporting stations"),
                     BbJob::Submit(q, _created, _ttl) => {
@@ -340,18 +539,12 @@ impl BbHandle {
                             }
                         }
                         match r {
-                            Ok(Submitted::Unrouted) => {
-                                if let Ok(mut o) = out.lock() {
-                                    o.push(BbResult::Unrouted(q));
-                                }
-                            }
+                            Ok(Submitted::Unrouted) => push(&out, BbResult::Unrouted(q)),
                             Ok(_) => last_error.clear(),
                             // The server cannot be reached: the relay keeps the message for the radio.
                             Err(e) => {
                                 report(&out, &mut last_error, Err(e), "handing a message over");
-                                if let Ok(mut o) = out.lock() {
-                                    o.push(BbResult::Unrouted(q));
-                                }
+                                push(&out, BbResult::Unrouted(q));
                             }
                         }
                     }
@@ -359,9 +552,7 @@ impl BbHandle {
                     BbJob::Pull => match bb.pull() {
                         Ok(p) => {
                             if !p.messages.is_empty() || !p.receipts.is_empty() {
-                                if let Ok(mut o) = out.lock() {
-                                    o.push(BbResult::Pulled(p));
-                                }
+                                push(&out, BbResult::Pulled(p));
                             }
                             last_error.clear();
                         }
@@ -436,6 +627,70 @@ mod tests {
         // A destination nobody hears is reported as unrouted, so the relay can use the radio.
         let lost = Queued { id: "K1ALF-9".into(), dest: "NOBODY1".into(), ..q.clone() };
         assert_eq!(r1.submit(&lost).expect("submit unknown"), Submitted::Unrouted);
+    }
+
+    /// The push link over a local copy of the server: a message handed in by one relay reaches the other
+    /// within 100 ms (loopback: this shows there is no poll wait, not internet latency). Run by hand:
+    /// `KAHF_BB_URL=http://127.0.0.1:8787 cargo test -p kahf-daemon push_link_latency -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn push_link_latency_between_two_relays_on_loopback() {
+        let url = std::env::var("KAHF_BB_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".into());
+        let mk = |call: &str, area: &str| {
+            let b = Backbone::new(&url, call, StationKey::generate());
+            b.post_body("/register", &register_body(&b, area)).expect("register");
+            b
+        };
+        let (a, b) = (mk("P1AAA", "N51W1"), mk("P2BBB", "N50E8"));
+        let (ha, hb) = (BbHandle::spawn(a), BbHandle::spawn(b));
+        // Wait until both sockets are up.
+        let mut up = 0;
+        for _ in 0..100 {
+            for h in [&ha, &hb] {
+                up += h.take_results().iter().filter(|r| matches!(r, BbResult::Log(t) if t.contains("Push link"))).count();
+            }
+            if up >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(up, 2, "both push links should be up");
+        hb.send(BbJob::Heard(vec![("D1AVE".into(), Some(9), now_s())]));
+        std::thread::sleep(Duration::from_millis(300));
+        let q = Queued {
+            id: message_id("K1ALF", b"hi", now_s()),
+            origin: "K1ALF".into(),
+            dest: "D1AVE".into(),
+            kind: "chat".into(),
+            subject: String::new(),
+            body: b"hi".to_vec(),
+            urgent: false,
+        };
+        let t0 = Instant::now();
+        ha.send(BbJob::Submit(q.clone(), now_s(), 3600));
+        let mut got = None;
+        let mut ms = 0;
+        while t0.elapsed() < Duration::from_secs(2) && got.is_none() {
+            for r in hb.take_results() {
+                if let BbResult::Pulled(p) = r {
+                    got = p.messages.into_iter().next();
+                    ms = t0.elapsed().as_millis();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        eprintln!("relay to relay over loopback: {ms} ms");
+        assert_eq!(got.expect("the message did not arrive").body, b"hi");
+        assert!(ms < 100, "took {ms} ms");
+        // And the receipt comes back to the sender the same way.
+        let t1 = Instant::now();
+        hb.send(BbJob::Receipt(q.id.clone(), true, String::new()));
+        let mut receipt = false;
+        while t1.elapsed() < Duration::from_secs(2) && !receipt {
+            receipt = ha.take_results().iter().any(|r| matches!(r, BbResult::Pulled(p) if p.receipts.iter().any(|x| x.id == q.id)));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(receipt, "no receipt came back");
     }
 
     #[test]
