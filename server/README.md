@@ -222,26 +222,25 @@ Until it is set, `POST /release` answers `503`. The owner runs these steps by ha
 
 Local development: `npx wrangler dev`.
 
-## HF backbone for relays
+## The relay mesh
 
-Relays are always online and operators are radio-only, so relays carry messages for each
-other through this server (docs/NETWORK-SCENARIOS.md, section H). Code: `src/backbone.js`.
+Relays are always online and operators are radio-only. Relays stay connected to one Durable Object (`MeshObject`,
+`src/mesh-object.js`, logic in `src/mesh.js`) that routes messages between them, pages operators, and pushes **signed
+epoch plans** four epochs ahead. **Nothing is stored:** presence, queues and held frames live in RAM, a frame that carries
+a message body is refused, and the sender's own computer keeps the outbox. (The older queued-message backbone was removed;
+its `/msg/*` and `/relay/*` routes are gone and its stored data was deleted by migration v3.)
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /relay/heard` | `{relay, heard:[{callsign, snr?, at}], ts}`: records which relay last heard each callsign (kept 2 h from `at`; 1 to 200 entries). |
-| `POST /msg/submit` | `{relay, id, origin, dest, kind:"chat"\|"mail", subject?, body, created, ttl_s, hops, urgent?}`: the first submit of an `id` (`ORIGIN-<counter>`) wins and is queued for `dest`; a repeat returns `{ok:true, duplicate:true}` and stores nothing. `body` is base64, at most 1024 bytes (chat) or 4096 (mail). `ttl_s` is clamped to 30 min .. 48 h. |
-| `POST /msg/pull` | `{relay, callsigns:[...up to 100], ts}`: queued messages for the callsigns the relay hears now (at most 20, urgent first, then oldest) plus pending receipts for those callsigns as origin. Handed messages not receipted within 10 minutes can be pulled by any relay again. |
-| `POST /msg/receipt` | `{relay, id, status:"delivered"\|"failed", reason?}`: closes the message, removes the payload, stores a short receipt (24 h) for the origin. Only the relay holding the message may send it. |
-| `GET /relay/wanted` | Public: `{wanted:[callsigns]}` with queued messages (max 500), for beacons. |
+| `GET /mesh/ws?relay=&ts=&key=&sig=` | WebSocket upgrade for a registered relay. `sig` is Ed25519 over `mesh1\|CALL\|ts\|ws`. One socket per relay key: a second connection stops the first. |
+| `POST /mesh/frames` | HTTPS fallback: `{relay, ts, public_key, signature, frames_json}`; `signature` is over `mesh1\|CALL\|ts\|frames\|<frames_json>`. Up to 50 frames, 16 KB. |
+| `POST /mesh/poll` | `{relay, ts, public_key, signature}` over `mesh1\|CALL\|ts\|poll`: the frames waiting for the relay (held 60 s in RAM). |
 
-Signing is the same as `/register` and `/schedule`: the JSON body carries every field above
-plus `public_key` (base64, 32 bytes) and `signature` (base64, 64 bytes). The signature is
-Ed25519 over the canonical JSON (keys sorted, no whitespace) of the body without
-`public_key` and `signature`. The relay must be registered, and `public_key` must be the key
-it registered. `ts` is unix seconds and must be within 10 minutes of the server clock.
-Backbone requests may be up to 16 KB; a relay may make 600 backbone calls a minute (429 after).
-An expired message gives its origin a `failed` receipt with reason `expired`.
+Frames carry ids, sizes, hashes and routing facts only: `beat`, `queue`, `heard`, `here`, `submit`, `receipt`, `clash` from a
+relay; `deliver`, `receipt`, `found`, `plan` (the signed plan text and its signature) to a relay. The relay must be registered
+and `key` must be the key it registered; `ts` within 10 minutes of the server clock; 600 frames a minute per relay.
+Plans are signed with the project key (`PROJECT_KEY`, a base64 32 byte Ed25519 seed set with `wrangler secret put`; the apps
+carry the public key).
 
 `/schedule` plans transmit slots for the whole world: two relays never get overlapping
 transmit slots on one channel, whatever their area (HF skywave is global). A request that

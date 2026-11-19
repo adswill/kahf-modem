@@ -27,10 +27,10 @@ export interface Env {
   CALLSIGNS: DurableObjectNamespace;
   /** One object per one-degree area: live relays and slot bookings (src/objects.js AreaObject). */
   AREAS: DurableObjectNamespace;
-  /** One object per callsign: backbone queue, claims, receipts (src/objects.js MailObject). */
-  MAILBOXES: DurableObjectNamespace;
-  /** One object for the backbone index (src/objects.js IndexObject). */
-  BACKBONE: DurableObjectNamespace;
+  /** One object for the whole relay mesh: sockets, routing, signed plans (src/mesh-object.js MeshObject). */
+  MESH: DurableObjectNamespace;
+  /** Base64 32 byte Ed25519 seed of the project key that signs the plans. A secret, never in the code. */
+  PROJECT_KEY: string;
 }
 
 /**

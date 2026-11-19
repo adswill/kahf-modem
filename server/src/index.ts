@@ -12,12 +12,13 @@
 //   GET  /map-data   relays and stations as JSON
 //   GET  /release    current release announcement
 //   POST /release    signed release announcement (owner's release key)
-//   POST /relay/heard, /msg/submit, /msg/pull, /msg/receipt, GET /relay/wanted: HF backbone (src/backbone.js)
+//   GET  /mesh/ws, POST /mesh/frames, /mesh/poll: the relay mesh (src/mesh.js), signed calls from registered relays
 import { handleRequest } from "./routes.js";
 import { kvStore, objectStore } from "./store";
 import type { Env } from "./types";
 
-export { CallsignObject, AreaObject, MailObject, IndexObject } from "./objects.js";
+export { CallsignObject, AreaObject } from "./objects.js";
+export { MeshObject } from "./mesh-object.js";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

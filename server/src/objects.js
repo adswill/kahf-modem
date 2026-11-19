@@ -2,8 +2,6 @@
 //
 //   CallsignObject  one per callsign: the reporter owner (key, removal replay guard)
 //                   and the relay registration (key, area).
-//   MailObject      one per callsign: backbone message queue, id claims, receipts.
-//   IndexObject     one for the backbone: heard index, wanted list, rate counters.
 //   AreaObject      one per one-degree area: which relays are live there, and the
 //                   slots each one last planned. New slots are planned against them.
 //
@@ -16,7 +14,6 @@
 // Operations are functions (storage, args) -> result. Failures are returned as
 // { ok: false, error }; anything else thrown is an internal error.
 import { REMOVE_WINDOW_MS, isExpired, planSchedule } from "./core.js";
-import { indexOps, mailOps } from "./backbone.js";
 
 const OWNER = "owner";
 const RELAY = "relay";
@@ -193,25 +190,5 @@ export class AreaObject {
   }
   fetch(request) {
     return serve(this.storage, areaOps, request);
-  }
-}
-
-/** One per callsign: the HF backbone queue, claims and receipts (see backbone.js). */
-export class MailObject {
-  constructor(ctx) {
-    this.storage = ctx.storage;
-  }
-  fetch(request) {
-    return serve(this.storage, mailOps, request);
-  }
-}
-
-/** One for the whole backbone: heard index, wanted list, relay rate counters. */
-export class IndexObject {
-  constructor(ctx) {
-    this.storage = ctx.storage;
-  }
-  fetch(request) {
-    return serve(this.storage, indexOps, request);
   }
 }

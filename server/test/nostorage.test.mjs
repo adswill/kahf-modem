@@ -1,7 +1,6 @@
 // No stored messages (MESH-SPEC.md section 7 and step 11). The mesh modules hold only ids,
 // sizes, hashes and routing facts, in RAM. This test fails if one of them starts to use storage
-// or lets message content through. The older queued-message backbone (backbone.js) is a known
-// exception and is NOT covered here: see docs/NETWORK-STATUS.md.
+// or lets message content through. The older queued-message backbone was removed (migration v3).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -9,7 +8,7 @@ import { Hub } from '../src/hub.js';
 import { Router, h24 } from '../src/router.js';
 import { plan } from '../src/planner.js';
 
-const MESH_MODULES = ['router.js', 'hub.js', 'planner.js'];
+const MESH_MODULES = ['router.js', 'hub.js', 'planner.js', 'mesh.js', 'sign.js'];
 const STORAGE_WORDS = /\b(storage|KV|STATIONS|MAILBOXES|BACKBONE|D1|R2|writeFile|appendFile|createWriteStream|localStorage|indexedDB|fetch\()|from ['"]node:fs/;
 
 test('the mesh modules import nothing but node:crypto and name no storage', () => {
@@ -17,7 +16,7 @@ test('the mesh modules import nothing but node:crypto and name no storage', () =
     const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
     const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
     const imports = [...code.matchAll(/^import .* from ['"](.+)['"]/gm)].map((m) => m[1]);
-    for (const i of imports) assert.ok(i === 'node:crypto', `${f} imports ${i}`);
+    for (const i of imports) assert.ok(i === 'node:crypto' || /^\.\/(hub|router|planner)\.js$/.test(i), `${f} imports ${i}`);
     assert.ok(!STORAGE_WORDS.test(code), `${f} mentions storage`);
   }
 });
