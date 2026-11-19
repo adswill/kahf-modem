@@ -179,6 +179,12 @@ pub fn verify(block: &[u8], body: &[u8]) -> Result<(String, [u8; 32]), String> {
     Ok((callsign.to_string(), public))
 }
 
+/// True when `sig` is a valid Ed25519 signature of `data` by `public` (no callsign framing): used for the
+/// server's signed plans and for the relay mesh calls.
+pub fn verify_raw(public: &[u8; 32], data: &[u8], sig: &[u8; 64]) -> bool {
+    VerifyingKey::from_bytes(public).is_ok_and(|vk| vk.verify(data, &Signature::from_bytes(sig)).is_ok())
+}
+
 /// Short readable fingerprint of a public key for manual comparison:
 /// first 8 bytes of SHA-256 as hex, grouped in 4-hex-digit blocks.
 pub fn fingerprint(public: &[u8; 32]) -> String {

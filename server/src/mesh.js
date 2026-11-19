@@ -10,6 +10,8 @@ import { EPOCH_S, epochOf, plan } from "./planner.js";
 
 export const LOOKAHEAD_EPOCHS = 4;
 export const HTTP_ONLINE_MS = 30e3;
+/** Longest message blob (base64 characters) that may pass through: a chat or a short mail. */
+export const MAX_BLOB_CHARS = 12_000;
 
 /** The text that is signed and sent: "P1|epoch|seed|relay:lane:slot,...". Same order as the planner. */
 export function planText(p, seed) {
@@ -69,19 +71,22 @@ export class Mesh {
       case "submit": {
         // A relay took a message from an operator; find who delivers it.
         if (!this.router.firstSight(msg.id, now)) return { t: "dup", id: msg.id };
-        this.origin.set(msg.id, call);
+        // The blob (the message, as the relay took it off the air) only passes through RAM to the delivering relay.
+        const blob = typeof msg.blob === "string" && msg.blob.length <= MAX_BLOB_CHARS ? msg.blob : undefined;
+        this.origin.set(msg.id, { call, dest: msg.dest | 0 });
         const r = this.router.route(msg.dest | 0, now);
         if (r.state === "unknown") {
           this.router.page(msg.dest | 0, now);
           return { t: "unknown", id: msg.id };
         }
-        this.hub.push(r.relay, { t: "deliver", id: msg.id, dest: msg.dest | 0, size: msg.size | 0, from: call, fresh: !r.pageFirst }, now);
+        this.hub.push(r.relay, { t: "deliver", id: msg.id, dest: msg.dest | 0, size: msg.size | 0, from: call, fresh: !r.pageFirst, ...(blob ? { blob } : {}) }, now);
         return { t: "routed", id: msg.id, via: r.relay, second: r.second };
       }
       case "receipt": {
         const origin = this.origin.get(msg.id);
         if (origin) {
-          this.hub.push(origin, { t: "receipt", id: msg.id, at: now, relay: call }, now);
+          const status = msg.status === "failed" ? "failed" : "delivered";
+          this.hub.push(origin.call, { t: "receipt", id: msg.id, dest: origin.dest, status, reason: String(msg.reason ?? "").slice(0, 80), at: now, relay: call }, now);
           this.origin.delete(msg.id);
         }
         return null;

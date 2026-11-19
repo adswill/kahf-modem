@@ -2111,6 +2111,8 @@ struct Worker {
     bb: Option<BbHandle>,
     /// Outbox id -> server message id, for messages taken from the server and sent on the radio.
     bb_pending: HashMap<u64, String>,
+    /// Destination callsign of each message handed to the mesh, by its id (the receipt names only a hash).
+    bb_sent: HashMap<String, String>,
     bb_last: Instant,
     /// Adverts already seen (callsign, sequence), so a relay passes each one on once.
     adverts_seen: VecDeque<(String, u8)>,
@@ -2278,6 +2280,7 @@ impl Worker {
             heard_recent: HashMap::new(),
             bb: None,
             bb_pending: HashMap::new(),
+            bb_sent: HashMap::new(),
             bb_last: clock.now(),
             refusal_logged: None,
         };
@@ -2699,7 +2702,23 @@ impl Worker {
             urgent: priority_of(msg) == Priority::Urgent,
         };
         self.log(format!("Passing the message from {} to {} on to the network.", q.origin, q.dest));
+        self.bb_sent.insert(q.id.clone(), q.dest.clone());
+        if self.bb_sent.len() > 512 {
+            self.bb_sent.clear();
+        }
         bb.send(BbJob::Submit(q, now, if kind == "chat" { 6 * 3600 } else { 24 * 3600 }));
+    }
+
+    /// The mesh found no relay that hears the destination: this relay sends the message on the radio itself.
+    fn bb_unrouted(&mut self, q: Queued) {
+        let msg = if q.kind == "mail" {
+            Message::Mail { from: q.origin.clone(), to: q.dest.clone(), subject: q.subject.clone(), body: String::from_utf8_lossy(&q.body).into_owned(), attachments: Vec::new() }
+        } else {
+            Message::Chat { from: q.origin.clone(), to: q.dest.clone(), text: String::from_utf8_lossy(&q.body).into_owned() }
+        };
+        let id = self.next_id();
+        self.log(format!("No relay hears {} yet: sending the message on the radio.", q.dest));
+        self.enqueue(vec![msg], vec![id], false);
     }
 
     /// An outbox item that came from the server is finished: tell the server how it went.
@@ -2726,6 +2745,7 @@ impl Worker {
                         self.bb_receipt_notice(r);
                     }
                 }
+                BbResult::Unrouted(q) => self.bb_unrouted(q),
                 BbResult::Log(t) => self.log(t),
             }
         }
@@ -2741,9 +2761,10 @@ impl Worker {
             .map(|(c, (snr, t))| (c.clone(), *snr, now.saturating_sub(self.clock.since(*t).as_secs())))
             .collect();
         if let Some(bb) = &self.bb {
-            let calls: Vec<String> = list.iter().map(|(c, _, _)| c.clone()).collect();
+            let (items, bytes) = (self.outbox.pending().len(), self.outbox.pending().len() * 64);
             bb.send(BbJob::Heard(list));
-            bb.send(BbJob::Pull(calls));
+            bb.send(BbJob::Queue(items, bytes));
+            bb.send(BbJob::Pull);
         }
     }
 
@@ -2796,10 +2817,11 @@ impl Worker {
         if origin.is_empty() {
             return;
         }
+        let dest = self.bb_sent.remove(&r.id).unwrap_or_else(|| r.dest.clone());
         let text = if r.status == "delivered" {
-            format!("Delivered to {}.", r.dest)
+            format!("Delivered to {dest}.")
         } else {
-            format!("Could not deliver to {}: {}.", r.dest, if r.reason.is_empty() { "no reason given" } else { &r.reason })
+            format!("Could not deliver to {dest}: {}.", if r.reason.is_empty() { "no reason given" } else { &r.reason })
         };
         let id = self.next_id();
         self.enqueue(vec![Message::Chat { from: self.callsign.clone(), to: origin, text }], vec![id], false);

@@ -80,9 +80,11 @@ test("a message is routed to the relay that heard the receiver, with the sender'
   // Same id again: a duplicate, not delivered twice.
   assert.equal(mesh.onFrame("AA1AAA", { t: "submit", id: "m1", dest: h24("ZZ9ZZZ"), size: 90 }, 3000).t, "dup");
   assert.equal(b.sent.filter((m) => m.t === "deliver").length, 1);
-  mesh.onFrame("BB1BBB", { t: "receipt", id: "m1" }, 4000);
+  mesh.onFrame("BB1BBB", { t: "receipt", id: "m1", status: "delivered" }, 4000);
   const rc = a.sent.find((m) => m.t === "receipt");
   assert.equal(rc.id, "m1");
+  assert.equal(rc.status, "delivered");
+  assert.equal(rc.dest, h24("ZZ9ZZZ"));
   assert.equal(rc.relay, "BB1BBB");
 });
 
@@ -138,4 +140,20 @@ test("a relay that only uses HTTPS is routed to, planned for, and polled", async
   // Silent for over 30 s: no longer online, so no longer routed to.
   mesh.tick(100_000);
   assert.equal(mesh.router.route(h24("ZZ9ZZZ"), 100_000).state, "unknown");
+});
+
+test("a message blob passes through to the delivering relay and is kept nowhere", async () => {
+  const { mesh } = await setup();
+  const a = sock(), b = sock();
+  mesh.connect("AA1AAA", a, 0);
+  mesh.connect("BB1BBB", b, 0);
+  mesh.onFrame("BB1BBB", { t: "heard", dest: h24("ZZ9ZZZ"), snr: 6, lane: 5 }, 1000);
+  mesh.onFrame("AA1AAA", { t: "submit", id: "m9", dest: h24("ZZ9ZZZ"), size: 5, blob: "aGVsbG8=" }, 2000);
+  assert.equal(b.sent.find((m) => m.t === "deliver").blob, "aGVsbG8=");
+  // Too big to pass: delivered without it (the relay then asks again), never truncated.
+  mesh.onFrame("AA1AAA", { t: "submit", id: "m10", dest: h24("ZZ9ZZZ"), size: 5, blob: "x".repeat(20_000) }, 2500);
+  assert.equal(b.sent.filter((m) => m.t === "deliver").at(-1).blob, undefined);
+  // Nothing of it remains in the mesh after the receipt.
+  mesh.onFrame("BB1BBB", { t: "receipt", id: "m9", status: "delivered" }, 3000);
+  assert.ok(!JSON.stringify([...mesh.origin.entries()]).includes("aGVsbG8="));
 });
