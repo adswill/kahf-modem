@@ -136,6 +136,8 @@ const PREAMBLE_THRESHOLD: f64 = 0.5;
 const PREAMBLE_REFINE: usize = 24;
 /// How long after a burst its playback may still come back to us (a virtual cable, a monitor).
 /// A link nobody has used for this long is closed by a relay that has something to deliver.
+/// How long after a hang-up it is sent a second time.
+const DISC_REPEAT: Duration = Duration::from_millis(2500);
 const LINK_IDLE_DROP: Duration = Duration::from_secs(20);
 const ECHO_WINDOW: Duration = Duration::from_millis(1500);
 /// How far below the strongest correlation a repeat may be and still count as a peak.
@@ -577,9 +579,8 @@ impl Engine {
         self.shared.flags.third_party_relay.load(Ordering::SeqCst)
     }
 
-    /// Test only: how long a message waits for its station before the relay step.
-    #[cfg(test)]
-    fn set_relay_timeout_ms(&self, ms: u64) {
+    /// How long a message waits for its station before it takes the radio relay path.
+    pub fn set_relay_timeout_ms(&self, ms: u64) {
         self.shared.flags.relay_timeout_ms.store(ms, Ordering::SeqCst);
     }
 
@@ -2056,6 +2057,9 @@ struct Worker {
     echoes: VecDeque<(Instant, Vec<Vec<u8>>)>,
     /// When a frame of the link was last heard or sent.
     last_link_activity: Instant,
+    /// A hang-up frame to send a second time, in case the first was lost (the other station may
+    /// have been transmitting and deaf): when, and the frame.
+    disc_again: Option<(Instant, Vec<u8>)>,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -2219,6 +2223,7 @@ impl Worker {
             sense: Sense::new(RATE as f32),
             echoes: VecDeque::new(),
             last_link_activity: Instant::now(),
+            disc_again: None,
             watch: lbt::ChannelWatch::new(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -2304,6 +2309,14 @@ impl Worker {
                     thread::sleep(POLL);
                 }
                 continue;
+            }
+            // A hang-up is sent twice, a moment apart, unless a new call has started meanwhile.
+            if let Some((at, frame)) = self.disc_again.take() {
+                if Instant::now() < at {
+                    self.disc_again = Some((at, frame));
+                } else if matches!(self.link_state, LinkState::Idle) {
+                    self.control.push_back(vec![frame]);
+                }
             }
             // Control frames (ACK, CONNECT, ...) go before data; each passes the channel check.
             self.flush_control();
@@ -2403,6 +2416,12 @@ impl Worker {
     fn disconnect(&mut self) -> Result<(), String> {
         self.ensure_radio()?;
         let actions = guard("link disconnect", || self.link.disconnect())?;
+        self.disc_again = actions.iter().find_map(|a| match a {
+            kahf_core::link::Action::Transmit(p) if p.first() == Some(&0x03) => {
+                Some((Instant::now() + DISC_REPEAT, p.clone()))
+            }
+            _ => None,
+        });
         self.apply(actions);
         Ok(())
     }
@@ -4680,6 +4699,44 @@ mod tests {
             e.shared.flags.operator_link.load(Ordering::SeqCst),
             "a send did not count as the operator being present"
         );
+    }
+
+    #[test]
+    fn a_hang_up_reaches_the_other_station() {
+        let _rt = realtime();
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir("hangup-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("hangup-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        assert!(wait_for(
+            &mut b,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            10
+        )
+        .is_some());
+        a.disconnect().unwrap();
+        let closed = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Idle)),
+            15,
+        );
+        assert!(closed.is_some(), "the hang-up never reached the other station");
     }
 
     #[test]
