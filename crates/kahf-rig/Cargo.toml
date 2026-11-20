@@ -1,0 +1,8 @@
+[package]
+name = "kahf-rig"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }
+serialport = { version = "4", default-features = false }
