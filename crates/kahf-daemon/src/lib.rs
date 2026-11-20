@@ -40,6 +40,7 @@ use kahf_sdr::hackrf::HackrfTx;
 use sha2::{Digest, Sha256};
 
 mod server_sync;
+mod winlink;
 pub use kahf_net::{Area, SlotRequest, DEFAULT_BASE_URL as RELAY_SERVER_URL};
 pub use server_sync::{ServerSync, ServerSyncOptions, SyncStatus, DEFAULT_SLOT_S};
 
@@ -211,6 +212,8 @@ struct Shared {
     heard: Mutex<HeardList>,
     /// Serialises reads and writes of `contacts.txt` between the worker and `note_beacon`.
     contacts_io: Mutex<()>,
+    /// Winlink bridge for mail to internet addresses (see `winlink.rs`). None until set.
+    winlink: Mutex<Option<Arc<kahf_winlink::gateway::WinlinkGateway>>>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -682,6 +685,7 @@ impl Engine {
                     .unwrap_or_default(),
             ),
             contacts_io: Mutex::new(()),
+            winlink: Mutex::new(None),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -3062,6 +3066,9 @@ impl Worker {
 
     fn on_message(&mut self, msg: Message) {
         self.note_heard(sender_of(&msg).to_string().as_str());
+        if self.offer_to_winlink(&msg) {
+            return;
+        }
         match msg {
             Message::Chat { from, text, .. } => self.emit(Event::Message { from, text }),
             Message::Mail {
@@ -3748,6 +3755,132 @@ mod tests {
         assert!(got.is_some(), "message did not arrive");
     }
 
+    /// A user station mails an internet-style address through a gateway station over the air,
+    /// the mail crosses to a Winlink peer over B2F, and the peer's reply comes back the same way.
+    #[test]
+    fn winlink_mail_crosses_the_air_and_the_bridge_both_ways() {
+        use kahf_winlink::b2f::Config as B2fConfig;
+        use kahf_winlink::gateway::WinlinkGateway;
+        use kahf_winlink::message::{Address, Message as WlMessage};
+        use kahf_winlink::net;
+        use kahf_winlink::spool::{Folder, Policy, Spool};
+
+        let a_to_g: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let g_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut user = Engine::spawn(
+            config("AA1AAA", temp_dir("wl-user")),
+            fake_factory(g_to_a.clone(), a_to_g.clone()),
+        )
+        .unwrap();
+        let mut gate = Engine::spawn(
+            config("GW1AAA", temp_dir("wl-gate")),
+            fake_factory(a_to_g.clone(), g_to_a.clone()),
+        )
+        .unwrap();
+        let spool_root = temp_dir("wl-spool");
+        let gw = Arc::new(WinlinkGateway::new(&spool_root, &["AA1AAA".to_string()]).unwrap());
+        gate.set_winlink_gateway(Some(gw));
+
+        gate.listen().unwrap();
+        user.connect("GW1AAA").unwrap();
+        assert!(
+            wait_for(
+                &mut user,
+                |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+                60
+            )
+            .is_some(),
+            "link did not come up"
+        );
+
+        // Out: mail with an attachment to a Winlink callsign written as an address.
+        let att = temp_dir("wl-att");
+        fs::create_dir_all(&att).unwrap();
+        let file = att.join("plan.txt");
+        fs::write(&file, b"bring water").unwrap();
+        user.send_mail("BB1BBB@winlink.org", "Field day", "see you there", &[])
+            .unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let queued = wait_for(
+            &mut gate,
+            |e| {
+                if !matches!(e, Event::Spectrum(_)) {
+                    seen.borrow_mut().push(format!("{e:?}"));
+                }
+                matches!(e, Event::Log(l) if l.contains("queued for Winlink"))
+            },
+            90,
+        );
+        assert!(queued.is_some(), "gateway did not queue the mail: {:?}", seen.borrow());
+        // The gateway did not file it as its own inbox mail.
+        assert!(!wait_for(&mut gate, |e| matches!(e, Event::Mail { .. }), 1).is_some());
+
+        // The Winlink peer (Pat or Winlink Express stand-in) listens; the gateway's spool calls it.
+        let peer_root = temp_dir("wl-peer");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        {
+            let mut peer = Spool::open(&peer_root, &["BB1BBB".to_string()], Policy::ForPeer).unwrap();
+            peer.queue(
+                "BB1BBB",
+                &WlMessage::new(
+                    "BB1BBB",
+                    &["AA1AAA"],
+                    "re: Field day",
+                    "count me in",
+                    1_800_000_000,
+                ),
+            )
+            .unwrap();
+            let _ = &mut peer;
+        }
+        let peer_root2 = peer_root.clone();
+        let server = thread::spawn(move || {
+            let mut cfg = B2fConfig::client("BB1BBB", "");
+            cfg.locator = String::new();
+            net::accept_peer(&listener, &cfg, None, &peer_root2)
+                .unwrap()
+                .1
+                .unwrap()
+        });
+        let mut call_spool = Spool::open(&spool_root, &["AA1AAA".to_string()], Policy::ForPeer).unwrap();
+        let mut cfg = B2fConfig::client("AA1AAA", "BB1BBB");
+        cfg.aux = Vec::new();
+        let stats = net::call_peer(&addr, &cfg, "", &mut call_spool).unwrap();
+        server.join().unwrap();
+        assert_eq!(stats.sent.len(), 1);
+        assert_eq!(stats.received.len(), 1);
+        let got = Spool::open(&peer_root, &["BB1BBB".to_string()], Policy::All)
+            .unwrap()
+            .list("BB1BBB", Folder::In);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].subject, "Field day");
+        assert_eq!(got[0].to, vec![Address::call("BB1BBB")]);
+        assert_eq!(got[0].files[0].name, "plan.txt");
+        assert_eq!(got[0].files[0].data, b"bring water");
+        assert!(
+            !got[0].body.contains("KAHF SIGNATURE"),
+            "signature block must not reach Winlink"
+        );
+
+        // In: the peer's reply is waiting for the user, and the gateway sends it over the air.
+        assert_eq!(gate.pump_winlink(), 1);
+        let mail = wait_for(&mut user, |e| matches!(e, Event::Mail { .. }), 90);
+        let Some(Event::Mail { from, subject, .. }) = mail else {
+            panic!("reply did not arrive")
+        };
+        assert_eq!(from, "GW1AAA");
+        assert_eq!(subject, "re: Field day");
+        let saved: Vec<_> = fs::read_dir(user.config.data_dir.join("inbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        let text = fs::read_to_string(saved[0].path()).unwrap();
+        assert!(text.contains("Winlink mail from BB1BBB"), "{text}");
+        assert!(text.contains("count me in"));
+        assert_eq!(gate.pump_winlink(), 0, "a delivered reply is not sent twice");
+    }
+
     #[test]
     fn beacon_fills_contact_grid_and_heard_list_persists() {
         let dir = temp_dir("beacon");
@@ -4005,6 +4138,7 @@ mod tests {
             relay_paths: Mutex::new(Vec::new()),
             heard: Mutex::new(HeardList::default()),
             contacts_io: Mutex::new(()),
+            winlink: Mutex::new(None),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, dir);

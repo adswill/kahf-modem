@@ -12,6 +12,7 @@ kahf-sdr = { path = "../kahf-sdr" }
 kahf-radio = { path = "../kahf-radio" }
 kahf-rig = { path = "../kahf-rig" }
 kahf-log = { path = "../kahf-log" }
+kahf-winlink = { path = "../kahf-winlink" }
 kahf-prop = { path = "../kahf-prop" }
 sha2 = "0.11.1"
 

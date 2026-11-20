@@ -26,3 +26,4 @@ pub fn callsign_ok(c: &str) -> Result<(), String> {
         Err(format!("{c:?} is not a callsign"))
     }
 }
+pub mod gateway;
