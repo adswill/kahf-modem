@@ -10,6 +10,7 @@ import { CSS } from "./web/styles.js";
 import { HOME_SCRIPT } from "./web/script.js";
 import { LIVE_MAP_SCRIPT } from "./web/live-map.js";
 import { homeBody } from "./web/home.js";
+import { SITE_PAGES } from "./web/pages.js";
 
 /**
  * @typedef {import("./types").Location} Location
@@ -245,14 +246,13 @@ const EMPTY_STATE = `<p>No relays or stations have reported in the last 48 hours
  * Wraps a page body in the shared header, footer and script.
  * @param {string} title
  * @param {string} description
- * @param {"home" | "map"} current
+ * @param {string} current the page key: "home", "map" or an inner page name
  * @param {string} body
  * @param {string} script the inline script text for this page
  * @param {boolean} [wide] let the page use the full window width
  */
 function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "") {
-  const homeCurrent = current === "home" ? ' aria-current="page"' : "";
-  const mapCurrent = current === "map" ? ' aria-current="page"' : "";
+  const cur = (name) => (current === name ? ' aria-current="page"' : "");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -270,10 +270,12 @@ ${head}
 <div class="wrap${wide ? " wide" : ""}">
 <a class="brand" href="/">KAHF</a>
 <nav aria-label="Main">
-<a href="/"${homeCurrent}>Home</a>
-<a href="/#what">What it does</a>
-<a href="/#how">How it works</a>
-<a href="/map"${mapCurrent}>Live map</a>
+<a href="/"${cur("home")}>Home</a>
+<a href="/network"${cur("network")}>Network</a>
+<a href="/map"${cur("map")}>Live map</a>
+<a href="/protocol"${cur("protocol")}>Modem</a>
+<a href="/start"${cur("start")}>Get started</a>
+<a href="/legal"${cur("legal")}>Legal</a>
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>
 </div>
@@ -283,7 +285,11 @@ ${body}
 </main>
 <footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
-<p>KAHF is pre-release software for licensed amateur radio operators. Copyright (c) 2026 adswill.</p>
+<div class="cols">
+<div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Copyright (c) 2026 adswill.</p></div>
+<div><p class="label">Site</p><ul><li><a href="/">Home</a></li><li><a href="/network">Relay network</a></li><li><a href="/map">Live map</a></li></ul></div>
+<div><p class="label">Project</p><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
+</div>
 </div>
 </footer>
 ${beforeScript}
@@ -292,11 +298,25 @@ ${beforeScript}
 </html>`;
 }
 
+/**
+ * An inner page, by path (for example "/network"), or null when there is none.
+ * @param {string} path
+ * @returns {string | null}
+ */
+export function renderSite(path) {
+  const page = SITE_PAGES[path];
+  if (!page) return null;
+  return shell(page.title, page.description, path.slice(1), page.body(), HOME_SCRIPT);
+}
+
+/** The paths of the inner pages. */
+export const SITE_PATHS = Object.keys(SITE_PAGES);
+
 /** The kahf.dev home page. */
 export function renderHome() {
   return shell(
-    "KAHF: radio messaging and file transfer for HF and VHF",
-    "KAHF sends messages, mail and files between amateur radio stations over HF and VHF, with ordinary radios or SDRs.",
+    "KAHF: HF data modem and relay network for 17 metres",
+    "KAHF sends messages, mail and files between amateur radio stations over HF, relayed across a network of volunteer stations. Built for 17 metres, works with ordinary radios or SDRs.",
     "home",
     homeBody(),
     HOME_SCRIPT,
