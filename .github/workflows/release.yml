@@ -15,8 +15,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Tests before release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxcb1-dev libhackrf-dev librtlsdr-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test
+
+      - name: Test
+        run: cargo test --workspace --exclude kahf-sdr
+
   build:
     name: Build ${{ matrix.name }}
+    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -123,11 +144,12 @@ jobs:
           path: assets
           merge-multiple: true
 
-      - name: Create the release with the three archives
+      - name: Create the release with the three archives and a checksum file
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          (cd assets && sha256sum * > SHA256SUMS.txt)
           TAG="v${{ inputs.version }}"
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
