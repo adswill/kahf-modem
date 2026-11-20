@@ -10,6 +10,8 @@ import { pathToFileURL } from "node:url";
 // The band segment is the one value shared with the server: it comes from the single
 // constant in src/core.js, so a segment change needs no edit here. Everything derived
 // from it (channel count, frequencies, expected channels) is calculated again below.
+// A remote run therefore expects the server under test to use the same segment as this
+// checkout; a server deployed before the 17 m move fails every band scenario.
 const { BAND_SEGMENT_KHZ, CHANNEL_WIDTH_KHZ } = await import("../src/core.js");
 const LOW = BAND_SEGMENT_KHZ.low;
 const HIGH = BAND_SEGMENT_KHZ.high;

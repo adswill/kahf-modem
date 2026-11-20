@@ -15,8 +15,6 @@
 //! - The planner is Dijkstra over at most [`MAX_HOPS`] hops.
 
 use crate::{great_circle_km, luf, muf, PathInput, Status};
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 /// Centre of the 17 m band in MHz, the default relay band.
 pub const BAND_17M_MHZ: f64 = 18.1;
@@ -126,31 +124,13 @@ fn hop_cost(a: &Node, b: &Node, c: &Conditions) -> Option<(f64, bool)> {
     }
 }
 
-#[derive(PartialEq)]
-struct Visit {
-    cost: f64,
-    node: usize,
-    hops: usize,
-}
-
-impl Eq for Visit {}
-
-impl Ord for Visit {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Lowest cost first; BinaryHeap is a max-heap.
-        other.cost.total_cmp(&self.cost).then(other.hops.cmp(&self.hops))
-    }
-}
-
-impl PartialOrd for Visit {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 /// Best route from `from` to `to` through `relays` under `c`, or None when the band does
 /// not connect them in at most [`MAX_HOPS`] hops. Relays with the same call as an end point
 /// are ignored.
+///
+/// Bellman-Ford limited to `MAX_HOPS` rounds: `best[k][v]` is the cheapest way to reach `v`
+/// in exactly `k` hops, so a cheap route with many hops never hides a dearer one that still
+/// fits the hop limit.
 pub fn plan(from: &Node, to: &Node, relays: &[Node], c: &Conditions) -> Option<Route> {
     let mut nodes = vec![from.clone(), to.clone()];
     nodes.extend(
@@ -160,57 +140,59 @@ pub fn plan(from: &Node, to: &Node, relays: &[Node], c: &Conditions) -> Option<R
             .cloned(),
     );
     let n = nodes.len();
-    let mut best = vec![f64::INFINITY; n];
-    let mut prev: Vec<Option<usize>> = vec![None; n];
-    let mut marginal = vec![false; n];
-    let mut heap = BinaryHeap::new();
-    best[0] = 0.0;
-    heap.push(Visit {
-        cost: 0.0,
-        node: 0,
-        hops: 0,
-    });
-    while let Some(Visit { cost, node, hops }) = heap.pop() {
-        if node == 1 {
-            break;
-        }
-        if cost > best[node] || hops >= MAX_HOPS {
-            continue;
-        }
-        for next in 1..n {
-            if next == node {
+    // Links are worked out once: cost and whether it is marginal, or None when closed.
+    let links: Vec<Vec<Option<(f64, bool)>>> = (0..n)
+        .map(|u| {
+            (0..n)
+                .map(|v| {
+                    if u == v {
+                        None
+                    } else {
+                        hop_cost(&nodes[u], &nodes[v], c)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut best = vec![vec![f64::INFINITY; n]; MAX_HOPS + 1];
+    let mut prev = vec![vec![None::<usize>; n]; MAX_HOPS + 1];
+    let mut weak = vec![vec![false; n]; MAX_HOPS + 1];
+    best[0][0] = 0.0;
+    for k in 1..=MAX_HOPS {
+        for u in 0..n {
+            // Paths end at `to`; they never pass through it.
+            if !best[k - 1][u].is_finite() || u == 1 {
                 continue;
             }
-            let Some((step, weak)) = hop_cost(&nodes[node], &nodes[next], c) else {
-                continue;
-            };
-            let total = cost + step;
-            if total < best[next] {
-                best[next] = total;
-                prev[next] = Some(node);
-                marginal[next] = marginal[node] || weak;
-                heap.push(Visit {
-                    cost: total,
-                    node: next,
-                    hops: hops + 1,
-                });
+            for v in 1..n {
+                let Some((step, marginal)) = links[u][v] else {
+                    continue;
+                };
+                let total = best[k - 1][u] + step;
+                if total < best[k][v] {
+                    best[k][v] = total;
+                    prev[k][v] = Some(u);
+                    weak[k][v] = weak[k - 1][u] || marginal;
+                }
             }
         }
     }
-    if !best[1].is_finite() {
+    let k = (1..=MAX_HOPS).min_by(|&a, &b| best[a][1].total_cmp(&best[b][1]))?;
+    if !best[k][1].is_finite() {
         return None;
     }
     let mut calls = vec![nodes[1].call.clone()];
-    let mut at = 1;
-    while let Some(p) = prev[at] {
+    let (mut at, mut hops) = (1, k);
+    while let Some(p) = prev[hops][at] {
         calls.push(nodes[p].call.clone());
         at = p;
+        hops -= 1;
     }
     calls.reverse();
     Some(Route {
         calls,
-        cost: best[1],
-        marginal: marginal[1],
+        cost: best[k][1],
+        marginal: weak[k][1],
     })
 }
 
@@ -220,7 +202,7 @@ pub fn plan(from: &Node, to: &Node, relays: &[Node], c: &Conditions) -> Option<R
 pub fn first_relays(from: &Node, to: &Node, relays: &[Node], c: &Conditions) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for h in 0..24u8 {
-        let at = c.at_hour((c.utc_hour + h) % 24);
+        let at = c.at_hour((c.utc_hour % 24 + h) % 24);
         if let Some(route) = plan(from, to, relays, &at) {
             if let Some(first) = route.relays().first() {
                 if !out.iter().any(|r| r.eq_ignore_ascii_case(first)) {
@@ -340,6 +322,32 @@ mod tests {
         let mut more = relays.clone();
         more.push(Node::new("R4RRR", (60.9, 25.0)));
         assert!(plan(&a, &far, &more, &night).is_none());
+    }
+
+    /// A route that needs exactly the hop limit is found, with a spare relay on the side.
+    #[test]
+    fn route_using_every_allowed_hop_is_found() {
+        // Ground-wave line: A - X - Y - Z - B, about 27 km apart, and R1 between A and X.
+        let n = |call: &str, lat: f64| Node::new(call, (60.0 + lat, 25.0));
+        let c = Conditions::band_17m(0, 12);
+        let (a, b) = (n("A1AAA", 0.0), n("B1BBB", 0.96));
+        let relays = [
+            n("R1RRR", 0.12),
+            n("X1XXX", 0.24),
+            n("Y1YYY", 0.48),
+            n("Z1ZZZ", 0.72),
+        ];
+        let r = plan(&a, &b, &relays, &c).expect("A-X-Y-Z-B fits in four hops");
+        assert_eq!(r.calls, vec!["A1AAA", "X1XXX", "Y1YYY", "Z1ZZZ", "B1BBB"]);
+    }
+
+    #[test]
+    fn out_of_range_hours_do_not_overflow() {
+        let c = Conditions {
+            utc_hour: 250,
+            ..day()
+        };
+        let _ = first_relays(&hel(), &tll(), &[mad()], &c);
     }
 
     #[test]
