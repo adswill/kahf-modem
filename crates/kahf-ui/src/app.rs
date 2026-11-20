@@ -1790,20 +1790,41 @@ impl App {
     }
 }
 
+/// The folder for KAHF's own files. `APPDATA` on Windows, `~/.config/kahf` elsewhere.
+fn config_dir() -> Option<PathBuf> {
+    config_dir_from(
+        std::env::var_os("APPDATA"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+        cfg!(windows),
+    )
+}
+
+fn config_dir_from(
+    appdata: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    match (windows, appdata, home) {
+        (true, Some(a), _) => Some(PathBuf::from(a).join("kahf")),
+        (_, _, Some(h)) => Some(PathBuf::from(h).join(".config").join("kahf")),
+        _ => None,
+    }
+}
+
 /// Where the UI state is remembered between runs.
 fn state_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KAHF_UI_STATE") {
         return Some(p.into());
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("kahf").join("ui-state"))
+    config_dir().map(|d| d.join("ui-state"))
 }
 
 fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("KAHF_DATA_DIR") {
         return p.into();
     }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".config").join("kahf").join("data"))
+    config_dir()
+        .map(|d| d.join("data"))
         .unwrap_or_else(|| PathBuf::from("kahf-data"))
 }
 
@@ -2046,5 +2067,34 @@ mod tests {
         assert!(app.files.is_empty() && app.thread.is_empty());
         let _ = app.update(Message::ShowSample(true));
         assert!(!app.files.is_empty() && !app.thread.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod config_dir_tests {
+    use super::config_dir_from;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_prefers_appdata() {
+        let d = config_dir_from(Some("C:\\A".into()), Some("C:\\H".into()), true);
+        assert_eq!(d, Some(PathBuf::from("C:\\A").join("kahf")));
+    }
+
+    #[test]
+    fn windows_without_appdata_uses_home() {
+        let d = config_dir_from(None, Some("C:\\H".into()), true);
+        assert_eq!(d, Some(PathBuf::from("C:\\H").join(".config").join("kahf")));
+    }
+
+    #[test]
+    fn unix_uses_home_and_ignores_appdata() {
+        let d = config_dir_from(Some("/a".into()), Some("/h".into()), false);
+        assert_eq!(d, Some(PathBuf::from("/h/.config/kahf")));
+    }
+
+    #[test]
+    fn nothing_set_gives_none() {
+        assert_eq!(config_dir_from(None, None, false), None);
     }
 }
