@@ -65,9 +65,20 @@ recipient status: Queued, Held, Sent, Delivered, Read, Failed, Expired; `overall
   show. Replies to a join (the member list) are queued and, like all unattended sends, go out only
   while an operator link or relay mode is active. Saved as `groups.txt`.
 
-## Not wired yet
+- Location beacons: `set_beacon(enabled, position, grid)`. Off by default; when on, the worker sends
+  a short unconnected burst (frame kind Beacon, rung Q12) at most every 15 minutes, backing off to
+  an hour while the position does not change. It carries a GPS position, or a grid locator when
+  there is no GPS. Never in listen-only mode, never during a link, needs HF burst mode. Heard
+  beacons update `heard_stations()` and fill empty contact QTHs (log line "heard a beacon").
+- Delivery: `delivery(public_id)` gives one (callsign, status) per recipient for chats and mail,
+  status queued, held, sent, delivered, read, failed or expired. Delivered comes from the link ACK
+  when the addressee was the link peer, or from an on-air receipt (frame kind Receipt, 3-byte
+  receipt plus the callsign of the sender). A station sends that receipt when a message for it
+  arrives from a station it is not linked with (so it came through relays), and only while an
+  operator link or relay mode allows unattended sending.
 
-The mailbox, receipts, groups and beacon scheduler (`Messenger`) are not driven by the daemon's
-worker yet, and the daemon does not transmit or decode beacons on its own; the daemon's outbox
-already retries messages to stations that were not reached. Next steps are feeding `Messenger`
-from the receive path and sending beacons from `Messenger::tick`.
+## Not in the daemon (by design)
+
+The offline mailbox stays in `kahf_core::msg` for now: the daemon's outbox already keeps retrying
+messages for stations that are off air and survives restarts. Group fan-out uses it too. Status
+(presence) beacons and read receipts have encoders but no on-air sender yet.
