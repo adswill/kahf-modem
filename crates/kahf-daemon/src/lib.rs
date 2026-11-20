@@ -38,6 +38,10 @@ use kahf_radio::{GainSetting, RadioSpec, RxRadio};
 use kahf_sdr::hackrf::HackrfTx;
 use sha2::{Digest, Sha256};
 
+mod server_sync;
+pub use kahf_net::{Area, SlotRequest, DEFAULT_BASE_URL as RELAY_SERVER_URL};
+pub use server_sync::{ServerSync, ServerSyncOptions, SyncStatus, DEFAULT_SLOT_S};
+
 /// What the operator confirms before relay mode starts. Both must be true.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RelayAck {

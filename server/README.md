@@ -141,6 +141,14 @@ choice and must be confirmed before deployment.
 
 Responses: `200 {"ok":true,"removed":true}`, `400`, `401`, `409` (replayed), `403` (the record belongs to another key), `404` (no such record).
 
+## Relay client
+
+`crates/kahf-net` is the station side of `/register` and `/schedule`, and
+`Engine::start_server_sync` in `kahf-daemon` runs it while relay mode is on.
+Its channel grid (`ChannelGrid::RELAY_17M`) must match `BAND_SEGMENT_KHZ`
+here. `test/client-fixture.test.mjs` checks that these routes accept the bodies
+the Rust client makes (`test/fixtures/rust-client.json`).
+
 ## Signing
 
 1. Build the object of the fields you send, **without** `public_key` and `signature`.
