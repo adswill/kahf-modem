@@ -9,6 +9,7 @@ kahf-net = { path = "../kahf-net" }
 kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
 kahf-radio = { path = "../kahf-radio" }
+kahf-rig = { path = "../kahf-rig" }
 kahf-log = { path = "../kahf-log" }
 kahf-prop = { path = "../kahf-prop" }
 sha2 = "0.11.1"
