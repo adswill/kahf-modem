@@ -7,6 +7,7 @@ edition.workspace = true
 kahf-daemon = { path = "../kahf-daemon" }
 kahf-core = { path = "../kahf-core" }
 kahf-log = { path = "../kahf-log" }
+kahf-prop = { path = "../kahf-prop" }
 kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
 serde_json = "1"
