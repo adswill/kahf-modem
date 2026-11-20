@@ -447,6 +447,19 @@ impl Engine {
         lock(&self.shared.relay_paths).clone()
     }
 
+    /// The last `limit` forwards of any message, newest first (plan 4).
+    pub fn recent_hops(&self, limit: usize) -> Vec<Hop> {
+        lock(&self.shared.hops).recent(limit)
+    }
+
+    /// The accepted relay schedule in time order. Empty until a role and a schedule are set.
+    pub fn relay_schedule(&self) -> Vec<Slot> {
+        lock(&self.shared.relay)
+            .as_ref()
+            .map(|r| r.slots().to_vec())
+            .unwrap_or_default()
+    }
+
     /// Internet relay (plan 6.1). On by default (setting D). The gateway is still a stub:
     /// nothing goes over the internet until it exists and the operator sends a message that way.
     /// When off, no traffic leaves over the internet.

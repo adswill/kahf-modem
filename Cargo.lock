@@ -2825,6 +2825,7 @@ dependencies = [
  "kahf-audio",
  "kahf-core",
  "kahf-daemon",
+ "kahf-log",
  "kahf-sdr",
 ]
 
