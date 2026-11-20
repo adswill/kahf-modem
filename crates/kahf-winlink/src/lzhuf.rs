@@ -185,7 +185,8 @@ struct Encoder {
 
 impl Encoder {
     fn new() -> Box<Self> {
-        let mut e = Box::new(Encoder {
+        // dad and rson start as NIL (the roots and nodes are unused), as the reference InitTree sets them.
+        Box::new(Encoder {
             model: Model::new(),
             dad: [NIL; N + 1],
             lson: [NIL; N + 1],
@@ -196,25 +197,17 @@ impl Encoder {
             out: Vec::new(),
             putbuf: 0,
             putlen: 0,
-        });
-        for i in N + 1..=N + 256 {
-            e.rson[i] = NIL;
-        }
-        for i in 0..N {
-            e.dad[i] = NIL;
-        }
-        e
+        })
     }
 
     fn delete_node(&mut self, p: usize) {
         if self.dad[p] == NIL {
             return;
         }
-        let q;
-        if self.rson[p] == NIL {
-            q = self.lson[p];
+        let q = if self.rson[p] == NIL {
+            self.lson[p]
         } else if self.lson[p] == NIL {
-            q = self.rson[p];
+            self.rson[p]
         } else {
             let mut qq = self.lson[p];
             if self.rson[qq] != NIL {
@@ -228,8 +221,8 @@ impl Encoder {
             }
             self.rson[qq] = self.rson[p];
             self.dad[self.rson[p]] = qq;
-            q = qq;
-        }
+            qq
+        };
         self.dad[q] = self.dad[p];
         if self.rson[self.dad[p]] == p {
             self.rson[self.dad[p]] = q;
