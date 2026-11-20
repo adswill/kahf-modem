@@ -1,9 +1,10 @@
 name: ci
 
 on:
-  # Every push and pull request runs one quick Linux check.
-  # The full platform matrix runs only when started by hand (workflow_dispatch),
-  # to save runner minutes on the private repository.
+  # Every push and pull request runs one quick Linux check (including the
+  # headless kahf-ui smoke test). Pull requests that touch Rust code also build
+  # and test on Windows and macOS. The full platform matrix runs only when
+  # started by hand (workflow_dispatch), to save runner minutes.
   push:
   pull_request:
   workflow_dispatch:
@@ -43,6 +44,62 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --exclude kahf-sdr -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --exclude kahf-sdr
+
+      - name: Test
+        run: cargo test --workspace --exclude kahf-sdr
+
+  changes:
+    name: Detect Rust changes
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - '.github/workflows/ci.yml'
+
+  # Windows and macOS on every pull request that touches Rust code. Skips clippy
+  # and fmt (the quick job covers them) and the SDR crate, to keep it fast.
+  desktop:
+    name: ${{ matrix.name }} (PR)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            deploy_target: ""
+          - name: macOS 14+ arm64
+            runner: macos-14
+            deploy_target: "14.0"
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deploy_target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pr-${{ matrix.runner }}
 
       - name: Build
         run: cargo build --workspace --exclude kahf-sdr
