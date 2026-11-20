@@ -3,6 +3,6 @@ resolver = "2"
 members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-radio", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-gui", "crates/kahf-log", "crates/kahf-prop", "crates/kahf-ui", "crates/kahf-net"]
 
 [workspace.package]
-version = "0.0.1"
+version = "1.0.0"
 edition = "2021"
 license-file = "LICENSE"

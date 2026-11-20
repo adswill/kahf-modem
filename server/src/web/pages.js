@@ -10,8 +10,7 @@ export const SITE_PAGES = {
     body: () => `
 <div class="wrap">
 <div class="pagehead">
-<p class="label">The relay network</p>
-<h1>Out of range is not the end of the path.</h1>
+<h1>Out of range is not the <em>end</em> of the path.</h1>
 <p class="lede">HF reaches a long way, but not everywhere at once. A relay hears two stations that cannot hear each other, and passes the message between them.</p>
 </div>
 <section class="sec tight" aria-labelledby="n-how">
@@ -66,17 +65,16 @@ export const SITE_PAGES = {
     body: () => `
 <div class="wrap">
 <div class="pagehead">
-<p class="label">Get started</p>
 <h1>From download to first message.</h1>
 <p class="lede">KAHF is pre-release. Test with a dummy load or a station you have agreed to test with, and transmit only where your licence allows it.</p>
 </div>
 <section class="sec tight" aria-labelledby="s-need">
 <h2 id="s-need">What you need</h2>
-<div class="grid three">
-<div class="fact"><h3>A licence</h3><p>Your own amateur licence and callsign. Everything KAHF sends goes out under it.</p></div>
-<div class="fact"><h3>A radio and an interface</h3><p>An HF radio, a sound-card interface to your computer, and a way to put the radio in a data mode. Or an SDR to receive.</p></div>
-<div class="fact"><h3>A computer</h3><p>Official 1.0 builds are for macOS on Apple silicon and Linux on x86-64. Windows, Intel Macs and ARM64 Linux follow later.</p></div>
-</div>
+<dl class="ledger">
+<div><dt>Licence</dt><dd class="v">your callsign</dd><dd class="n">Your own amateur licence. Everything KAHF sends goes out under it.</dd></div>
+<div><dt>Radio</dt><dd class="v">HF rig and interface</dd><dd class="n">A sound-card interface to your computer and a way to put the radio in a data mode. Or an SDR to receive.</dd></div>
+<div><dt>Computer</dt><dd class="v">macOS or Linux</dd><dd class="n">Official 1.0 builds are for macOS on Apple silicon and Linux on x86-64. Windows, Intel Macs and ARM64 Linux follow later.</dd></div>
+</dl>
 </section>
 <section class="sec" aria-labelledby="s-steps">
 <h2 id="s-steps">First run</h2>
@@ -106,21 +104,17 @@ export const SITE_PAGES = {
     body: () => `
 <div class="wrap">
 <div class="pagehead">
-<p class="label">The modem</p>
 <h1>153 carriers inside one voice channel.</h1>
 <p class="lede">KAHF is an OFDM modem. It runs over the audio of an ordinary SSB radio, so a 2.4 kHz channel is all it needs.</p>
 </div>
 <section class="sec tight" aria-labelledby="p-num">
 <h2 id="p-num">In numbers</h2>
-<dl class="spec four">
-<div><dt>Audio rate</dt><dd>8000 Hz</dd></div>
-<div><dt>Carriers</dt><dd>153</dd></div>
-<div><dt>Spacing</dt><dd>15.625 Hz</dd></div>
-<div><dt>Band</dt><dd>312 Hz to 2.69 kHz</dd></div>
-<div><dt>Code</dt><dd>LDPC 648/324</dd></div>
-<div><dt>Frame</dt><dd>36 bytes</dd></div>
-<div><dt>Pilots</dt><dd>every 4th</dd></div>
-<div><dt>Modulation</dt><dd>QPSK to 64QAM</dd></div>
+<dl class="ledger">
+<div><dt>Audio</dt><dd class="v">8000 Hz</dd><dd class="n">Sample rate. The signal sits 312 Hz to 2.69 kHz above the tuned frequency.</dd></div>
+<div><dt>Carriers</dt><dd class="v">153 at 15.625 Hz</dd><dd class="n">Every fourth carrier is a pilot.</dd></div>
+<div><dt>Code</dt><dd class="v">LDPC 648/324</dd><dd class="n">324 bits in, 648 bits out.</dd></div>
+<div><dt>Frame</dt><dd class="v">36 bytes</dd><dd class="n">Up to 36 bytes each, numbered.</dd></div>
+<div><dt>Modulation</dt><dd class="v">QPSK to 64QAM</dd><dd class="n">Each frame says which one it uses.</dd></div>
 </dl>
 </section>
 <section class="sec" aria-labelledby="p-how">
@@ -149,7 +143,6 @@ export const SITE_PAGES = {
     body: () => `
 <div class="wrap">
 <div class="pagehead">
-<p class="label">Licence and responsibility</p>
 <h1>The rules KAHF runs under.</h1>
 </div>
 <section class="sec tight" aria-labelledby="l-lic">

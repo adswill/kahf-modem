@@ -1314,6 +1314,16 @@ impl App {
         ]
         .spacing(10);
 
+        let logs = column![
+            muted(s::SET_LOGS_DESC),
+            key_value(s::SET_LOGS_FOLDER, crate::app::log_dir().display().to_string()),
+            tip(
+                btn(s::SET_LOGS_OPEN, Kind::Secondary).on_press(Message::OpenLogs),
+                s::TIP_LOGS_OPEN
+            ),
+        ]
+        .spacing(10);
+
         page(
             s::SETTINGS_TITLE,
             None,
@@ -1331,6 +1341,7 @@ impl App {
                     section_box(s::SET_LISTEN, listen),
                     section_box(s::SET_APPEARANCE, appearance),
                     section_box(s::SET_UPDATES, updates),
+                    section_box(s::SET_LOGS, logs),
                 ]
                 .spacing(12)
                 .max_width(720),

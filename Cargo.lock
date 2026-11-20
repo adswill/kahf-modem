@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-audio"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "cpal",
  "kahf-core",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-cli"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "hound",
  "kahf-audio",
@@ -2764,7 +2764,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-core"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "ed25519-dalek",
  "png",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-daemon"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "kahf-audio",
  "kahf-core",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-gui"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "eframe",
  "egui_plot",
@@ -2800,11 +2800,11 @@ dependencies = [
 
 [[package]]
 name = "kahf-log"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "kahf-net"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2815,18 +2815,18 @@ dependencies = [
 
 [[package]]
 name = "kahf-prop"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "kahf-radio"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "libloading",
 ]
 
 [[package]]
 name = "kahf-sdr"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "kahf-core",
  "libloading",
@@ -2834,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-sim"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "kahf-core",
  "rayon",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-ui"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "iced",
  "iced_test",

@@ -32,6 +32,14 @@ jobs:
         with:
           key: release-test
 
+      - name: The version matches the program version
+        run: |
+          prog=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$prog" != "${{ inputs.version }}" ]; then
+            echo "Release ${{ inputs.version }} but Cargo.toml says $prog. Bump the version first."
+            exit 1
+          fi
+
       - name: Test
         run: cargo test --workspace --exclude kahf-sdr
 
