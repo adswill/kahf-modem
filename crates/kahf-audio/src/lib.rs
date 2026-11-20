@@ -127,6 +127,43 @@ pub fn level_db(samples: &[f32]) -> f32 {
     ((10.0 * mean_sq.log10()) as f32).max(FLOOR)
 }
 
+/// Name of the system's default input or output device, if there is one.
+pub fn default_device_name(input: bool) -> Option<String> {
+    let host = cpal::default_host();
+    let dev = if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    };
+    dev.and_then(|d| d.description().ok().map(|x| x.name().to_string()))
+}
+
+/// Names of the devices that offer input (or output when `input` is false), in host order.
+pub fn device_names(input: bool) -> Vec<String> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.devices() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for dev in devices {
+        let ok = if input {
+            dev.supports_input()
+        } else {
+            dev.supports_output()
+        };
+        if !ok {
+            continue;
+        }
+        if let Ok(desc) = dev.description() {
+            let name = desc.name().to_string();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// Names of all sound devices that offer input or output, in host order.
 /// Never panics; returns an empty list if the host cannot enumerate devices.
 pub fn list_devices() -> Vec<String> {

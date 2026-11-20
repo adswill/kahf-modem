@@ -16,8 +16,88 @@ use tauri::{AppHandle, Emitter};
 
 const MAGIC: &[u8; 4] = b"KVM1";
 const MODE: Codec2Mode = Codec2Mode::MODE_1200;
-/// Notes stop at two minutes: a ten-second note already takes about half a minute on the air.
-pub const MAX_SECONDS: f32 = 120.0;
+/// Notes stop at half a minute: at 150 bytes a second that is 4.5 kB, several minutes on the air.
+pub const MAX_SECONDS: f32 = 30.0;
+
+/// Below this peak a recording is treated as silence (a muted or blocked microphone).
+const SILENT_PEAK: f32 = 0.002;
+
+/// The loudest sample, 0 to 1.
+fn peak(x: &[f32]) -> f32 {
+    x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+}
+
+/// Brings speech to a steady level before it is squeezed: the loudest sample goes to 0.8, with at
+/// most 20 times gain so a quiet room is not turned into hiss. Codec2 and a radio link both work
+/// best with a strong, even signal; a mic that records at 0.05 of full scale sounds faint after it.
+pub fn normalise(samples: &mut [f32]) {
+    let p = peak(samples);
+    if p < SILENT_PEAK {
+        return;
+    }
+    let gain = (0.8 / p).min(20.0);
+    if !(0.95..=1.05).contains(&gain) {
+        for v in samples.iter_mut() {
+            *v = (*v * gain).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// What to tell the person when the microphone recorded nothing.
+pub const SILENT_HELP: &str =
+    "The microphone recorded no sound. On a Mac, open System Settings, Privacy & Security, \
+Microphone and allow KAHF, then restart the app. Also check the microphone in Settings, under Radio, \
+and that it is not muted.";
+
+/// Sound devices that carry the radio's audio or are virtual cables, not a person's microphone or
+/// speakers. A voice note recorded from or played to one of these is never heard.
+fn is_virtual(name: &str) -> bool {
+    let n = name.to_lowercase();
+    [
+        "blackhole",
+        "loopback",
+        "soundflower",
+        "vb-cable",
+        "vb-audio",
+        "virtual",
+        "aggregate",
+        "multi-output",
+    ]
+    .iter()
+    .any(|v| n.contains(v))
+}
+
+/// Which device a voice note uses. The person's choice in Settings wins. Otherwise the system
+/// default, unless that is the radio's own device or a virtual cable (as when two copies of KAHF
+/// are tested over BlackHole), in which case the first real microphone or speaker. `None` means
+/// "use the system default". The second value says what was chosen, for the log.
+pub fn choose_device(
+    configured: Option<&str>,
+    default: Option<&str>,
+    all: &[String],
+    radio: Option<&str>,
+) -> (Option<String>, String) {
+    if let Some(c) = configured.map(str::trim).filter(|c| !c.is_empty()) {
+        return (Some(c.to_string()), format!("{c} (chosen in Settings)"));
+    }
+    let radio = radio.map(str::trim).filter(|r| !r.is_empty());
+    let bad = |n: &str| is_virtual(n) || radio.is_some_and(|r| r == n);
+    match default {
+        Some(d) if !bad(d) => (None, format!("{d} (system default)")),
+        _ => match all.iter().find(|n| !bad(n)) {
+            Some(n) => (
+                Some(n.clone()),
+                format!("{n} (the system default is a radio or virtual device)"),
+            ),
+            None => (
+                None,
+                default.map_or("the system default".into(), |d| {
+                    format!("{d} (system default, no other device found)")
+                }),
+            ),
+        },
+    }
+}
 
 fn to_i16(x: f32) -> i16 {
     (x.clamp(-1.0, 1.0) * 32767.0) as i16
@@ -53,6 +133,8 @@ pub fn decode(data: &[u8]) -> Result<Vec<f32>, String> {
         c2.decode(&mut pcm, chunk);
         out.extend(pcm.iter().map(|&s| s as f32 / 32768.0));
     }
+    // Codec2 at this rate comes out faint; bring it to a comfortable level for the speakers.
+    normalise(&mut out);
     Ok(out)
 }
 
@@ -134,12 +216,16 @@ impl Voice {
 
     /// Stops recording and saves the note. `None` when it was shorter than half a second.
     pub fn stop(&self, data_dir: &Path) -> Result<Option<Value>, String> {
-        let Some(samples) = self.take() else {
+        let Some(mut samples) = self.take() else {
             return Ok(None);
         };
         if samples.len() < 4000 {
             return Ok(None);
         }
+        if peak(&samples) < SILENT_PEAK {
+            return Err(SILENT_HELP.into());
+        }
+        normalise(&mut samples);
         let data = encode(&samples);
         let dir = voice_dir(data_dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot save the voice note: {e}"))?;
@@ -283,6 +369,84 @@ mod tests {
         assert_eq!(heard.len(), 16000);
         assert!(Voice::clip_path(&dir.join(".."), "x").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_quiet_recording_is_brought_up_and_silence_is_left_alone() {
+        let mut quiet: Vec<f32> = (0..8000).map(|i| 0.05 * (i as f32 * 0.1).sin()).collect();
+        normalise(&mut quiet);
+        assert!((peak(&quiet) - 0.8).abs() < 0.02, "{}", peak(&quiet));
+        let mut hiss = vec![0.0005f32; 8000];
+        normalise(&mut hiss);
+        assert!(peak(&hiss) < SILENT_PEAK, "silence must stay silent");
+        let mut loud: Vec<f32> = (0..8000).map(|i| 0.8 * (i as f32 * 0.1).sin()).collect();
+        let before = loud.clone();
+        normalise(&mut loud);
+        assert_eq!(loud, before, "a note at a good level is untouched");
+        // Gain is capped so a nearly silent room is not blown up into noise.
+        let mut faint = vec![0.004f32; 8000];
+        normalise(&mut faint);
+        assert!(peak(&faint) <= 0.004 * 20.0 + 1e-6);
+    }
+
+    #[test]
+    fn a_note_decodes_at_a_audible_level() {
+        let tone: Vec<f32> = (0..16000).map(|i| 0.05 * (i as f32 * 0.09).sin()).collect();
+        let mut loud = tone.clone();
+        normalise(&mut loud);
+        let back = decode(&encode(&loud)).unwrap();
+        assert!(peak(&back) > 0.3, "played back too faint: {}", peak(&back));
+    }
+
+    #[test]
+    fn a_note_is_small_enough_for_hf() {
+        let thirty_seconds = vec![0.3f32; (MAX_SECONDS * 8000.0) as usize];
+        let bytes = encode(&thirty_seconds).len();
+        assert_eq!(bytes, 4 + 750 * 6);
+        assert!(bytes <= 5000, "{bytes}");
+    }
+
+    #[test]
+    fn voice_notes_stay_off_the_radio_and_virtual_devices() {
+        let all: Vec<String> = ["BlackHole 2ch", "MacBook Pro Microphone", "USB Audio CODEC"]
+            .map(String::from)
+            .to_vec();
+        // The person's choice always wins.
+        assert_eq!(
+            choose_device(Some("USB Audio CODEC"), Some("BlackHole 2ch"), &all, None)
+                .0
+                .as_deref(),
+            Some("USB Audio CODEC")
+        );
+        // A normal default is used as it is.
+        assert_eq!(
+            choose_device(
+                None,
+                Some("MacBook Pro Microphone"),
+                &all,
+                Some("USB Audio CODEC")
+            )
+            .0,
+            None
+        );
+        // A virtual cable as default is skipped.
+        assert_eq!(
+            choose_device(None, Some("BlackHole 2ch"), &all, None)
+                .0
+                .as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+        // So is the radio's own device, even with a normal name.
+        assert_eq!(
+            choose_device(None, Some("USB Audio CODEC"), &all, Some("USB Audio CODEC"))
+                .0
+                .as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+        // Nothing better: fall back to the default rather than fail.
+        let only: Vec<String> = vec!["BlackHole 2ch".into()];
+        assert_eq!(choose_device(None, Some("BlackHole 2ch"), &only, None).0, None);
+        assert_eq!(choose_device(Some("  "), None, &[], None).0, None);
     }
 
     #[test]
