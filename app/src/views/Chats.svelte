@@ -93,13 +93,19 @@
     recSeconds = 0;
     recTimer = window.setInterval(async () => {
       recSeconds += 0.1;
-      if (recSeconds >= 60) await sendRecording();
+      if (recSeconds >= 30) await sendRecording();
     }, 100);
   }
 
   async function sendRecording() {
     clearInterval(recTimer);
-    const clip = await app.stopRecording();
+    let clip = null;
+    try {
+      clip = await app.stopRecording();
+    } catch (e) {
+      app.toast(String(e), "warn");
+      return;
+    }
     if (clip && peer) await app.sendVoice(peer, clip);
     else app.toast("That was too short to send.", "info");
   }

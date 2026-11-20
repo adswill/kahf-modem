@@ -1,7 +1,7 @@
 //! Engine events to the JSON the window understands (see `ui/src/lib/types.ts`).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kahf_core::link::LinkState;
 use kahf_daemon::{Event, RelayStep, TxState};
@@ -63,6 +63,33 @@ fn mail_body(inbox: &Path, id: u64) -> (String, Vec<String>) {
     (body, files)
 }
 
+/// Where the engine saved an incoming file: `name` in the inbox, or `name (2)` and so on when the
+/// name was taken. The newest of those is the one just received.
+fn saved_path(inbox: &Path, name: &str) -> PathBuf {
+    let first = inbox.join(name);
+    let p = Path::new(name);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let ext = p
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+    let modified = |f: &Path| f.metadata().and_then(|m| m.modified()).ok();
+    let mut best = first.clone();
+    for i in 2..200 {
+        let c = inbox.join(format!("{stem} ({i}){ext}"));
+        if !c.exists() {
+            break;
+        }
+        if modified(&c) >= modified(&best) {
+            best = c;
+        }
+    }
+    best
+}
+
 /// The window events for one engine event. Zero, one or several.
 pub fn event_json(ev: &Event, ctx: &Ctx) -> Vec<Value> {
     let pending = ctx.pending;
@@ -105,7 +132,7 @@ pub fn event_json(ev: &Event, ctx: &Ctx) -> Vec<Value> {
             None if ctx.own_ids.contains(id) => Vec::new(),
             // A file coming in: the engine reports it once, when it has been saved to the inbox.
             None if done >= total => {
-                let path = ctx.inbox.join(name);
+                let path = saved_path(ctx.inbox, name);
                 vec![json!({
                     "type": "file", "id": format!("in-{id}"), "name": name, "done": done, "total": total,
                     "dir": "in", "from": ctx.peer.unwrap_or(""),
@@ -246,6 +273,33 @@ mod tests {
         assert_eq!(out[0]["dir"], "in");
         assert_eq!(out[0]["from"], "G4HAM");
         assert!(out[0]["path"].is_null());
+    }
+
+    #[test]
+    fn a_received_note_points_at_the_file_the_engine_actually_saved() {
+        let dir = std::env::temp_dir().join(format!("kahf-conv-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // The name was taken by an earlier note, so the engine saved this one as "clip-1 (2).kvm".
+        fs::write(dir.join("clip-1.kvm"), b"old").unwrap();
+        assert_eq!(saved_path(&dir, "clip-1.kvm"), dir.join("clip-1.kvm"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.join("clip-1 (2).kvm"), b"new").unwrap();
+        assert_eq!(saved_path(&dir, "clip-1.kvm"), dir.join("clip-1 (2).kvm"));
+        let out = event_json(
+            &Event::FileProgress {
+                id: 8,
+                name: "clip-1.kvm".into(),
+                done: 6,
+                total: 6,
+            },
+            &ctx(&[], &dir),
+        );
+        assert_eq!(
+            out[0]["path"],
+            dir.join("clip-1 (2).kvm").to_string_lossy().to_string()
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

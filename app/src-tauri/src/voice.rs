@@ -16,8 +16,38 @@ use tauri::{AppHandle, Emitter};
 
 const MAGIC: &[u8; 4] = b"KVM1";
 const MODE: Codec2Mode = Codec2Mode::MODE_1200;
-/// Notes stop at two minutes: a ten-second note already takes about half a minute on the air.
-pub const MAX_SECONDS: f32 = 120.0;
+/// Notes stop at half a minute: at 150 bytes a second that is 4.5 kB, several minutes on the air.
+pub const MAX_SECONDS: f32 = 30.0;
+
+/// Below this peak a recording is treated as silence (a muted or blocked microphone).
+const SILENT_PEAK: f32 = 0.002;
+
+/// The loudest sample, 0 to 1.
+fn peak(x: &[f32]) -> f32 {
+    x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+}
+
+/// Brings speech to a steady level before it is squeezed: the loudest sample goes to 0.8, with at
+/// most 20 times gain so a quiet room is not turned into hiss. Codec2 and a radio link both work
+/// best with a strong, even signal; a mic that records at 0.05 of full scale sounds faint after it.
+pub fn normalise(samples: &mut [f32]) {
+    let p = peak(samples);
+    if p < SILENT_PEAK {
+        return;
+    }
+    let gain = (0.8 / p).min(20.0);
+    if !(0.95..=1.05).contains(&gain) {
+        for v in samples.iter_mut() {
+            *v = (*v * gain).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// What to tell the person when the microphone recorded nothing.
+pub const SILENT_HELP: &str =
+    "The microphone recorded no sound. On a Mac, open System Settings, Privacy & Security, \
+Microphone and allow KAHF, then restart the app. Also check the microphone in Settings, under Radio, \
+and that it is not muted.";
 
 fn to_i16(x: f32) -> i16 {
     (x.clamp(-1.0, 1.0) * 32767.0) as i16
@@ -53,6 +83,8 @@ pub fn decode(data: &[u8]) -> Result<Vec<f32>, String> {
         c2.decode(&mut pcm, chunk);
         out.extend(pcm.iter().map(|&s| s as f32 / 32768.0));
     }
+    // Codec2 at this rate comes out faint; bring it to a comfortable level for the speakers.
+    normalise(&mut out);
     Ok(out)
 }
 
@@ -134,12 +166,16 @@ impl Voice {
 
     /// Stops recording and saves the note. `None` when it was shorter than half a second.
     pub fn stop(&self, data_dir: &Path) -> Result<Option<Value>, String> {
-        let Some(samples) = self.take() else {
+        let Some(mut samples) = self.take() else {
             return Ok(None);
         };
         if samples.len() < 4000 {
             return Ok(None);
         }
+        if peak(&samples) < SILENT_PEAK {
+            return Err(SILENT_HELP.into());
+        }
+        normalise(&mut samples);
         let data = encode(&samples);
         let dir = voice_dir(data_dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot save the voice note: {e}"))?;
@@ -283,6 +319,41 @@ mod tests {
         assert_eq!(heard.len(), 16000);
         assert!(Voice::clip_path(&dir.join(".."), "x").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_quiet_recording_is_brought_up_and_silence_is_left_alone() {
+        let mut quiet: Vec<f32> = (0..8000).map(|i| 0.05 * (i as f32 * 0.1).sin()).collect();
+        normalise(&mut quiet);
+        assert!((peak(&quiet) - 0.8).abs() < 0.02, "{}", peak(&quiet));
+        let mut hiss = vec![0.0005f32; 8000];
+        normalise(&mut hiss);
+        assert!(peak(&hiss) < SILENT_PEAK, "silence must stay silent");
+        let mut loud: Vec<f32> = (0..8000).map(|i| 0.8 * (i as f32 * 0.1).sin()).collect();
+        let before = loud.clone();
+        normalise(&mut loud);
+        assert_eq!(loud, before, "a note at a good level is untouched");
+        // Gain is capped so a nearly silent room is not blown up into noise.
+        let mut faint = vec![0.004f32; 8000];
+        normalise(&mut faint);
+        assert!(peak(&faint) <= 0.004 * 20.0 + 1e-6);
+    }
+
+    #[test]
+    fn a_note_decodes_at_a_audible_level() {
+        let tone: Vec<f32> = (0..16000).map(|i| 0.05 * (i as f32 * 0.09).sin()).collect();
+        let mut loud = tone.clone();
+        normalise(&mut loud);
+        let back = decode(&encode(&loud)).unwrap();
+        assert!(peak(&back) > 0.3, "played back too faint: {}", peak(&back));
+    }
+
+    #[test]
+    fn a_note_is_small_enough_for_hf() {
+        let thirty_seconds = vec![0.3f32; (MAX_SECONDS * 8000.0) as usize];
+        let bytes = encode(&thirty_seconds).len();
+        assert_eq!(bytes, 4 + 750 * 6);
+        assert!(bytes <= 5000, "{bytes}");
     }
 
     #[test]
