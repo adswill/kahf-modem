@@ -141,6 +141,25 @@ pub fn utc_hm(unix: u64) -> String {
     format!("{:02}:{:02}", day_s / 3600, day_s % 3600 / 60)
 }
 
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// UTC hour (0 to 23) and month (1 to 12) of a unix time.
+pub fn utc_hour_month(unix: u64) -> (u8, u8) {
+    let hour = (unix % 86_400 / 3600) as u8;
+    // Civil-from-days (H. Hinnant), month only.
+    let z = (unix / 86_400) as i64 + 719_468;
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (hour, month as u8)
+}
+
 /// Seconds as "45 s", "15 min" or "1 h 30 min".
 pub fn duration(secs: u32) -> String {
     match secs {
@@ -188,6 +207,9 @@ mod tests {
         assert_eq!(time("140530"), "14:05");
         assert_eq!(time("0912"), "09:12");
         assert_eq!(utc_hm(86_400 * 3 + 3600 * 7 + 60 * 5 + 9), "07:05");
+        assert_eq!(utc_hour_month(1_763_643_600), (13, 11)); // 2025-11-20 13:00
+        assert_eq!(utc_hour_month(0), (0, 1));
+        assert_eq!(utc_hour_month(951_782_400), (0, 2)); // 2000-02-29
     }
 
     #[test]

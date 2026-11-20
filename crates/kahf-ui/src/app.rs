@@ -1091,6 +1091,11 @@ impl App {
             }
             return Ok(None);
         }
+        if let Step::Message(to, ..) | Step::File(to, _) | Step::Mail(to, ..) = &step {
+            let to = to.clone();
+            self.ensure_engine()?;
+            self.plan_relay_paths(&to);
+        }
         let id = match step {
             Step::Connect(to) => {
                 self.ensure_engine()?.connect(&to)?;
@@ -1397,6 +1402,42 @@ impl App {
             }
         }
         self.live_at = None;
+    }
+
+    /// Points the engine's relay paths at the best 17 m relays toward `to`, using the
+    /// grid locators of this station and of the known stations. Does nothing when this
+    /// station or `to` has no locator; the message then waits for `to` directly.
+    fn plan_relay_paths(&mut self, to: &str) {
+        use kahf_prop::route::{Conditions, Node};
+        let Some(me) = live::locator_position(&self.locator) else {
+            return;
+        };
+        let known: Vec<Node> = self
+            .live
+            .stations
+            .iter()
+            .filter_map(|c| live::locator_position(&c.qth).map(|p| Node::new(&c.call, p)))
+            .collect();
+        let Some(dest) = known.iter().find(|n| n.call.eq_ignore_ascii_case(to)) else {
+            return;
+        };
+        let (hour, month) = live::utc_hour_month(live::now_unix());
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        let planned = engine.plan_relay_paths(
+            &Node::new(self.my_call(), me),
+            dest,
+            &known,
+            &Conditions::band_17m(hour, month),
+        );
+        match planned {
+            Ok(paths) if !paths.is_empty() => {
+                self.note_event(format!("{} {to}: {}", s::RELAY_PATHS, paths.join(", ")))
+            }
+            Ok(_) => {}
+            Err(why) => self.note_event(why),
+        }
     }
 
     fn stop_server_sync(&mut self) {
@@ -2342,6 +2383,50 @@ mod tests {
         let _ = app.update(Message::Locator(" kp20le7 ".into()));
         assert_eq!(app.locator, "kp20le");
         assert!(app.state().contains(&("locator", "kp20le".to_string())));
+    }
+
+    #[test]
+    fn sends_plan_17m_relay_paths_from_locators() {
+        use kahf_log::contacts::Contact;
+        let contact = |call: &str, qth: &str| Contact {
+            call: call.into(),
+            name: String::new(),
+            qth: qth.into(),
+            notes: String::new(),
+            last_heard: None,
+        };
+        let dir = std::env::temp_dir().join(format!("kahf-ui-plan-{}", std::process::id()));
+        let mut app = App::init();
+        app.callsign = "XX0AB".into();
+        app.data_dir = dir.clone();
+        app.live.stations = vec![
+            contact("XX9ZZ", "FN31"),
+            contact("XX3RL", "IO91"),
+            contact("XX4NO", ""),
+        ];
+        app.ensure_engine().unwrap();
+
+        // Without this station's locator nothing is planned.
+        app.plan_relay_paths("XX9ZZ");
+        assert!(app.engine.as_ref().unwrap().relay_paths().is_empty());
+
+        app.locator = "KP20".into();
+        app.plan_relay_paths("XX9ZZ");
+        // The engine gets what the planner gives for these positions; the station
+        // without a locator is left out.
+        use kahf_prop::route::{first_relays, Conditions, Node};
+        let (hour, month) = live::utc_hour_month(live::now_unix());
+        let pos = |l| live::locator_position(l).unwrap();
+        let expected = first_relays(
+            &Node::new("XX0AB", pos("KP20")),
+            &Node::new("XX9ZZ", pos("FN31")),
+            &[Node::new("XX9ZZ", pos("FN31")), Node::new("XX3RL", pos("IO91"))],
+            &Conditions::band_17m(hour, month),
+        );
+        assert_eq!(app.engine.as_ref().unwrap().relay_paths(), expected);
+        assert!(!app.events.iter().any(|(_, l)| l.contains("XX4NO")));
+        drop(app);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

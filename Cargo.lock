@@ -2850,6 +2850,7 @@ dependencies = [
  "kahf-core",
  "kahf-daemon",
  "kahf-log",
+ "kahf-prop",
  "kahf-sdr",
  "serde_json",
  "ureq",
