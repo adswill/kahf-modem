@@ -205,7 +205,7 @@ ${bandStrip()}
 <div class="grid even">
 <div>
 <h3>Licence</h3>
-<p>Source-available. Copyright (c) 2026 adswill, all rights reserved. Nothing here grants a licence to copy or redistribute it.</p>
+<p>Free software under the GNU General Public License, version 3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill). You can use, study, change and share it. Changed versions, and programs built on it, must be shared under the same licence with their source.</p>
 <h3>Your responsibility</h3>
 <p>KAHF is for licensed amateur radio operators. You are responsible for staying inside your licence: bands, modes, power and rules on third-party traffic differ from country to country. KAHF asks you to confirm each transmission. It does not decide for you.</p>
 </div>

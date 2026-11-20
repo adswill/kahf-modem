@@ -50,7 +50,7 @@ test("home page: no downloads block without a release, and the real modem number
   assert.equal((html.match(/<section\b/g) || []).length, 5);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds|id="download"/i);
   assert.match(html, /No religious or political content/);
-  assert.match(html, /Source-available/);
+  assert.match(html, /General Public License/);
   assert.match(html, /class="skip" href="#main"/);
   assert.match(html, /<svg[^>]*aria-labelledby="dg-t dg-d"/);
   assert.match(html, /153 carriers, 15\.625 Hz apart/);

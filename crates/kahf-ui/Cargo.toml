@@ -2,6 +2,7 @@
 name = "kahf-ui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 kahf-daemon = { path = "../kahf-daemon" }
