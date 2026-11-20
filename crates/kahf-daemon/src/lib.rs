@@ -124,6 +124,11 @@ const MAX_CHUNK: usize = 36;
 /// Preamble symbol length in audio samples (FFT 256 + cyclic prefix 32).
 const PREAMBLE_LEN: usize = 288;
 const PREAMBLE_THRESHOLD: f64 = 0.5;
+/// How far past the first sample within tolerance the top of its peak is looked for. The
+/// preamble repeats every 128 samples, so this stays well under half of that.
+const PREAMBLE_REFINE: usize = 24;
+/// How far below the strongest correlation a repeat may be and still count as a peak.
+const PEAK_TOLERANCE: f64 = 0.05;
 const LEAD_SILENCE: usize = RATE as usize / 5; // lets PTT and VOX settle
 const GAP_SILENCE: usize = RATE as usize / 10;
 const TAIL_SILENCE: usize = RATE as usize / 10;
@@ -1200,14 +1205,23 @@ fn find_preamble(x: &[f32]) -> Option<usize> {
         dot / (tpl_e * e).sqrt().max(1e-30)
     };
     let t0 = (0..=last).find(|&t| corr(t) >= PREAMBLE_THRESHOLD)?;
-    let mut best = (t0, corr(t0));
-    for t in (t0 + 1)..=(t0 + PREAMBLE_LEN).min(last) {
-        let r = corr(t);
-        if r > best.1 {
-            best = (t, r);
+    // The preamble repeats every 128 samples, so the correlation is as high at each
+    // repeat as at the true start. The true start is the first of them, and noise or a filter
+    // can make a later one a hair higher. Take the strongest value over the span, then the
+    // first peak that comes within PEAK_TOLERANCE of it.
+    let span_end = (t0 + PREAMBLE_LEN).min(last);
+    let values: Vec<f64> = (t0..=span_end).map(corr).collect();
+    let top = values.iter().copied().fold(f64::MIN, f64::max);
+    let first = values.iter().position(|&v| v >= top - PEAK_TOLERANCE)?;
+    // Refine to the top of that peak: it is only a few samples wide.
+    let mut at = first;
+    let reach = (first + PREAMBLE_REFINE).min(values.len() - 1);
+    for i in first..=reach {
+        if values[i] > values[at] {
+            at = i;
         }
     }
-    Some(best.0)
+    Some(t0 + at)
 }
 
 /// Decode exactly one frame that starts at the preamble, sent with modulation `m`.
@@ -3640,6 +3654,141 @@ mod tests {
             60,
         );
         assert!(got.is_some(), "message did not arrive");
+    }
+
+    /// Two stations on one shared audio bus, like two programs on one BlackHole device: every
+    /// station hears everything sent on the bus, including its own transmissions.
+    fn shared_bus(calls: [&str; 2], tag: &str) -> (Engine, Engine) {
+        shared_bus_at(calls, tag, 1.0)
+    }
+
+    /// Like `shared_bus`, with the signal scaled on its way (a quiet or loud sound path).
+    fn shared_bus_at(calls: [&str; 2], tag: &str, gain: f32) -> (Engine, Engine) {
+        shared_bus_noisy(calls, tag, gain, 0.0)
+    }
+
+    /// Like `shared_bus_at`, with a constant noise floor of amplitude `floor` on every read.
+    fn shared_bus_noisy(calls: [&str; 2], tag: &str, gain: f32, floor: f32) -> (Engine, Engine) {
+        let (rx_a, tx_a): (Pipe, Pipe) = Default::default();
+        let (rx_b, tx_b): (Pipe, Pipe) = Default::default();
+        let wires = [
+            (tx_a.clone(), vec![rx_a.clone(), rx_b.clone()]),
+            (tx_b.clone(), vec![rx_a.clone(), rx_b.clone()]),
+        ];
+        thread::spawn(move || {
+            let mut seed = 7u64;
+            loop {
+                thread::sleep(Duration::from_millis(5));
+                // The noise floor runs all the time, whether or not anyone transmits.
+                seed += 1;
+                let mut heard = vec![0f32; 40];
+                for (tx, _) in &wires {
+                    let moved: Vec<f32> = tx.lock().unwrap().drain(..).collect();
+                    if heard.len() < moved.len() {
+                        heard.resize(moved.len(), 0.0);
+                    }
+                    for (h, m) in heard.iter_mut().zip(&moved) {
+                        *h += m * gain;
+                    }
+                }
+                let n = heard.len();
+                let mut mixed = noise(n, floor, seed + 1000);
+                for (m, h) in mixed.iter_mut().zip(&heard) {
+                    *m += h;
+                }
+                for o in &wires[0].1 {
+                    o.lock().unwrap().extend(mixed.iter().copied());
+                }
+            }
+        });
+        let a = Engine::spawn(
+            config(calls[0], temp_dir(&format!("{tag}-a"))),
+            fake_factory(rx_a, tx_a),
+        )
+        .unwrap();
+        let b = Engine::spawn(
+            config(calls[1], temp_dir(&format!("{tag}-b"))),
+            fake_factory(rx_b, tx_b),
+        )
+        .unwrap();
+        (a, b)
+    }
+
+    /// A small, repeatable noise floor, in the range of -60 dB against a full-scale burst.
+    fn noise(n: usize, amp: f32, seed: u64) -> Vec<f32> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s >> 11) as f32 / (1u64 << 53) as f32 - 0.5) * 2.0 * amp
+            })
+            .collect()
+    }
+
+    /// The preamble repeats every 128 samples, so the correlation is the same at each repeat.
+    /// The first one is the start of the frame. A little noise must never move the start to a
+    /// later repeat, or the frame is read 128 samples late and never decodes.
+    #[test]
+    fn preamble_start_is_the_first_repeat_even_with_noise() {
+        let air = burst(&[vec![0x42; 36]], MODULATION).unwrap();
+        for seed in 1..=40u64 {
+            let mut x = air.clone();
+            for (s, n) in x.iter_mut().zip(noise(air.len(), 0.002, seed)) {
+                *s += n;
+            }
+            let start = find_preamble(&x).expect("preamble");
+            assert_eq!(start, LEAD_SILENCE, "seed {seed}: frame start moved to {start}");
+            assert!(
+                decode_at(&x[start..start + frame_len_for(MODULATION)], MODULATION).is_some(),
+                "seed {seed}: the frame did not decode"
+            );
+        }
+    }
+
+    /// The same, end to end: two stations on a shared bus with a quiet signal and a noise floor
+    /// (what a real sound path such as BlackHole delivers) still connect.
+    #[test]
+    fn two_stations_connect_over_a_quiet_noisy_bus() {
+        let (mut a, mut b) = shared_bus_noisy(["ZZ1ALPHA", "ZZ2BRAVO"], "noisy", 0.0063, 0.0002);
+        a.listen().unwrap();
+        b.listen().unwrap();
+        a.connect("ZZ2BRAVO").unwrap();
+        let linked = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60,
+        );
+        assert!(linked.is_some(), "no link over a quiet bus with a noise floor");
+        a.send_message("ZZ2BRAVO", "through the noise").unwrap();
+        assert!(wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text, .. } if text == "through the noise"),
+            60
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn two_stations_on_one_shared_audio_bus_connect_and_talk() {
+        let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], "bus");
+        a.listen().unwrap();
+        b.listen().unwrap();
+        a.connect("ZZ2BRAVO").unwrap();
+        let linked = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60,
+        );
+        assert!(linked.is_some(), "the link did not come up on a shared bus");
+        a.send_message("ZZ2BRAVO", "hello over one cable").unwrap();
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text, .. } if text == "hello over one cable"),
+            60,
+        );
+        assert!(got.is_some(), "the message did not arrive on a shared bus");
     }
 
     /// One station with a fake radio whose transmit output is `a_to_b`.
