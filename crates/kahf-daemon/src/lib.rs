@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
+use kahf_core::burst;
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
@@ -220,6 +221,9 @@ struct Flags {
     listen_only: AtomicBool,
     /// Weak mode: every frame is sent WEAK_COPIES times for stations that cannot reply.
     weak_mode: AtomicBool,
+    /// Send and listen for ladder bursts (kahf_core::burst): long-preamble sync, adaptive
+    /// speed from -9 dB to 5 kbit/s. Off sends the older single-frame bursts only.
+    hf_burst: AtomicBool,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; used only in relay mode.
@@ -235,6 +239,7 @@ impl Flags {
             operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
+            hf_burst: AtomicBool::new(true),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -339,6 +344,11 @@ impl Engine {
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
     pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Ladder bursts on or off (default on). Off, the station sends and hears single frames only.
+    pub fn set_hf_burst(&self, on: bool) {
+        self.shared.flags.hf_burst.store(on, Ordering::SeqCst);
     }
 
     /// Set while a required update is pending (plan 0 and 8.5). While set, no transmit path runs.
@@ -1137,6 +1147,38 @@ fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     Ok(phy::modulate_frame(&coded, m))
 }
 
+/// Audio kept for the ladder-burst scan: the longest burst (a 7 s repeated mode) with room to spare.
+const HF_WINDOW: usize = 16 * RATE as usize;
+/// Scan period while a link is active (a reply may be due) and while idle. A scan costs about 0.2 s of CPU.
+const HF_SCAN_HOT: Duration = Duration::from_secs(1);
+const HF_SCAN_IDLE: Duration = Duration::from_secs(4);
+/// How long after the last ladder burst (heard or sent) the fast scan period stays.
+const HF_HOT_FOR: Duration = Duration::from_secs(40);
+/// Lowest ladder rung a connected link uses: slower bursts outlast the 2.5 s link timeouts.
+const HF_LINK_FLOOR: &str = "R4";
+/// Rung a link starts at, and the one beacons and no-reply (weak mode) sends use.
+const HF_LINK_START: &str = "Q12";
+const HF_WEAK_RUNG: &str = "R32";
+
+fn rung(name: &str) -> usize {
+    burst::LADDER.iter().position(|m| m.name == name).unwrap_or(0)
+}
+
+/// Audio for `frames` as ladder bursts at rung `level`: groups of up to the rung's long size, with
+/// gaps between, lead-in and tail silence like [`burst`].
+fn hf_bursts(frames: &[Vec<u8>], level: usize) -> Vec<f32> {
+    let mode = &burst::LADDER[level.min(burst::LADDER.len() - 1)];
+    let mut out = vec![0f32; LEAD_SILENCE];
+    for (i, group) in frames.chunks(burst::long_codewords(mode)).enumerate() {
+        if i > 0 {
+            out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
+        }
+        out.extend(burst::modulate_frames(group, mode));
+    }
+    out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
+    out
+}
+
 /// Copies of each frame in weak mode. Eight copies, soft-combined, decode at about -4 dB.
 const WEAK_COPIES: usize = 8;
 
@@ -1685,6 +1727,14 @@ struct Worker {
     link: Link,
     /// Index into MODULATIONS for the next transmission. Moves one step at a time with the peer's reports.
     tx_level: u8,
+    /// Ladder rung (index in burst::LADDER) for the next link transmission.
+    hf_level: usize,
+    /// Rung of the last ladder burst heard, tried first by the scan.
+    hf_heard: usize,
+    /// Recent audio for the ladder-burst scan.
+    hf_buf: Vec<f32>,
+    hf_scan_at: Instant,
+    hf_hot_until: Instant,
     link_state: LinkState,
     qso: Option<OpenQso>,
     outbox: Outbox,
@@ -1829,6 +1879,11 @@ impl Worker {
             backend: None,
             link: Link::new(&config.callsign),
             tx_level: 0,
+            hf_level: rung(HF_LINK_START),
+            hf_heard: rung(HF_LINK_START),
+            hf_buf: Vec::new(),
+            hf_scan_at: Instant::now(),
+            hf_hot_until: Instant::now(),
             link_state: LinkState::Idle,
             qso: None,
             outbox,
@@ -2584,7 +2639,25 @@ impl Worker {
             _ => {}
         }
         let m = MODULATIONS[self.tx_level as usize];
-        let built = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
+        let hf = self.shared.flags.hf_burst.load(Ordering::SeqCst);
+        let weak = self.shared.flags.weak_mode.load(Ordering::SeqCst);
+        if hf {
+            self.hf_hot_until = Instant::now() + HF_HOT_FOR;
+            // Same rule as above, over the ladder. A report of 30 percent or more drops two rungs.
+            let floor = rung(HF_LINK_FLOOR);
+            match self.link.peer_frame_error_pct() {
+                Some(f) if f < 2 && self.hf_level + 1 < burst::LADDER.len() => self.hf_level += 1,
+                Some(f) if f >= 30 && self.hf_level >= floor + 2 => self.hf_level -= 2,
+                Some(f) if f >= 8 && self.hf_level > floor => self.hf_level -= 1,
+                _ => {}
+            }
+            self.hf_level = self.hf_level.max(floor);
+        }
+        let built = if hf && weak {
+            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG)))
+        } else if hf {
+            Ok(hf_bursts(frames, self.hf_level))
+        } else if weak {
             weak_burst(frames)
         } else {
             burst(frames, m)
@@ -2684,6 +2757,7 @@ impl Worker {
     /// After a burst, the receive side starts clean: our own signal is not decoded.
     fn end_rx_gap(&mut self) {
         self.rx_buf.clear();
+        self.hf_buf.clear();
         self.since_scan = 0;
         self.spec = Analyser::new(SPEC_FFT, RATE as f32);
     }
@@ -2705,10 +2779,18 @@ impl Worker {
         }
         self.rx_error = None;
         if fresh.is_empty() {
+            // No new audio, but a scan may be due for what is already held (a burst that
+            // ended the stream, as in tests; a live device never goes quiet like this).
+            self.scan_hf();
             return 0;
         }
         let n = fresh.len();
         self.rx_buf.extend_from_slice(&fresh);
+        self.hf_buf.extend_from_slice(&fresh);
+        if self.hf_buf.len() > HF_WINDOW {
+            let cut = self.hf_buf.len() - HF_WINDOW;
+            self.hf_buf.drain(..cut);
+        }
 
         self.sense.push(&fresh);
         self.spec.push(&fresh);
@@ -2728,7 +2810,42 @@ impl Worker {
             self.since_scan = 0;
             self.decode_frames();
         }
+        self.scan_hf();
         n
+    }
+
+    /// Looks for a ladder burst in the recent audio, at most once per scan period, and not while
+    /// transmitting (the receive side is not listening then and the scan costs about 0.2 s).
+    fn scan_hf(&mut self) {
+        if !self.shared.flags.hf_burst.load(Ordering::SeqCst) || self.airing() {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.hf_scan_at || self.hf_buf.len() < burst::MIN_SCAN_SAMPLES {
+            return;
+        }
+        let period = if now < self.hf_hot_until {
+            HF_SCAN_HOT
+        } else {
+            HF_SCAN_IDLE
+        };
+        self.hf_scan_at = now + period;
+        let r = burst::scan(&self.hf_buf, self.hf_heard);
+        match r {
+            burst::Scan::Nothing => {}
+            burst::Scan::Pending { from } => {
+                self.hf_buf.drain(..from);
+            }
+            burst::Scan::Heard(h) => {
+                self.hf_buf.drain(..h.end.min(self.hf_buf.len()));
+                self.hf_heard = h.mode;
+                self.hf_hot_until = now + HF_HOT_FOR;
+                self.hf_scan_at = now;
+                for payload in h.frames {
+                    self.on_frame(payload);
+                }
+            }
+        }
     }
 
     fn report_rx(&mut self, err: String) {
@@ -3395,6 +3512,26 @@ mod tests {
             .filter(|t| t.duration_since(first) < Duration::from_secs(1))
             .count();
         assert!(in_one_second >= 20, "only {in_one_second} frames in one second");
+    }
+
+    #[test]
+    fn ladder_burst_frames_survive_air_and_scan() {
+        let frames: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8 + 1; 20 + i]).collect();
+        for name in ["R4", "Q12", "S12", "T34"] {
+            let level = rung(name);
+            let mut air = vec![0f32; 3000];
+            air.extend(hf_bursts(&frames, level));
+            air.extend(vec![0f32; 3000]);
+            match burst::scan(&air, rung(HF_LINK_START)) {
+                burst::Scan::Heard(h) => {
+                    assert_eq!(h.mode, level, "{name} heard as {}", burst::LADDER[h.mode].name);
+                    // Groups beyond the first burst follow; the first group is what one scan returns.
+                    let n = burst::long_codewords(&burst::LADDER[level]).min(frames.len());
+                    assert_eq!(h.frames, frames[..n].to_vec(), "{name}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
     }
 
     #[test]

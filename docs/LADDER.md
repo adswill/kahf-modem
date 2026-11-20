@@ -43,12 +43,26 @@ moderate and poor channels; shorter bursts (fewer codewords) trade rate for robu
 - **Rate.** Puncturing and repetition are done on the one rate-1/2 802.11 code, so there is one
   encoder and one decoder.
 
+## In the daemon
+
+Link transmissions go out as ladder bursts (`Flags::set_hf_burst`, default on; off sends the old single
+frames). A link starts at Q12 and moves one rung per peer report: up under 2 percent frame loss, down at
+8 percent, two rungs at 30 percent. A connected link never goes below R4, because slower bursts outlast
+the 2.5 s link timeouts. Weak mode (`set_weak_mode`) sends every frame as an R32 burst (about 7 s each,
+about -9 dB) instead of eight copies.
+
+There is no header. Each codeword's id byte (covered by its CRC) holds a flag, the rung and short or
+long burst (1 codeword, or 5 for Q12, 4 for Q23, 8 for 16QAM, 16 for 64QAM). The receiver finds the
+preamble once, then tries every (rung, size) whose audio has arrived, and takes the first whose codewords
+pass their CRC and carry the matching id. It scans the last 16 s of audio every 1 s while a link is active
+and every 4 s otherwise, about 0.2 s of CPU per scan. The ladder is on top of the old receiver, which still
+runs: old single frames are still heard.
+
 ## Not yet done
 
 - Reach is -9 dB (about 40 bit/s), not FT8's -21 dB. A lower-rate mother code is needed for that.
-- The link layer still sends single 36 byte QPSK frames. Wiring bursts, mode choice from measured SNR
-  and chase combining of retransmissions into the daemon is the next step.
-- A header that announces mode and codeword count (today both ends must be told).
+- Chase combining of retransmitted frames (the receiver keeps the soft bits of a failed codeword).
+- Mode choice from a measured SNR (today it follows the peer's frame loss report, one rung at a time).
 
 ## Regulatory note (17 m, US)
 
