@@ -27,4 +27,4 @@ KAHF is an HF and VHF messaging and file-transfer program for licensed amateur r
 
 ## Licence
 
-KAHF Source Licence, version 1.0. The source can be read and built, and official builds can be installed by anyone. See LICENSE.
+GNU General Public License, version 3 or later. KAHF is free software: you can use, study, change and share it, and changed versions must be shared under the same licence with their source. See LICENSE.

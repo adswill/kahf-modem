@@ -53,4 +53,4 @@ cargo run -p kahf-cli -- rx message.wav -o decoded.bin
 
 ## Licence
 
-Copyright (c) 2026 adswill. All rights reserved. This software is source-available. Licence terms will be published with the first release. See [LICENSE](LICENSE).
+Copyright (c) 2026 Kristijonas Adomaitis (adswill). KAHF is free software under the GNU General Public License, version 3 or (at your option) any later version. You may use, study, change and share it, and if you share a changed version, or build it into another program, that program must be offered under the same licence with its source. See [LICENSE](LICENSE).

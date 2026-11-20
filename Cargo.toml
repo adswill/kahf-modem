@@ -5,4 +5,4 @@ members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kah
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-license-file = "LICENSE"
+license = "GPL-3.0-or-later"
