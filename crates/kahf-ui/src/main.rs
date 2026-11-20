@@ -8,6 +8,7 @@ mod spectrum;
 mod strings;
 mod tech;
 mod theme;
+mod update;
 mod view;
 
 use iced::{window, Size};

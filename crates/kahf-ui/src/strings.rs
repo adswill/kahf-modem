@@ -317,7 +317,10 @@ pub const SET_UPDATES: &str = "Updates";
 pub const SET_UPDATES_DESC: &str = "KAHF never updates itself without asking.";
 pub const SET_VERSION: &str = "Version";
 pub const SET_CHECK: &str = "Check for updates";
-pub const SET_CHECK_DONE: &str = "Update checks are not connected yet.";
+pub const UPDATE_CHECKING: &str = "Checking...";
+pub const UPDATE_CURRENT: &str = "You have the newest version.";
+pub const UPDATE_FAILED: &str = "Could not check for updates. Try again later.";
+pub const UPDATE_NEWER: &str = "Version {v} is available. Opening the download page.";
 pub const UPDATE_NOT_CHECKED: &str = "Not checked";
 
 // Toasts
