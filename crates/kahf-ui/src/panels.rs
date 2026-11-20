@@ -5,7 +5,7 @@ use iced::widget::{
 };
 use iced::{Fill, Length};
 
-use crate::app::{App, Message, RigControl, TxAction, SETUP_STEPS};
+use crate::app::{App, Message, Probe, RigControl, TestState, TxAction, SETUP_STEPS};
 use crate::icons;
 use crate::strings as s;
 use crate::theme::{self, Kind};
@@ -44,6 +44,28 @@ impl App {
             col = col.push(num(d.clone()).size(12));
         }
         col.into()
+    }
+
+    /// A Test button with the result of the last test beside it.
+    fn test_row(&self, p: Probe, tip_text: &'static str) -> El<'_> {
+        let running = self.tests[p as usize] == Some(TestState::Running);
+        let msg = match p {
+            Probe::Rig => Message::TestRig,
+            _ => Message::TestAudio(p),
+        };
+        let button = btn(
+            if running { s::TEST_RUNNING } else { s::TEST_BUTTON },
+            Kind::Secondary,
+        )
+        .on_press_maybe((!running).then_some(msg));
+        let mut r = row![tip(button, tip_text)].spacing(8).align_y(iced::Center);
+        if let Some(TestState::Done(res)) = &self.tests[p as usize] {
+            r = r.push(match res {
+                Ok(m) => notice(m.clone(), theme::ACCENT),
+                Err(m) => notice(m.clone(), theme::AMBER),
+            });
+        }
+        r.into()
     }
 
     fn audio_pick(&self, label: &'static str, value: &str, on: fn(String) -> Message) -> El<'_> {
@@ -112,6 +134,7 @@ impl App {
                             .padding(5)
                             .style(theme::input),
                     ));
+                    col = col.push(self.test_row(Probe::Rig, s::TIP_TEST_RIG));
                 }
                 col.into()
             }
@@ -130,7 +153,9 @@ impl App {
             }
             3 => column![
                 self.audio_pick(s::SET_AUDIO_IN, &self.audio_in, Message::AudioIn),
+                self.test_row(Probe::AudioIn, s::TIP_TEST_AUDIO_IN),
                 self.audio_pick(s::SET_AUDIO_OUT, &self.audio_out, Message::AudioOut),
+                self.test_row(Probe::AudioOut, s::TIP_TEST_AUDIO_OUT),
                 self.volume_controls(),
                 self.detected_list(&self.detected_audio),
             ]
