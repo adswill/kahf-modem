@@ -81,6 +81,23 @@ pub enum Event {
     Tx {
         state: TxState,
     },
+    /// Radio relay of another station's message by this station (plan 4).
+    Relay {
+        from: String,
+        to: String,
+        step: RelayStep,
+    },
+}
+
+/// What happened to a message this station relays.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RelayStep {
+    /// Heard and held, waiting for a transmit slot and its station.
+    Held,
+    /// Handed on to the next station.
+    Sent,
+    /// Not held, with the reason (a copy already relayed, or the relay queue is full).
+    Dropped(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,8 +147,9 @@ const SDR_RATE_HZ: u32 = 2_400_000;
 const SDR_OVERSAMPLE: usize = (SDR_RATE_HZ / RATE) as usize;
 /// Half-length of the interpolation filter, in audio samples.
 const SDR_HALF: usize = 8;
-/// Used when the sdr setting has no "@frequency" part: 14.100 MHz.
-const DEFAULT_SDR_FREQ_HZ: u64 = 14_100_000;
+/// Used when the sdr setting has no "@frequency" part: 18.111 MHz USB, the low edge of the
+/// 17 m relay segment, so its first channel sits at 1.35 kHz audio.
+const DEFAULT_SDR_FREQ_HZ: u64 = 18_111_000;
 const SDR_RX_LNA_DB: u32 = 16;
 const SDR_RX_VGA_DB: u32 = 20;
 const SDR_TX_VGA_DB: u32 = 20;
@@ -1623,6 +1641,10 @@ struct Worker {
     unreached_noted: HashSet<u64>,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
+    /// Link clock in ms: worker time minus the time spent airing our own frames.
+    link_ms: u64,
+    /// When `link_ms` was last advanced.
+    link_mark: Instant,
     /// Digests of messages already held for relay, oldest first, so each is passed on once.
     relayed: VecDeque<[u8; 32]>,
     /// The station this relay called itself to pass messages on, while that call lasts.
@@ -1750,6 +1772,8 @@ impl Worker {
             queued,
             unreached_noted: HashSet::new(),
             refusal_logged: None,
+            link_ms: 0,
+            link_mark: Instant::now(),
             relayed: VecDeque::new(),
             dialed: None,
             dial_after: HashMap::new(),
@@ -2021,9 +2045,7 @@ impl Worker {
             LinkState::Connected { peer } => peer.clone(),
             _ => return None,
         };
-        let via_relay = lock(&self.shared.relay_paths)
-            .iter()
-            .any(|r| r.eq_ignore_ascii_case(&peer));
+        let paths = lock(&self.shared.relay_paths).clone();
         let now = self.now_ms();
         let mut unreadable = Vec::new();
         let mut pick = None;
@@ -2032,11 +2054,8 @@ impl Worker {
                 unreadable.push(id);
                 continue;
             };
-            let direct = to.eq_ignore_ascii_case(&peer);
-            // Never hand a message back to the station it came from.
-            let relayed =
-                via_relay && self.unreached_noted.contains(&id) && !from.eq_ignore_ascii_case(&peer);
-            if direct || relayed {
+            let next = self.next_stations(id, &from, &to, &paths);
+            if next.iter().any(|c| c.eq_ignore_ascii_case(&peer)) {
                 match decode_payload(&item.payload) {
                     Some(p) => {
                         pick = Some((id, p));
@@ -2236,6 +2255,7 @@ impl Worker {
         if let Payload::Forward { from, to, .. } = &payload {
             self.record_forward(public);
             self.log(format!("Relayed a message from {from} to {to}."));
+            self.emit_relay(from, to, RelayStep::Sent);
         }
         self.persist_outbox();
     }
@@ -2362,8 +2382,22 @@ impl Worker {
     }
 
     /// Runs link timers (handshake retries, DATA retransmits) on the monotonic clock.
+    /// True while this station has link frames queued or on the air.
+    fn airing(&self) -> bool {
+        self.tx.is_some() || !self.bursts.is_empty() || !self.control.is_empty()
+    }
+
+    /// The link's clock stands still while our own frames wait or are on the air, so its
+    /// retransmit timers count only time in which the other station could have answered.
+    /// Without this a timer runs out during our own long burst and the retransmit then
+    /// covers the peer's reply, again and again.
     fn tick_link(&mut self) {
-        let now_ms = self.started.elapsed().as_millis() as u64;
+        let now = Instant::now();
+        if !self.airing() {
+            self.link_ms += now.duration_since(self.link_mark).as_millis() as u64;
+        }
+        self.link_mark = now;
+        let now_ms = self.link_ms;
         match guard("link tick", || self.link.tick(now_ms)) {
             Ok(actions) => {
                 self.tick_error = None;
@@ -2693,6 +2727,7 @@ impl Worker {
             self.log(format!(
                 "Already relayed the message from {from} to {to}; dropped the copy."
             ));
+            self.emit_relay(&from, &to, RelayStep::Dropped("already relayed".into()));
             return;
         }
         let held = self
@@ -2705,6 +2740,7 @@ impl Worker {
             self.log(format!(
                 "Relay queue is full; dropped the message from {from} to {to}."
             ));
+            self.emit_relay(&from, &to, RelayStep::Dropped("relay queue is full".into()));
             return;
         }
         if self.relayed.len() >= RELAYED_MEMORY {
@@ -2722,22 +2758,52 @@ impl Worker {
         self.queued.insert(oid, (to.clone(), at));
         self.persist_outbox();
         self.log(format!("Holding a message from {from} for {to} to relay."));
+        self.emit_relay(&from, &to, RelayStep::Held);
     }
 
-    /// Stations that held messages are waiting for, in sending order, without repeats.
-    fn forward_dests(&self) -> Vec<String> {
-        let mut dests: Vec<String> = Vec::new();
-        for (_, item) in self.outbox.due(self.now_ms()) {
+    fn emit_relay(&self, from: &str, to: &str, step: RelayStep) {
+        self.emit(Event::Relay {
+            from: from.to_string(),
+            to: to.to_string(),
+            step,
+        });
+    }
+
+    /// Stations an outbox item may go to next, best first: its addressee, and, once the
+    /// addressee was not reached in time, the relays in `paths`. Never back to its sender.
+    fn next_stations(&self, id: u64, from: &str, to: &str, paths: &[String]) -> Vec<String> {
+        let mut out = vec![to.to_string()];
+        if self.unreached_noted.contains(&id) {
+            out.extend(
+                paths
+                    .iter()
+                    .filter(|p| !p.eq_ignore_ascii_case(from) && !p.eq_ignore_ascii_case(to))
+                    .cloned(),
+            );
+        }
+        out
+    }
+
+    /// Stations this relay should call for the messages it holds, in sending order, without
+    /// repeats. A held message whose station was not reached also lists the relay paths, so
+    /// it can go on over more than one hop.
+    fn dial_targets(&self) -> Vec<String> {
+        let paths = lock(&self.shared.relay_paths).clone();
+        let mut targets: Vec<String> = Vec::new();
+        for (id, item) in self.outbox.due(self.now_ms()) {
             if item.kind != KIND_RELAY {
                 continue;
             }
-            if let Some((_, to)) = peek_route(&item.payload) {
-                if !dests.iter().any(|d| d.eq_ignore_ascii_case(&to)) {
-                    dests.push(to);
+            let Some((from, to)) = peek_route(&item.payload) else {
+                continue;
+            };
+            for call in self.next_stations(id, &from, &to, &paths) {
+                if !targets.iter().any(|t| t.eq_ignore_ascii_case(&call)) {
+                    targets.push(call);
                 }
             }
         }
-        dests
+        targets
     }
 
     /// Plan 4: in relay mode a relay calls the station a held message is for, inside a
@@ -2754,7 +2820,7 @@ impl Worker {
                     .dialed
                     .as_deref()
                     .is_some_and(|d| d.eq_ignore_ascii_case(&peer));
-                let more = self.forward_dests().iter().any(|d| d.eq_ignore_ascii_case(&peer));
+                let more = self.dial_targets().iter().any(|d| d.eq_ignore_ascii_case(&peer));
                 if ours && !more && self.link.is_flushed() {
                     self.dialed = None;
                     self.log(format!("Relayed everything held for {peer}; hanging up."));
@@ -2770,7 +2836,7 @@ impl Worker {
                 }
                 let now = Instant::now();
                 let next = self
-                    .forward_dests()
+                    .dial_targets()
                     .into_iter()
                     .find(|d| self.dial_after.get(d).is_none_or(|t| now >= *t));
                 let Some(dest) = next else {
@@ -4265,6 +4331,52 @@ mod tests {
         assert!(!r_saw_it, "a relayed message must not land in the relay's inbox");
     }
 
+    /// Four stations in a line, each hearing only its neighbours: A - R1 - R2 - B. R1 cannot
+    /// reach B, so after its relay timeout it hands the message to R2, which reaches B.
+    #[test]
+    fn message_crosses_two_radio_relays() {
+        let (to_a, to_r1, to_r2, to_b) = (pipe(), pipe(), pipe(), pipe());
+        let spawn = |call: &str, tag: &str, rx: &Pipe, tx: Vec<Pipe>| {
+            Engine::spawn(config(call, temp_dir(tag)), air_factory(rx.clone(), tx)).unwrap()
+        };
+        let mut a = spawn("AA1AAA", "hop2-a", &to_a, vec![to_r1.clone()]);
+        let mut r1 = spawn("RR1RRR", "hop2-r1", &to_r1, vec![to_a.clone(), to_r2.clone()]);
+        let mut r2 = spawn("RR2RRR", "hop2-r2", &to_r2, vec![to_r1.clone(), to_b.clone()]);
+        let mut b = spawn("BB1BBB", "hop2-b", &to_b, vec![to_r2.clone()]);
+        for r in [&r1, &r2] {
+            running_relay(r);
+            r.set_relay_timeout_ms(200);
+        }
+        r1.set_relay_paths(&["RR2RRR"]).unwrap();
+        for e in [&mut r1, &mut r2, &mut b] {
+            e.listen().unwrap();
+        }
+
+        a.set_relay_paths(&["RR1RRR"]).unwrap();
+        a.set_relay_timeout_ms(200);
+        a.send_message("BB1BBB", "two hops").unwrap();
+        thread::sleep(Duration::from_millis(400));
+        a.connect("RR1RRR").unwrap();
+        assert!(
+            wait_until(60, || a.outbox_pending().is_empty()),
+            "A never handed the message to R1"
+        );
+        a.disconnect().unwrap();
+
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "two hops"),
+            120,
+        );
+        assert!(got.is_some(), "B never got the message over two relays");
+        assert!(wait_until(30, || r1.outbox_pending().is_empty()
+            && r2.outbox_pending().is_empty()));
+        assert_eq!(r1.relay_stats().sent_total, 1);
+        assert_eq!(r2.relay_stats().sent_total, 1);
+        let sent = |e: &Event| matches!(e, Event::Relay { step: RelayStep::Sent, to, .. } if to == "BB1BBB");
+        assert!(r2.poll_events().iter().any(sent) || wait_for(&mut r2, sent, 5).is_some());
+    }
+
     fn relaying_worker(tag: &str) -> Worker {
         let w = bare_worker(tag, "RR1RRR");
         let mut relay = Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
@@ -4298,7 +4410,7 @@ mod tests {
             }
             other => panic!("not a forward: {other:?}"),
         }
-        assert_eq!(w.forward_dests(), vec!["BB1BBB".to_string()]);
+        assert_eq!(w.dial_targets(), vec!["BB1BBB".to_string()]);
     }
 
     #[test]

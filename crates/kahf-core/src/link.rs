@@ -27,12 +27,14 @@ pub const MAX_CALLSIGN: usize = 15;
 pub const WINDOW: usize = 8;
 /// Largest data body carried by one DATA frame.
 pub const MAX_CHUNK: usize = MAX_PAYLOAD - 2;
-/// Handshake retransmit interval.
-pub const CONNECT_TIMEOUT_MS: u64 = 1000;
+/// Handshake retransmit interval. Like `DATA_TIMEOUT_MS` it must cover the peer's reply on
+/// air (about one second for a burst at 8 kHz), so the caller's clock should not run while
+/// the caller itself is transmitting.
+pub const CONNECT_TIMEOUT_MS: u64 = 2_500;
 /// Handshake retransmissions before giving up.
 pub const MAX_CONNECT_RETRIES: u32 = 5;
 /// DATA retransmit timeout.
-pub const DATA_TIMEOUT_MS: u64 = 500;
+pub const DATA_TIMEOUT_MS: u64 = 2_500;
 /// DATA retransmissions of one frame before the link drops to Idle.
 pub const MAX_DATA_RETRIES: u32 = 8;
 /// Highest suggested modulation level.

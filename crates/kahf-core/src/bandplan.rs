@@ -330,7 +330,18 @@ pub static KAHF_SEGMENTS: &[Segment] = &[
         lower_hz: 14_101_000,
         upper_hz: 14_112_000,
     },
+    // The relay band. IARU Region 1 marks 18.111 to 18.120 MHz for digital modes and
+    // automatically controlled data stations, which suits unattended relays. It sits above
+    // the 18.110 MHz beacon and clear of FT8 (18.100) and FT4 (18.104).
+    RELAY_SEGMENT,
 ];
+
+/// Where relays work by default: 17 m, 18.111 to 18.120 MHz (three channels).
+pub const RELAY_SEGMENT: Segment = Segment {
+    name: "17 m, 18.111 to 18.120 MHz",
+    lower_hz: 18_111_000,
+    upper_hz: 18_120_000,
+};
 
 /// Name of the KAHF segment that holds the whole channel, or `None`.
 ///
@@ -352,11 +363,13 @@ pub fn allowed_segment(centre_hz: u64, width_hz: u64) -> Option<&'static str> {
 pub fn tuning_warning(centre_hz: u64, width_hz: u64) -> Option<String> {
     match allowed_segment(centre_hz, width_hz) {
         Some(_) => None,
-        None => Some(
-            "This tuning is outside the planned KAHF segments (14.101 to 14.112 MHz and \
-             7.040 to 7.045 MHz). Check the band plan before you transmit."
-                .to_string(),
-        ),
+        None => {
+            let names: Vec<&str> = KAHF_SEGMENTS.iter().map(|s| s.name).collect();
+            Some(format!(
+                "This tuning is outside the planned KAHF segments ({}). Check the band plan before you transmit.",
+                names.join("; ")
+            ))
+        }
     }
 }
 
