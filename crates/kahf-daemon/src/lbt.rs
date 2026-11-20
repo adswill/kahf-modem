@@ -20,11 +20,13 @@ const BUSY_OVER_FLOOR_DB: f32 = 10.0;
 const BUSY_MIN_DB: f32 = -80.0;
 /// How long the channel must have been quiet before a transmission may start. Longer than the
 /// silence between the bursts of one train (0.3 s), so a station does not cut in on a train.
-pub const LISTEN_QUIET: Duration = Duration::from_millis(400);
+pub const LISTEN_QUIET: Duration = Duration::from_millis(250);
 /// How long after our own transmission its playback may still arrive.
 pub const ECHO_GUARD: Duration = Duration::from_millis(600);
 /// The random extra wait after the channel has been busy, in milliseconds.
-const BACKOFF_MS: (u64, u64) = (100, 600);
+/// Blocks (20 ms each) of energy in a row that count as a burst (0.3 s).
+const BURST_BLOCKS: usize = 15;
+const BACKOFF_MS: (u64, u64) = (50, 300);
 /// A channel that has been busy for this long without a break is not held any longer: a steady
 /// carrier that never ends must not silence the station for good.
 const MAX_BUSY_WAIT: Duration = Duration::from_secs(45);
@@ -39,6 +41,9 @@ pub struct ChannelWatch {
     ignore_until: Option<Instant>,
     blocked_since: Option<Instant>,
     backoff_until: Option<Instant>,
+    /// Blocks of energy in a row, and whether a stretch long enough to be a burst just ended.
+    run: usize,
+    ended: bool,
     rng: u64,
 }
 
@@ -53,6 +58,8 @@ impl ChannelWatch {
             ignore_until: None,
             blocked_since: None,
             backoff_until: None,
+            run: 0,
+            ended: false,
             rng: seed | 1,
         }
     }
@@ -68,10 +75,18 @@ impl ChannelWatch {
         self.ignore_until.is_some_and(|t| now < t)
     }
 
+    /// True once after someone else's signal of burst length has just ended: the moment to look
+    /// for what it carried, instead of waiting for the next scheduled scan.
+    pub fn take_burst_ended(&mut self) -> bool {
+        std::mem::take(&mut self.ended)
+    }
+
     /// Our transmission ended: what arrives for a moment is our own signal.
     pub fn tx_finished(&mut self, now: Instant) {
         self.pending.clear();
         self.last_energy = None;
+        self.run = 0;
+        self.ended = false;
         self.ignore_until = Some(now + ECHO_GUARD);
     }
 
@@ -93,6 +108,12 @@ impl ChannelWatch {
             .max(-120.0);
             if db > (self.floor_db + BUSY_OVER_FLOOR_DB).max(BUSY_MIN_DB) {
                 self.last_energy = Some(now);
+                self.run += 1;
+            } else {
+                if self.run >= BURST_BLOCKS {
+                    self.ended = true;
+                }
+                self.run = 0;
             }
             self.blocks.push_back(db);
             if self.blocks.len() > HISTORY {
@@ -159,11 +180,11 @@ mod tests {
         w.push(&tone(1600, 0.05), t0);
         assert!(!w.may_transmit(t0 + Duration::from_millis(100)));
         // Quiet again, but not for long enough.
-        w.push(&vec![0.0; 800], t0 + Duration::from_millis(200));
-        assert!(!w.may_transmit(t0 + Duration::from_millis(350)));
-        // Quiet long enough: the random backoff starts and must run out.
-        assert!(!w.may_transmit(t0 + Duration::from_millis(700)));
-        assert!(w.may_transmit(t0 + Duration::from_millis(700 + 601)));
+        w.push(&vec![0.0; 800], t0 + Duration::from_millis(100));
+        assert!(!w.may_transmit(t0 + Duration::from_millis(200)));
+        // Quiet long enough: the random backoff starts, and has run out within its longest time.
+        assert!(!w.may_transmit(t0 + Duration::from_millis(400)));
+        assert!(w.may_transmit(t0 + Duration::from_millis(400 + 301)));
     }
 
     #[test]
@@ -202,6 +223,21 @@ mod tests {
         }
         assert!(allowed, "a constant signal held the station for over a minute");
         assert!(t.duration_since(t0) < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_end_of_a_burst_is_reported_once() {
+        let mut w = ChannelWatch::new(2);
+        let t0 = Instant::now();
+        w.push(&tone(3200, 0.1), t0);
+        assert!(!w.take_burst_ended());
+        w.push(&vec![0.0; 800], t0 + Duration::from_millis(500));
+        assert!(w.take_burst_ended());
+        assert!(!w.take_burst_ended());
+        // A short blip is not a burst.
+        w.push(&tone(320, 0.1), t0 + Duration::from_millis(700));
+        w.push(&vec![0.0; 800], t0 + Duration::from_millis(800));
+        assert!(!w.take_burst_ended());
     }
 
     #[test]

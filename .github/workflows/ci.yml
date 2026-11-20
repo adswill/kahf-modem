@@ -1,17 +1,35 @@
 name: ci
 
 on:
-  # Every push and pull request runs one quick Linux check.
-  # The full platform matrix runs only when started by hand (workflow_dispatch),
-  # to save runner minutes on the private repository.
+  # Pull requests run one quick Linux check (including the headless kahf-ui
+  # smoke test). Windows and macOS build and test on pushes to main and nightly,
+  # not on every PR, to keep the runner queue short. Docs and site only changes
+  # skip everything. Start the full platform matrix by hand with workflow_dispatch.
   push:
+    branches: [main]
+    paths-ignore: &ignore
+      - "docs/**"
+      - "**.md"
+      - "LICENSE"
+      - "server/**"
+      - ".github/workflows/deploy-site.yml"
+      - ".github/workflows/release.yml"
   pull_request:
+    paths-ignore: *ignore
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       full_matrix:
         description: "Run every platform"
         type: boolean
         default: true
+
+# A newer push to the same branch or PR cancels the older run. Main pushes are
+# never cancelled, so every merge keeps its own result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,6 +108,40 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
+
+  # Windows and macOS on main pushes and nightly. Skips clippy and fmt (the quick
+  # job covers them) and the SDR crate, to keep it fast.
+  desktop:
+    name: ${{ matrix.name }} (main)
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            deploy_target: ""
+          - name: macOS 14+ arm64
+            runner: macos-14
+            deploy_target: "14.0"
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deploy_target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.runner }}
+
+      - name: Build
+        run: cargo build --workspace --exclude kahf-sdr
+
+      - name: Test
+        run: cargo test --workspace --exclude kahf-sdr
 
   full:
     name: Full platform build

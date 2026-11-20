@@ -20,10 +20,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
+use kahf_core::burst;
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
+use kahf_core::msg::groups::{Control, GroupBook};
+use kahf_core::msg::heard::{Heard, HeardList, Observation, DEFAULT_CAP as HEARD_CAP};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::{self, Modulation};
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -129,6 +132,8 @@ const PREAMBLE_THRESHOLD: f64 = 0.5;
 /// preamble repeats every 128 samples, so this stays well under half of that.
 const PREAMBLE_REFINE: usize = 24;
 /// How long after a burst its playback may still come back to us (a virtual cable, a monitor).
+/// A link nobody has used for this long is closed by a relay that has something to deliver.
+const LINK_IDLE_DROP: Duration = Duration::from_secs(20);
 const ECHO_WINDOW: Duration = Duration::from_millis(1500);
 /// How far below the strongest correlation a repeat may be and still count as a peak.
 const PEAK_TOLERANCE: f64 = 0.05;
@@ -214,6 +219,12 @@ struct Shared {
     hops: Mutex<HopLog>,
     /// Relays this station may send through when a station is not reached directly (plan 6.3).
     relay_paths: Mutex<Vec<String>>,
+    /// Stations heard on air (link peers and senders of messages), saved as `heard.txt`.
+    heard: Mutex<HeardList>,
+    /// Serialises reads and writes of `contacts.txt` between the worker and `note_beacon`.
+    contacts_io: Mutex<()>,
+    /// Group chat membership, saved as `groups.txt`.
+    groups: Mutex<GroupBook>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -228,6 +239,9 @@ struct Flags {
     listen_only: AtomicBool,
     /// Weak mode: every frame is sent WEAK_COPIES times for stations that cannot reply.
     weak_mode: AtomicBool,
+    /// Send and listen for ladder bursts (kahf_core::burst): long-preamble sync, adaptive
+    /// speed from -9 dB to 5 kbit/s. Off sends the older single-frame bursts only.
+    hf_burst: AtomicBool,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; used only in relay mode.
@@ -243,6 +257,7 @@ impl Flags {
             operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
+            hf_burst: AtomicBool::new(true),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -299,6 +314,12 @@ impl EventQueue {
     }
 }
 
+fn save_heard(dir: &Path, h: &HeardList) {
+    if fs::create_dir_all(dir).is_ok() {
+        let _ = fs::write(dir.join("heard.txt"), h.to_text());
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -347,6 +368,11 @@ impl Engine {
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
     pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Ladder bursts on or off (default on). Off, the station sends and hears single frames only.
+    pub fn set_hf_burst(&self, on: bool) {
+        self.shared.flags.hf_burst.store(on, Ordering::SeqCst);
     }
 
     /// Set while a required update is pending (plan 0 and 8.5). While set, no transmit path runs.
@@ -607,6 +633,159 @@ impl Engine {
         lock(&self.shared.pending).clone()
     }
 
+    /// Stations heard on air, most recent first (at most `limit`). Survives restarts.
+    pub fn heard_stations(&self, limit: usize) -> Vec<Heard> {
+        lock(&self.shared.heard)
+            .recent(limit)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Feeds a location beacon payload (a position beacon or a grid beacon) heard on air.
+    /// Records the station's position and grid in the heard list and, when its contact has no
+    /// QTH yet, fills it with the grid so the relay route planner knows where it is. Returns
+    /// the (callsign, grid) learned, or None for any other payload or our own beacon.
+    pub fn note_beacon(&self, payload: &[u8]) -> Option<(String, String)> {
+        let (call, grid, pos) = kahf_core::msg::grid::learn(payload)?;
+        if call.eq_ignore_ascii_case(&self.config.callsign) || !valid_call(&call) {
+            return None;
+        }
+        {
+            let mut h = lock(&self.shared.heard);
+            if h.get(&call).is_none() {
+                let obs = Observation {
+                    snr_db: 0.0,
+                    channel_khz: 0.0,
+                    via: None,
+                };
+                h.hear(&call, now_unix_secs().max(0) as u64, obs, 0);
+            }
+            match pos {
+                Some((la, lo)) => h.set_position(&call, la, lo),
+                None => h.set_grid(&call, &grid),
+            }
+            save_heard(&self.config.data_dir, &h);
+        }
+        let _io = lock(&self.shared.contacts_io);
+        let path = self.config.data_dir.join("contacts.txt");
+        if let Ok(mut list) = contacts::load(&path) {
+            if contacts::fill_grid(&mut list, &call, &grid) {
+                let _ = fs::create_dir_all(&self.config.data_dir);
+                let _ = contacts::save(&path, &list);
+            }
+        }
+        Some((call, grid))
+    }
+
+    /// Joins the group `name` (letters, digits and '-', for example "net17") and tells each
+    /// station in `invite` so they add this station and answer with their member list. Returns
+    /// the group address, `#NET17`. Group chat is plain chat to each member; nothing is hidden.
+    pub fn join_group(&mut self, name: &str, invite: &[&str]) -> Result<String, String> {
+        let ctl = lock(&self.shared.groups).join(name)?;
+        self.save_groups();
+        let Control::Join { group, .. } = &ctl else {
+            unreachable!()
+        };
+        let group = group.clone();
+        let me = self.config.callsign.clone();
+        let msgs: Vec<Message> = invite
+            .iter()
+            .filter(|c| valid_call(c) && !c.eq_ignore_ascii_case(&me))
+            .map(|c| Message::Chat {
+                from: me.clone(),
+                to: c.to_string(),
+                text: ctl.encode(),
+            })
+            .collect();
+        if !msgs.is_empty() {
+            self.queue(msgs)?;
+        }
+        Ok(group)
+    }
+
+    /// Leaves a group and tells the members this station knows.
+    pub fn leave_group(&mut self, name: &str) -> Result<(), String> {
+        let (ctl, members) = {
+            let mut g = lock(&self.shared.groups);
+            let addr = kahf_core::msg::groups::group_addr(name)?;
+            let members = g.fanout(&addr, &self.config.callsign);
+            (g.leave(name)?, members)
+        };
+        self.save_groups();
+        let me = self.config.callsign.clone();
+        let msgs: Vec<Message> = members
+            .into_iter()
+            .map(|to| Message::Chat {
+                from: me.clone(),
+                to,
+                text: ctl.encode(),
+            })
+            .collect();
+        if msgs.is_empty() {
+            Ok(())
+        } else {
+            self.queue(msgs).map(|_| ())
+        }
+    }
+
+    /// Sends `text` to every known member of a joined group, one chat each (so the outbox
+    /// keeps trying for members that are off air). Returns how many members it was queued for.
+    pub fn send_group(&mut self, name: &str, text: &str) -> Result<usize, String> {
+        if text.is_empty() {
+            return Err("empty message".into());
+        }
+        let addr = kahf_core::msg::groups::group_addr(name)?;
+        let members = {
+            let g = lock(&self.shared.groups);
+            if !g.is_joined(&addr) {
+                return Err(format!("not in group {addr}; join it first"));
+            }
+            g.fanout(&addr, &self.config.callsign)
+        };
+        if members.is_empty() {
+            return Err(format!("no other members known in {addr} yet"));
+        }
+        let me = self.config.callsign.clone();
+        let say = Control::Say {
+            group: addr,
+            text: text.to_string(),
+        }
+        .encode();
+        let msgs: Vec<Message> = members
+            .iter()
+            .map(|to| Message::Chat {
+                from: me.clone(),
+                to: to.clone(),
+                text: say.clone(),
+            })
+            .collect();
+        self.queue(msgs)?;
+        Ok(members.len())
+    }
+
+    /// Joined groups with their known members (this station included).
+    pub fn groups(&self) -> Vec<(String, Vec<String>)> {
+        let g = lock(&self.shared.groups);
+        g.joined()
+            .into_iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    g.members(n).into_iter().map(String::from).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn save_groups(&self) {
+        let _ = fs::create_dir_all(&self.config.data_dir);
+        let _ = fs::write(
+            self.config.data_dir.join("groups.txt"),
+            lock(&self.shared.groups).to_text(),
+        );
+    }
+
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
@@ -627,6 +806,18 @@ impl Engine {
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
             relay_paths: Mutex::new(Vec::new()),
+            heard: Mutex::new(
+                fs::read_to_string(config.data_dir.join("heard.txt"))
+                    .ok()
+                    .and_then(|t| HeardList::from_text(&t, HEARD_CAP))
+                    .unwrap_or_default(),
+            ),
+            contacts_io: Mutex::new(()),
+            groups: Mutex::new(
+                fs::read_to_string(config.data_dir.join("groups.txt"))
+                    .map(|t| GroupBook::from_text(&config.callsign, &t))
+                    .unwrap_or_else(|_| GroupBook::new(&config.callsign)),
+            ),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -1149,6 +1340,38 @@ fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     Ok(phy::modulate_frame(&coded, m))
 }
 
+/// Audio kept for the ladder-burst scan: the longest burst (a 7 s repeated mode) with room to spare.
+const HF_WINDOW: usize = 16 * RATE as usize;
+/// Scan period while a link is active (a reply may be due) and while idle. A scan costs about 0.2 s of CPU.
+const HF_SCAN_HOT: Duration = Duration::from_secs(1);
+const HF_SCAN_IDLE: Duration = Duration::from_secs(4);
+/// How long after the last ladder burst (heard or sent) the fast scan period stays.
+const HF_HOT_FOR: Duration = Duration::from_secs(40);
+/// Lowest ladder rung a connected link uses: slower bursts outlast the 2.5 s link timeouts.
+const HF_LINK_FLOOR: &str = "R4";
+/// Rung a link starts at, and the one beacons and no-reply (weak mode) sends use.
+const HF_LINK_START: &str = "Q12";
+const HF_WEAK_RUNG: &str = "R32";
+
+fn rung(name: &str) -> usize {
+    burst::LADDER.iter().position(|m| m.name == name).unwrap_or(0)
+}
+
+/// Audio for `frames` as ladder bursts at rung `level`: groups of up to the rung's long size, with
+/// gaps between, lead-in and tail silence like [`burst`].
+fn hf_bursts(frames: &[Vec<u8>], level: usize) -> Vec<f32> {
+    let mode = &burst::LADDER[level.min(burst::LADDER.len() - 1)];
+    let mut out = vec![0f32; LEAD_SILENCE];
+    for (i, group) in frames.chunks(burst::long_codewords(mode)).enumerate() {
+        if i > 0 {
+            out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
+        }
+        out.extend(burst::modulate_frames(group, mode));
+    }
+    out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
+    out
+}
+
 /// Copies of each frame in weak mode. Eight copies, soft-combined, decode at about -4 dB.
 const WEAK_COPIES: usize = 8;
 
@@ -1217,8 +1440,6 @@ fn preamble_corr(x: &[f32], t: usize) -> f64 {
     dot / (tpl_e * e).sqrt().max(1e-30)
 }
 
-static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// What a scan of receive audio for a preamble found.
 enum Preamble {
     /// Nothing that looks like a preamble.
@@ -1280,36 +1501,12 @@ fn scan_preamble(x: &[f32]) -> Preamble {
 }
 
 /// Where the preamble is, if the buffer holds all of it.
+#[cfg(test)]
 fn find_preamble(x: &[f32]) -> Option<usize> {
     match scan_preamble(x) {
         Preamble::Found(s) => Some(s),
         _ => None,
     }
-}
-
-/// The payloads of the frames inside a burst, found the way the receiver finds them.
-fn own_frames(samples: &[f32]) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while pos + PREAMBLE_LEN < samples.len() {
-        let Some(rel) = find_preamble(&samples[pos..]) else {
-            break;
-        };
-        let start = pos + rel;
-        let mut used = frame_len();
-        for &m in &MODULATIONS {
-            let len = frame_len_for(m);
-            if start + len <= samples.len() {
-                if let Some(payload) = decode_at(&samples[start..start + len], m) {
-                    out.push(payload);
-                    used = len;
-                    break;
-                }
-            }
-        }
-        pos = start + used;
-    }
-    out
 }
 
 /// Decode exactly one frame that starts at the preamble, sent with modulation `m`.
@@ -1766,6 +1963,8 @@ struct Worker {
     watch: lbt::ChannelWatch,
     /// The frames of our recent bursts, until when their playback may still come back.
     echoes: VecDeque<(Instant, Vec<Vec<u8>>)>,
+    /// When a frame of the link was last heard or sent.
+    last_link_activity: Instant,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -1782,6 +1981,14 @@ struct Worker {
     link: Link,
     /// Index into MODULATIONS for the next transmission. Moves one step at a time with the peer's reports.
     tx_level: u8,
+    /// Ladder rung (index in burst::LADDER) for the next link transmission.
+    hf_level: usize,
+    /// Rung of the last ladder burst heard, tried first by the scan.
+    hf_heard: usize,
+    /// Recent audio for the ladder-burst scan.
+    hf_buf: Vec<f32>,
+    hf_scan_at: Instant,
+    hf_hot_until: Instant,
     link_state: LinkState,
     qso: Option<OpenQso>,
     outbox: Outbox,
@@ -1789,6 +1996,8 @@ struct Worker {
     /// Public id and label per outbox entry, keyed by the outbox's own id.
     tags: HashMap<u64, (u64, String)>,
     bursts: VecDeque<Vec<f32>>,
+    /// The frames inside each queued burst, in step with `bursts`.
+    burst_frames: VecDeque<Vec<Vec<u8>>>,
     /// Link control frames (CONNECT, ACK, ...) waiting for the channel check.
     control: VecDeque<Vec<Vec<u8>>>,
     tx: Option<TxJob>,
@@ -1918,6 +2127,7 @@ impl Worker {
             tuned_hz,
             sense: Sense::new(RATE as f32),
             echoes: VecDeque::new(),
+            last_link_activity: Instant::now(),
             watch: lbt::ChannelWatch::new(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1933,12 +2143,18 @@ impl Worker {
             backend: None,
             link: Link::new(&config.callsign),
             tx_level: 0,
+            hf_level: rung(HF_LINK_START),
+            hf_heard: rung(HF_LINK_START),
+            hf_buf: Vec::new(),
+            hf_scan_at: Instant::now(),
+            hf_hot_until: Instant::now(),
             link_state: LinkState::Idle,
             qso: None,
             outbox,
             outbox_path,
             tags,
             bursts: VecDeque::new(),
+            burst_frames: VecDeque::new(),
             control: VecDeque::new(),
             tx: None,
             rx_buf: Vec::new(),
@@ -2015,7 +2231,8 @@ impl Worker {
                 let Some(samples) = self.bursts.pop_front() else {
                     continue;
                 };
-                self.remember_own_frames(&samples);
+                let frames = self.burst_frames.pop_front().unwrap_or_default();
+                self.remember_own_frames(frames, samples.len());
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2063,7 +2280,10 @@ impl Worker {
             Cmd::Queue { msgs, ids, private } => self.enqueue(msgs, ids, private),
             Cmd::Shutdown => {}
             #[cfg(test)]
-            Cmd::TestBurst(samples) => self.bursts.push_back(samples),
+            Cmd::TestBurst(samples) => {
+                self.bursts.push_back(samples);
+                self.burst_frames.push_back(Vec::new());
+            }
         }
     }
 
@@ -2218,6 +2438,7 @@ impl Worker {
     /// Logs the refusal once, not on every pass.
     fn hold_tx(&mut self, why: &'static str) {
         self.bursts.clear();
+        self.burst_frames.clear();
         self.control.clear();
         if self.tx.is_some() {
             self.abort_tx();
@@ -2550,6 +2771,7 @@ impl Worker {
     }
 
     fn start_qso(&mut self, peer: String) {
+        self.note_heard(&peer);
         let (date, time) = utc_stamp(now_unix_secs());
         self.note_contact(&peer, &date);
         self.qso = Some(OpenQso { peer, date, time });
@@ -2589,6 +2811,8 @@ impl Worker {
             self.log(format!("cannot create {}: {e}", self.data_dir.display()));
             return;
         }
+        let shared = self.shared.clone();
+        let _io = lock(&shared.contacts_io);
         let path = self.data_dir.join("contacts.txt");
         let mut list = match contacts::load(&path) {
             Ok(l) => l,
@@ -2692,6 +2916,7 @@ impl Worker {
 
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
+        self.last_link_activity = Instant::now();
         // Step the modulation one level at a time: up after a clean report, down after a poor one.
         match self.link.peer_frame_error_pct() {
             Some(f) if f < 2 && (self.tx_level as usize) + 1 < MODULATIONS.len() => self.tx_level += 1,
@@ -2699,13 +2924,34 @@ impl Worker {
             _ => {}
         }
         let m = MODULATIONS[self.tx_level as usize];
-        let built = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
+        let hf = self.shared.flags.hf_burst.load(Ordering::SeqCst);
+        let weak = self.shared.flags.weak_mode.load(Ordering::SeqCst);
+        if hf {
+            self.hf_hot_until = Instant::now() + HF_HOT_FOR;
+            // Same rule as above, over the ladder. A report of 30 percent or more drops two rungs.
+            let floor = rung(HF_LINK_FLOOR);
+            match self.link.peer_frame_error_pct() {
+                Some(f) if f < 2 && self.hf_level + 1 < burst::LADDER.len() => self.hf_level += 1,
+                Some(f) if f >= 30 && self.hf_level >= floor + 2 => self.hf_level -= 2,
+                Some(f) if f >= 8 && self.hf_level > floor => self.hf_level -= 1,
+                _ => {}
+            }
+            self.hf_level = self.hf_level.max(floor);
+        }
+        let built = if hf && weak {
+            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG)))
+        } else if hf {
+            Ok(hf_bursts(frames, self.hf_level))
+        } else if weak {
             weak_burst(frames)
         } else {
             burst(frames, m)
         };
         match built {
-            Ok(samples) => self.bursts.push_back(samples),
+            Ok(samples) => {
+                self.bursts.push_back(samples);
+                self.burst_frames.push_back(frames.to_vec());
+            }
             Err(e) => self.log(format!("cannot build transmission: {e}")),
         }
     }
@@ -2801,6 +3047,7 @@ impl Worker {
     /// After a burst, the receive side starts clean: our own signal is not decoded.
     fn end_rx_gap(&mut self) {
         self.rx_buf.clear();
+        self.hf_buf.clear();
         self.since_scan = 0;
         self.spec = Analyser::new(SPEC_FFT, RATE as f32);
     }
@@ -2822,6 +3069,9 @@ impl Worker {
         }
         self.rx_error = None;
         if fresh.is_empty() {
+            // No new audio, but a scan may be due for what is already held (a burst that
+            // ended the stream, as in tests; a live device never goes quiet like this).
+            self.scan_hf();
             return 0;
         }
         let n = fresh.len();
@@ -2830,7 +3080,17 @@ impl Worker {
         // radio, or a virtual cable such as BlackHole). The channel watch does not take it for
         // someone else's carrier, and `on_frame` does not take it for a frame from the peer.
         self.watch.push(&fresh, now);
+        // Someone's burst has just ended: look at once for what it carried, instead of at the
+        // next scheduled scan, which can be seconds away and later than the sender's retry.
+        if self.watch.take_burst_ended() {
+            self.hf_scan_at = now;
+        }
         self.rx_buf.extend_from_slice(&fresh);
+        self.hf_buf.extend_from_slice(&fresh);
+        if self.hf_buf.len() > HF_WINDOW {
+            let cut = self.hf_buf.len() - HF_WINDOW;
+            self.hf_buf.drain(..cut);
+        }
 
         self.sense.push(&fresh);
         self.spec.push(&fresh);
@@ -2849,7 +3109,42 @@ impl Worker {
             self.since_scan = 0;
             self.decode_frames();
         }
+        self.scan_hf();
         n
+    }
+
+    /// Looks for a ladder burst in the recent audio, at most once per scan period, and not while
+    /// transmitting (the receive side is not listening then and the scan costs about 0.2 s).
+    fn scan_hf(&mut self) {
+        if !self.shared.flags.hf_burst.load(Ordering::SeqCst) || self.airing() {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.hf_scan_at || self.hf_buf.len() < burst::MIN_SCAN_SAMPLES {
+            return;
+        }
+        let period = if now < self.hf_hot_until {
+            HF_SCAN_HOT
+        } else {
+            HF_SCAN_IDLE
+        };
+        self.hf_scan_at = now + period;
+        let r = burst::scan(&self.hf_buf, self.hf_heard);
+        match r {
+            burst::Scan::Nothing => {}
+            burst::Scan::Pending { from } => {
+                self.hf_buf.drain(..from);
+            }
+            burst::Scan::Heard(h) => {
+                self.hf_buf.drain(..h.end.min(self.hf_buf.len()));
+                self.hf_heard = h.mode;
+                self.hf_hot_until = now + HF_HOT_FOR;
+                self.hf_scan_at = now;
+                for payload in h.frames {
+                    self.on_frame(payload);
+                }
+            }
+        }
     }
 
     fn report_rx(&mut self, err: String) {
@@ -2883,9 +3178,6 @@ impl Worker {
                 self.rx_buf.drain(..start);
                 return;
             }
-            if std::env::var("KAHF_RX_TRACE").is_ok() {
-                eprintln!("RX {}: preamble at {start} of {} buffered", self.callsign, self.rx_buf.len());
-            }
             let mut found = None;
             for &m in &MODULATIONS {
                 let len = frame_len_for(m);
@@ -2893,12 +3185,6 @@ impl Worker {
                     found = Some((payload, len));
                     break;
                 }
-            }
-            if found.is_none() && std::env::var("KAHF_RX_DUMP").is_ok() {
-                let n = DUMPS.fetch_add(1, Ordering::SeqCst);
-                let w = &self.rx_buf[start..(start + 4000).min(self.rx_buf.len())];
-                let bytes: Vec<u8> = w.iter().flat_map(|s| s.to_le_bytes()).collect();
-                let _ = std::fs::write(format!("/tmp/kahf-fail-{}-{n}.f32", self.callsign), bytes);
             }
             if found.is_none() {
                 // What looked like a preamble may be noise or the cut end of a burst. A real frame
@@ -2942,9 +3228,6 @@ impl Worker {
                     continue;
                 }
             }
-            if std::env::var("KAHF_RX_TRACE").is_ok() {
-                eprintln!("RX {}: decoded={} own_echo={:?}", self.callsign, found.is_some(), found.as_ref().map(|(p, _)| self.echoes.iter().any(|(_, f)| f.iter().any(|x| x == p))));
-            }
             let (decoded, used) = match found {
                 Some((payload, len)) => (Some(payload), len),
                 None => (None, frame_len()),
@@ -2958,13 +3241,12 @@ impl Worker {
 
     /// Notes the frames inside a burst we are about to send. If our sound path plays our own
     /// signal back, these are the frames that come back and must be ignored.
-    fn remember_own_frames(&mut self, samples: &[f32]) {
-        let frames = own_frames(samples);
+    fn remember_own_frames(&mut self, frames: Vec<Vec<u8>>, burst_samples: usize) {
         if frames.is_empty() {
             return;
         }
         let until =
-            Instant::now() + Duration::from_secs_f64(samples.len() as f64 / RATE as f64) + ECHO_WINDOW;
+            Instant::now() + Duration::from_secs_f64(burst_samples as f64 / RATE as f64) + ECHO_WINDOW;
         self.echoes.push_back((until, frames));
         while self.echoes.len() > 16 {
             self.echoes.pop_front();
@@ -2984,6 +3266,7 @@ impl Worker {
         if self.is_own_echo(&payload) {
             return;
         }
+        self.last_link_activity = Instant::now();
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
@@ -3150,6 +3433,19 @@ impl Worker {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
                     }
+                } else if !ours
+                    && self.last_link_activity.elapsed() > LINK_IDLE_DROP
+                    && !self.dial_targets().is_empty()
+                {
+                    // A call that has gone quiet (its hang-up may have been lost on air) must
+                    // not keep a relay from calling the station a held message is for.
+                    self.log(format!(
+                        "The link to {peer} has been quiet for {} s; closing it.",
+                        LINK_IDLE_DROP.as_secs()
+                    ));
+                    if let Err(e) = self.disconnect() {
+                        self.log(e);
+                    }
                 }
             }
             LinkState::Idle => {
@@ -3175,9 +3471,63 @@ impl Worker {
         }
     }
 
+    /// Notes that `call` was heard, on the link or as the sender of a message.
+    fn note_heard(&mut self, call: &str) {
+        if !valid_call(call) || call.eq_ignore_ascii_case(&self.callsign) {
+            return;
+        }
+        let obs = Observation {
+            snr_db: 0.0,
+            channel_khz: self.freq_mhz.map_or(0.0, |f| (f * 1000.0) as f32),
+            via: None,
+        };
+        let mut h = lock(&self.shared.heard);
+        h.hear(call, now_unix_secs().max(0) as u64, obs, 0);
+        save_heard(&self.data_dir, &h);
+    }
+
+    /// A chat arrived. Group control lines are handled here; a group message shows as
+    /// `#GROUP text` from the sender, and only when this station has joined that group.
+    fn on_chat(&mut self, from: String, text: String) {
+        let Some(ctl) = Control::decode(&text) else {
+            if text.starts_with(kahf_core::msg::groups::CTL_PREFIX) {
+                return; // a malformed control line is not text for the operator
+            }
+            self.emit(Event::Message { from, text });
+            return;
+        };
+        let (reply, shown) = {
+            let mut g = lock(&self.shared.groups);
+            match &ctl {
+                Control::Say { group, text } => (None, g.is_joined(group).then(|| format!("{group} {text}"))),
+                _ => (g.apply(&ctl, &from), None),
+            }
+        };
+        let _ = fs::write(
+            self.data_dir.join("groups.txt"),
+            lock(&self.shared.groups).to_text(),
+        );
+        if let Some(t) = shown {
+            self.emit(Event::Message {
+                from: from.clone(),
+                text: t,
+            });
+        }
+        if let Some(r) = reply {
+            let m = Message::Chat {
+                from: self.callsign.clone(),
+                to: from,
+                text: r.encode(),
+            };
+            let id = self.ids.fetch_add(1, Ordering::Relaxed);
+            self.enqueue(vec![m], vec![id], false);
+        }
+    }
+
     fn on_message(&mut self, msg: Message) {
+        self.note_heard(sender_of(&msg).to_string().as_str());
         match msg {
-            Message::Chat { from, text, .. } => self.emit(Event::Message { from, text }),
+            Message::Chat { from, text, .. } => self.on_chat(from, text),
             Message::Mail {
                 from,
                 to,
@@ -3275,11 +3625,51 @@ mod tests {
     struct FakeRadio {
         rx: Pipe,
         tx: Pipe,
+        clock: SoundClock,
+    }
+
+    /// What a sound card does between signals: the input never stops, it delivers silence. A
+    /// read gets whatever is in the pipe and, if less than the time since the start would have
+    /// delivered, silence for the rest.
+    struct SoundClock {
+        start: Instant,
+        delivered: usize,
+        last_data: Instant,
+    }
+
+    impl SoundClock {
+        fn new() -> Self {
+            Self {
+                start: Instant::now(),
+                delivered: 0,
+                last_data: Instant::now(),
+            }
+        }
+
+        /// Silence is added only once the pipe has been empty for a moment, never in the
+        /// middle of a signal that arrives in small steps.
+        fn read(&mut self, pipe: &Pipe, out: &mut Vec<f32>) {
+            let before = out.len();
+            out.extend(pipe.lock().unwrap().drain(..));
+            let taken = out.len() - before;
+            self.delivered += taken;
+            if taken > 0 {
+                self.last_data = Instant::now();
+                return;
+            }
+            if self.last_data.elapsed() < Duration::from_millis(60) {
+                return;
+            }
+            let due = (self.start.elapsed().as_secs_f64() * RATE as f64) as usize;
+            let deficit = due.saturating_sub(self.delivered);
+            out.extend(std::iter::repeat_n(0.0f32, deficit));
+            self.delivered += deficit;
+        }
     }
 
     impl Backend for FakeRadio {
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            out.extend(self.rx.lock().unwrap().drain(..));
+            self.clock.read(&self.rx, out);
             Ok(())
         }
 
@@ -3400,6 +3790,7 @@ mod tests {
             Ok(Box::new(FakeRadio {
                 rx: rx.clone(),
                 tx: tx.clone(),
+                clock: SoundClock::new(),
             }) as Box<dyn Backend>)
         })
     }
@@ -3407,15 +3798,7 @@ mod tests {
     fn wait_for(engine: &mut Engine, want: impl Fn(&Event) -> bool, secs: u64) -> Option<Event> {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
-            let events = engine.poll_events();
-            if std::env::var("KAHF_TEST_TRACE").is_ok() {
-                for e in &events {
-                    if !matches!(e, Event::Spectrum(_)) {
-                        eprintln!("{} {:?}", engine.config.callsign, e);
-                    }
-                }
-            }
-            if let Some(ev) = events.into_iter().find(|e| want(e)) {
+            if let Some(ev) = engine.poll_events().into_iter().find(|e| want(e)) {
                 return Some(ev);
             }
             thread::sleep(Duration::from_millis(20));
@@ -3641,6 +4024,26 @@ mod tests {
             .filter(|t| t.duration_since(first) < Duration::from_secs(1))
             .count();
         assert!(in_one_second >= 20, "only {in_one_second} frames in one second");
+    }
+
+    #[test]
+    fn ladder_burst_frames_survive_air_and_scan() {
+        let frames: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8 + 1; 20 + i]).collect();
+        for name in ["R4", "Q12", "S12", "T34"] {
+            let level = rung(name);
+            let mut air = vec![0f32; 3000];
+            air.extend(hf_bursts(&frames, level));
+            air.extend(vec![0f32; 3000]);
+            match burst::scan(&air, rung(HF_LINK_START)) {
+                burst::Scan::Heard(h) => {
+                    assert_eq!(h.mode, level, "{name} heard as {}", burst::LADDER[h.mode].name);
+                    // Groups beyond the first burst follow; the first group is what one scan returns.
+                    let n = burst::long_codewords(&burst::LADDER[level]).min(frames.len());
+                    assert_eq!(h.frames, frames[..n].to_vec(), "{name}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -3938,6 +4341,10 @@ mod tests {
         // A sound device that is always running: every 10 ms each station reads 80 samples of
         // whatever is on the bus (silence and a noise floor when nobody transmits), at the
         // speed of real playback. Both stations hear both, and themselves.
+        // A virtual cable such as BlackHole delays everything by a few tenths of a second.
+        for o in &wires[0].1 {
+            o.lock().unwrap().extend(std::iter::repeat_n(0.0f32, 3200));
+        }
         thread::spawn(move || {
             let mut seed = 7u64;
             let mut due = 0.0f64;
@@ -4011,7 +4418,10 @@ mod tests {
 
     /// The same, end to end: two stations on a shared bus with a quiet signal and a noise floor
     /// (what a real sound path such as BlackHole delivers) still connect.
+    // Real time and sensitive to the CPU: run with `cargo test -p kahf-daemon -- --ignored`, as
+    // the soak test does. The same engine is checked on real devices by `examples/soak.rs`.
     #[test]
+    #[ignore]
     fn two_stations_connect_over_a_quiet_noisy_bus() {
         let _rt = realtime();
         let (mut a, mut b) = shared_bus_noisy(["ZZ1ALPHA", "ZZ2BRAVO"], "noisy", 0.0063, 0.0002);
@@ -4023,13 +4433,6 @@ mod tests {
             |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
             60,
         );
-        if linked.is_none() && std::env::var("KAHF_TEST_TRACE").is_ok() {
-            for e in b.poll_events() {
-                if !matches!(e, Event::Spectrum(_)) {
-                    eprintln!("B-SIDE {e:?}");
-                }
-            }
-        }
         assert!(linked.is_some(), "no link over a quiet bus with a noise floor");
         a.send_message("ZZ2BRAVO", "through the noise").unwrap();
         assert!(wait_for(
@@ -4041,42 +4444,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn probe_noise_decode() {
-        let air = burst(&[vec![0x42; 36]], MODULATION).unwrap();
-        let rms = (air.iter().map(|v| v * v).sum::<f32>() / air.len() as f32).sqrt();
-        let sig = (air.iter().map(|v| v * v).sum::<f32>() / 2880.0).sqrt();
-        println!("rms {rms} burst-rms {sig}");
-        for snr_db in [40.0f32, 30.0, 24.0, 20.0, 15.0, 10.0] {
-            let amp = sig / 10f32.powf(snr_db / 20.0) * 3f32.sqrt();
-            let mut ok = 0;
-            let mut found_ok = 0;
-            for seed in 1..=100u64 {
-                let mut x = air.clone();
-                for (s, n) in x.iter_mut().zip(noise(air.len(), amp, seed * 7919)) {
-                    *s += n;
-                }
-                if let Some(start) = find_preamble(&x) {
-                    if start == LEAD_SILENCE {
-                        found_ok += 1;
-                    }
-                    let len = frame_len_for(MODULATION);
-                    if start + len <= x.len() && decode_at(&x[start..start + len], MODULATION).is_some() {
-                        ok += 1;
-                    }
-                }
-            }
-            println!("SNR {snr_db} dB: start right {found_ok}/100, decoded {ok}/100");
-        }
+    fn an_operator_who_sends_is_attending_whichever_side_started_the_link() {
+        let _rt = realtime();
+        let (mut e, _) = lone_station("operator-send");
+        assert!(!e.shared.flags.operator_link.load(Ordering::SeqCst));
+        e.send_message("BB1BBB", "hello").unwrap();
+        assert!(
+            e.shared.flags.operator_link.load(Ordering::SeqCst),
+            "a send did not count as the operator being present"
+        );
     }
 
     #[test]
     fn our_own_frames_played_back_are_recognised_and_other_frames_are_not() {
         let mut w = bare_worker("own-echo", "AA1AAA");
         let mine = vec![0x10, 3, b'h', b'i'];
-        let air = burst(&[mine.clone()], MODULATION).unwrap();
-        assert_eq!(own_frames(&air), vec![mine.clone()]);
-        w.remember_own_frames(&air);
+        w.remember_own_frames(vec![mine.clone()], 5280);
         assert!(w.is_own_echo(&mine));
         assert!(!w.is_own_echo(&[0x10, 3, b'h', b'o']));
         // Once the playback window has passed, the same bytes are the peer's.
@@ -4084,7 +4467,10 @@ mod tests {
         assert!(!w.is_own_echo(&mine));
     }
 
+    // Real time and sensitive to the CPU: run with `cargo test -p kahf-daemon -- --ignored`, as
+    // the soak test does. The same engine is checked on real devices by `examples/soak.rs`.
     #[test]
+    #[ignore]
     fn two_stations_on_one_shared_audio_bus_connect_and_talk() {
         let _rt = realtime();
         let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], "bus");
@@ -4112,6 +4498,145 @@ mod tests {
             60,
         );
         assert!(back.is_some(), "the called station could not reply over the link");
+    }
+
+    #[test]
+    fn beacon_fills_contact_grid_and_heard_list_persists() {
+        let dir = temp_dir("beacon");
+        let (e, _) = {
+            let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+            let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+            (
+                Engine::spawn(config("AA1AAA", dir.clone()), fake_factory(a.clone(), b.clone())).unwrap(),
+                a,
+            )
+        };
+        // Hand-typed QTH stays; an empty one is filled; a new station is added.
+        let path = dir.join("contacts.txt");
+        fs::create_dir_all(&dir).unwrap();
+        let mut list = Vec::new();
+        contacts::upsert(
+            &mut list,
+            Contact {
+                call: "CC3CCC".into(),
+                name: String::new(),
+                qth: "Home".into(),
+                notes: String::new(),
+                last_heard: None,
+            },
+        );
+        contacts::save(&path, &list).unwrap();
+
+        let gps = kahf_core::msg::grid::beacon_payload("BB1BBB", Some((51.5, -0.12)), None).unwrap();
+        assert_eq!(e.note_beacon(&gps), Some(("BB1BBB".into(), "IO91WM".into())));
+        let manual = kahf_core::msg::grid::beacon_payload("CC3CCC", None, Some("JN58")).unwrap();
+        assert_eq!(e.note_beacon(&manual), Some(("CC3CCC".into(), "JN58".into())));
+        assert_eq!(e.note_beacon(b"junk"), None);
+        let own = kahf_core::msg::grid::beacon_payload("AA1AAA", None, Some("IO91")).unwrap();
+        assert_eq!(e.note_beacon(&own), None);
+
+        let list = contacts::load(&path).unwrap();
+        assert_eq!(list.iter().find(|c| c.call == "BB1BBB").unwrap().qth, "IO91WM");
+        assert_eq!(list.iter().find(|c| c.call == "CC3CCC").unwrap().qth, "Home");
+        let heard = e.heard_stations(10);
+        assert_eq!(heard.len(), 2);
+        assert!(heard.iter().all(|h| h.position.is_some()));
+        drop(e);
+        // A new engine on the same folder still knows them.
+        let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let e2 = Engine::spawn(config("AA1AAA", dir), fake_factory(a, b)).unwrap();
+        assert_eq!(e2.heard_stations(10).len(), 2);
+    }
+
+    #[test]
+    fn loopback_records_heard_station() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir("heard-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("heard-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        assert!(a.heard_stations(5).iter().any(|h| h.call == "BB1BBB"));
+    }
+
+    #[test]
+    fn group_chat_between_two_engines() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let (da, db) = (temp_dir("grp-a"), temp_dir("grp-b"));
+        let mut a = Engine::spawn(
+            config("AA1AAA", da.clone()),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b =
+            Engine::spawn(config("BB1BBB", db), fake_factory(a_to_b.clone(), b_to_a.clone())).unwrap();
+        assert!(a.send_group("net", "x").is_err(), "not joined");
+        assert!(a.join_group("bad name", &[]).is_err());
+        assert_eq!(b.join_group("net", &[]).unwrap(), "#NET");
+        assert_eq!(
+            a.join_group("net", &["BB1BBB", "AA1AAA", "bad call"]).unwrap(),
+            "#NET"
+        );
+        assert!(a.send_group("net", "x").is_err(), "nobody else known yet");
+        b.listen().unwrap();
+        // B's operator is at the radio (queued replies only go out when someone is attending).
+        b.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        // B learns about A from the join line and answers with its roster; wait for A to know B.
+        for _ in 0..60 {
+            if a.groups().iter().any(|(_, m)| m.iter().any(|c| c == "BB1BBB")) {
+                break;
+            }
+            let _ = a.poll_events();
+            let _ = b.poll_events();
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert_eq!(
+            a.groups(),
+            vec![(
+                "#NET".to_string(),
+                vec!["AA1AAA".to_string(), "BB1BBB".to_string()]
+            )]
+        );
+        assert_eq!(a.send_group("net", "hello net").unwrap(), 1);
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "#NET hello net"),
+            60,
+        );
+        assert!(got.is_some(), "group message did not arrive");
+        // Control lines never show up as chat, and membership is saved.
+        assert!(!b
+            .poll_events()
+            .iter()
+            .any(|e| matches!(e, Event::Message { text, .. } if text.contains("KAHFGRP1"))));
+        assert!(fs::read_to_string(da.join("groups.txt"))
+            .unwrap()
+            .contains("#NET\t1\t"));
+        a.leave_group("net").unwrap();
+        assert!(a.groups().is_empty());
     }
 
     /// One station with a fake radio whose transmit output is `a_to_b`.
@@ -4302,6 +4827,9 @@ mod tests {
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
             relay_paths: Mutex::new(Vec::new()),
+            heard: Mutex::new(HeardList::default()),
+            contacts_io: Mutex::new(()),
+            groups: Mutex::new(GroupBook::new(callsign)),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, dir);
@@ -4809,11 +5337,12 @@ mod tests {
     struct AirRadio {
         rx: Pipe,
         tx: Vec<Pipe>,
+        clock: SoundClock,
     }
 
     impl Backend for AirRadio {
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            out.extend(self.rx.lock().unwrap().drain(..));
+            self.clock.read(&self.rx, out);
             Ok(())
         }
 
@@ -4839,6 +5368,7 @@ mod tests {
             Ok(Box::new(AirRadio {
                 rx: rx.clone(),
                 tx: tx.clone(),
+                clock: SoundClock::new(),
             }) as Box<dyn Backend>)
         })
     }
