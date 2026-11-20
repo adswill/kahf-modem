@@ -11,7 +11,7 @@
 use crate::ldpc::K;
 
 /// Maximum data bytes carried by one frame.
-const MAX_DATA: usize = 36;
+pub const MAX_DATA: usize = 36;
 /// Width of the length field in bits.
 const LEN_BITS: usize = 8;
 /// Bit offset of the modulation id, after the fixed-size zero-padded data field.
