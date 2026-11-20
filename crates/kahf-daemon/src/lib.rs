@@ -253,7 +253,8 @@ fn tx_refusal(f: &Flags) -> Option<&'static str> {
 
 /// Plan 6.2: route a message through the server gateway. Stub until the server exists.
 fn relay_via_gateway(_dest: &str) -> Result<(), String> {
-    // TODO: send to the kahf.dev gateway (plan 5 and 6.2) and return Ok once it accepts.
+    // Parked: radio relay comes first (owner's decision, 2026-11-20). When the kahf.dev
+    // gateway exists (plan 5 and 6.2), send there and return Ok once it accepts.
     Err("the internet gateway is not available yet".into())
 }
 

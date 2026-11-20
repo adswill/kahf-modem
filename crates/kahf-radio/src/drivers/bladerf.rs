@@ -251,10 +251,9 @@ pub(crate) fn clamp_gain_db(db: f32, lo: f32, hi: f32) -> i32 {
 }
 
 /// Turns raw Q11 pairs (I, Q) into floats in -1..1.
-#[allow(clippy::chunks_exact_to_as_chunks)]
 pub(crate) fn convert_samples(raw: &[i16], out: &mut [(f32, f32)]) {
-    for (dst, pair) in out.iter_mut().zip(raw.chunks_exact(2)) {
-        *dst = (pair[0] as f32 / FULL_SCALE, pair[1] as f32 / FULL_SCALE);
+    for (dst, [i, q]) in out.iter_mut().zip(raw.as_chunks::<2>().0) {
+        *dst = (*i as f32 / FULL_SCALE, *q as f32 / FULL_SCALE);
     }
 }
 
