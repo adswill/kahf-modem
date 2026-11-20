@@ -121,6 +121,29 @@ pub fn touch(list: &mut [Contact], call: &str, date: &str) {
     }
 }
 
+/// Fills the QTH of a contact from a heard grid locator, only when the QTH is empty, so a
+/// locator or place typed by hand is never overwritten. Adds the contact if it is new.
+/// Returns true if the list changed.
+pub fn fill_grid(list: &mut Vec<Contact>, call: &str, grid: &str) -> bool {
+    match list.iter_mut().find(|e| e.call.eq_ignore_ascii_case(call)) {
+        Some(c) if c.qth.trim().is_empty() => {
+            c.qth = grid.to_string();
+            true
+        }
+        Some(_) => false,
+        None => {
+            list.push(Contact {
+                call: call.to_string(),
+                name: String::new(),
+                qth: grid.to_string(),
+                notes: String::new(),
+                last_heard: None,
+            });
+            true
+        }
+    }
+}
+
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -160,6 +183,17 @@ fn unescape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fill_grid_never_overwrites_hand_entry() {
+        let mut list = Vec::new();
+        assert!(fill_grid(&mut list, "G4ABC", "IO91WM"));
+        assert_eq!(list[0].qth, "IO91WM");
+        assert!(!fill_grid(&mut list, "g4abc", "JN58"), "already set");
+        list[0].qth = "  ".into();
+        assert!(fill_grid(&mut list, "G4ABC", "JN58"), "blank counts as empty");
+        assert_eq!(list.len(), 1);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -43,15 +43,22 @@ pub fn set_centre_hz(hz: f64) {
 /// The two bands of the selector, each centred on its KAHF segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
-    M20,
     M40,
+    M20,
+    /// The relay network's band; relay mode always runs here.
+    M17,
 }
 
 impl Band {
-    pub const ALL: [Band; 2] = [Band::M20, Band::M40];
+    /// In band plan order, so the list matches the planned segments.
+    pub const ALL: [Band; 3] = [Band::M40, Band::M20, Band::M17];
     fn segment(self) -> &'static kahf_core::bandplan::Segment {
-        let i = if self == Band::M40 { 0 } else { 1 };
-        &kahf_core::bandplan::KAHF_SEGMENTS[i]
+        use kahf_core::bandplan::{KAHF_SEGMENTS, RELAY_SEGMENT};
+        match self {
+            Band::M40 => &KAHF_SEGMENTS[0],
+            Band::M20 => &KAHF_SEGMENTS[1],
+            Band::M17 => &RELAY_SEGMENT,
+        }
     }
     pub fn centre_hz(self) -> f64 {
         let s = self.segment();

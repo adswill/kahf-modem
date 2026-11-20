@@ -27,6 +27,10 @@ export interface Env {
   CALLSIGNS: DurableObjectNamespace;
   /** One object per one-degree area: live relays and slot bookings (src/objects.js AreaObject). */
   AREAS: DurableObjectNamespace;
+  /** One object per callsign: backbone queue, claims, receipts (src/objects.js MailObject). */
+  MAILBOXES: DurableObjectNamespace;
+  /** One object for the backbone index (src/objects.js IndexObject). */
+  BACKBONE: DurableObjectNamespace;
 }
 
 /**

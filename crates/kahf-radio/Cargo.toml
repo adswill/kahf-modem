@@ -2,6 +2,7 @@
 name = "kahf-radio"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 libloading = "0.8"

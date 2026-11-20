@@ -286,7 +286,7 @@ ${body}
 <footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
 <div class="cols">
-<div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Copyright (c) 2026 adswill.</p></div>
+<div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Free software under the GNU GPL v3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill).</p></div>
 <div><p class="label">Site</p><ul><li><a href="/">Home</a></li><li><a href="/network">Relay network</a></li><li><a href="/map">Live map</a></li></ul></div>
 <div><p class="label">Project</p><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
 </div>

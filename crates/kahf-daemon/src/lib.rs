@@ -715,9 +715,17 @@ fn validate(c: &Config) -> Result<(), String> {
         }
     }
     if let Some(addr) = &c.rigctld {
-        match addr.rsplit_once(':') {
-            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
-            _ => return Err(format!("bad rigctld address {addr:?} (want host:port)")),
+        // Either a rig spec ("ic7300:/dev/ttyUSB0:115200:cat", "flrig") or a rigctld host:port.
+        if kahf_rig::parse_spec(addr).is_err() {
+            match addr.rsplit_once(':') {
+                Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
+                _ => {
+                    return Err(format!(
+                        "bad rig setting {addr:?} (want host:port for rigctld, or model:device[:baud][:ptt]; models: {})",
+                        kahf_rig::known_models()
+                    ))
+                }
+            }
         }
     }
     if let Some(s) = &c.sdr {
@@ -776,6 +784,7 @@ fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
     let input = AudioIn::open(cfg.audio_in.as_deref())?;
     let output = AudioOut::open(cfg.audio_out.as_deref())?;
     let rig: Option<Box<dyn RigControl>> = match &cfg.rigctld {
+        Some(text) if kahf_rig::parse_spec(text).is_ok() => Some(kahf_rig::open(text)?),
         Some(addr) => Some(Box::new(RigctldClient::connect(addr)?)),
         None => None,
     };
@@ -793,7 +802,7 @@ fn set_ptt(rig: &mut Option<Box<dyn RigControl>>, on: bool) -> Result<(), String
     }
 }
 
-/// Sound card in and out, with optional rigctld PTT. No PTT unless rigctld is set (VOX).
+/// Sound card in and out, with optional rig PTT (rigctld, flrig or direct CAT; see kahf-rig). No PTT unless rigctld is set (VOX).
 struct AudioBackend {
     input: Option<AudioIn>,
     output: Option<AudioOut>,
@@ -3041,6 +3050,21 @@ mod tests {
             data_dir: dir,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn rig_setting_takes_a_spec_or_a_rigctld_address() {
+        let ok = |r: &str| {
+            let mut c = config("N0CALL", PathBuf::from("/tmp/x"));
+            c.rigctld = Some(r.into());
+            validate(&c)
+        };
+        assert!(ok("127.0.0.1:4532").is_ok());
+        assert!(ok("ic7300:/dev/ttyUSB0:115200:cat").is_ok());
+        assert!(ok("ft991a:COM3:rts").is_ok());
+        assert!(ok("flrig").is_ok());
+        assert!(ok("ic7300").is_err());
+        assert!(ok("not a rig").is_err());
     }
 
     /// In-memory radio: transmits into `tx`, receives from `rx`.

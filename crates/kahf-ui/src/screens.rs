@@ -1008,6 +1008,36 @@ impl App {
             stat(s::RELAY_OUTBOX, lv.outbox.len() as u64),
         ]
         .spacing(40);
+        let server: El<'_> = match (&lv.server, self.server_note) {
+            (Some(st), _) => {
+                let mut c = column![
+                    key_value(
+                        s::SERVER_STATUS,
+                        if st.registered {
+                            s::SERVER_REGISTERED
+                        } else {
+                            s::SERVER_NOT_REGISTERED
+                        }
+                    ),
+                    key_value(
+                        s::SERVER_SCHEDULE,
+                        match st.last_schedule_unix {
+                            Some(at) => format!("{} slots, received at {}", st.slots, live::utc_hm(at)),
+                            None => s::SERVER_NO_SCHEDULE.to_string(),
+                        }
+                    ),
+                    key_value(s::SERVER_NEXT, live::utc_hm(st.next_attempt_unix)),
+                ]
+                .spacing(5);
+                if let Some(e) = &st.last_error {
+                    c = c.push(key_value(s::SERVER_ERROR, e.clone()));
+                }
+                // Label and value columns stay close together on a wide screen.
+                container(c).max_width(520).into()
+            }
+            (None, Some(note)) => muted(note).into(),
+            (None, None) => muted(s::SERVER_NOT_REGISTERED).into(),
+        };
         page(
             s::RELAY_TITLE,
             None,
@@ -1015,6 +1045,7 @@ impl App {
             scroll(
                 column![
                     section_box(s::RELAY_STATS, stats),
+                    section_box(s::RELAY_SERVER, server),
                     section_box(s::RELAY_SCHEDULE, sched),
                     section_box(s::RELAY_OUTBOX, outbox),
                     section_box(s::RELAY_HOPS, hops),
@@ -1158,6 +1189,19 @@ impl App {
                 s::SET_CALLSIGN_DESC,
                 text_input("", &self.callsign)
                     .on_input(Message::Callsign)
+                    .padding(8)
+                    .style(theme::input)
+                    .width(220),
+            ),
+            setting(
+                s::SET_LOCATOR,
+                if self.locator.is_empty() || live::locator_position(&self.locator).is_some() {
+                    s::SET_LOCATOR_DESC
+                } else {
+                    s::SET_LOCATOR_BAD
+                },
+                text_input("KP20", &self.locator)
+                    .on_input(Message::Locator)
                     .padding(8)
                     .style(theme::input)
                     .width(220),
