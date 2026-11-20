@@ -131,6 +131,14 @@ fn report(what: &str, r: Result<Stats, kahf_winlink::b2f::Error>) -> bool {
     }
 }
 
+/// The wait before the next sync: the interval, doubled after each failure, at most one hour
+/// (and never less than the interval).
+fn backoff(every: Duration, failures: u32) -> Duration {
+    (every * 2u32.pow(failures))
+        .min(Duration::from_secs(3600))
+        .max(every)
+}
+
 fn run(raw: Vec<String>) -> Result<bool, String> {
     let cmd = raw.first().cloned().ok_or("no command")?;
     let a = Args::parse(raw[1..].to_vec())?;
@@ -151,13 +159,24 @@ fn run(raw: Vec<String>) -> Result<bool, String> {
                 a.get("interval")
                     .map_or(Ok(300), |s| s.parse().map_err(|_| "bad --interval"))?,
             );
+            let mut failures = 0u32;
             loop {
                 let mut spool = Spool::open(&root, &srv, Policy::All).map_err(io)?;
-                let ok = report("CMS sync", net::sync_cms(&addr, &cfg, &mut spool));
+                let result = net::sync_cms(&addr, &cfg, &mut spool);
+                // A refused login is not retried: repeating it only risks locking the account.
+                if let Err(kahf_winlink::b2f::Error::Remote(why)) = &result {
+                    if why.to_ascii_lowercase().contains("secure login failed") {
+                        return Err(format!(
+                            "the CMS refused the login ({why}); check the Winlink password"
+                        ));
+                    }
+                }
+                let ok = report("CMS sync", result);
                 if cmd == "cms" || a.has("once") {
                     return Ok(ok);
                 }
-                std::thread::sleep(every);
+                failures = if ok { 0 } else { (failures + 1).min(6) };
+                std::thread::sleep(backoff(every, failures));
             }
         }
         "listen" => {
@@ -259,5 +278,20 @@ fn main() {
             eprintln!("error: {e}\n{USAGE}");
             process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        let e = Duration::from_secs(300);
+        assert_eq!(backoff(e, 0), e);
+        assert_eq!(backoff(e, 1), Duration::from_secs(600));
+        assert_eq!(backoff(e, 6), Duration::from_secs(3600));
+        // An interval longer than the cap is kept as it is.
+        assert_eq!(backoff(Duration::from_secs(7200), 3), Duration::from_secs(7200));
     }
 }
