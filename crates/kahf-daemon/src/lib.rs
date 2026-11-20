@@ -25,8 +25,11 @@ use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
+use kahf_core::msg::beacon::{Due, Scheduler as BeaconScheduler, Settings as BeaconSettings};
 use kahf_core::msg::groups::{Control, GroupBook};
 use kahf_core::msg::heard::{Heard, HeardList, Observation, DEFAULT_CAP as HEARD_CAP};
+use kahf_core::msg::messenger::Messenger;
+use kahf_core::msg::receipts::{self, Status as DeliveryStatus, Tracker};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::{self, Modulation};
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -225,6 +228,21 @@ struct Shared {
     contacts_io: Mutex<()>,
     /// Group chat membership, saved as `groups.txt`.
     groups: Mutex<GroupBook>,
+    /// Location beacon settings (off by default), set by `set_beacon`.
+    beacon: Mutex<BeaconCfg>,
+    /// Delivery tracking of messages this station sent, keyed by wire id (see `Messenger::wire_id`).
+    delivery: Mutex<Tracker>,
+    /// Public message id (the id `send_*` and events use) to wire id.
+    wire_ids: Mutex<HashMap<u64, u64>>,
+}
+
+/// What this station beacons. Beacons are unattended transmissions: they go out only after the
+/// operator turned them on, never in listen-only mode, and only when the HF burst mode is on.
+#[derive(Clone, Debug, Default)]
+struct BeaconCfg {
+    enabled: bool,
+    position: Option<(f64, f64)>,
+    grid: Option<String>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -312,6 +330,45 @@ impl EventQueue {
         }
         self.items.push_back(ev);
     }
+}
+
+/// Learns a station's position and grid from a location beacon payload: records it in the heard
+/// list and fills the contact's QTH when empty. Returns (callsign, grid).
+fn learn_beacon(
+    shared: &Shared,
+    data_dir: &Path,
+    own_call: &str,
+    payload: &[u8],
+) -> Option<(String, String)> {
+    let (call, grid, pos) = kahf_core::msg::grid::learn(payload)?;
+    if call.eq_ignore_ascii_case(own_call) || !valid_call(&call) {
+        return None;
+    }
+    {
+        let mut h = lock(&shared.heard);
+        if h.get(&call).is_none() {
+            let obs = Observation {
+                snr_db: 0.0,
+                channel_khz: 0.0,
+                via: None,
+            };
+            h.hear(&call, now_unix_secs().max(0) as u64, obs, 0);
+        }
+        match pos {
+            Some((la, lo)) => h.set_position(&call, la, lo),
+            None => h.set_grid(&call, &grid),
+        }
+        save_heard(data_dir, &h);
+    }
+    let _io = lock(&shared.contacts_io);
+    let path = data_dir.join("contacts.txt");
+    if let Ok(mut list) = contacts::load(&path) {
+        if contacts::fill_grid(&mut list, &call, &grid) {
+            let _ = fs::create_dir_all(data_dir);
+            let _ = contacts::save(&path, &list);
+        }
+    }
+    Some((call, grid))
 }
 
 fn save_heard(dir: &Path, h: &HeardList) {
@@ -647,35 +704,63 @@ impl Engine {
     /// QTH yet, fills it with the grid so the relay route planner knows where it is. Returns
     /// the (callsign, grid) learned, or None for any other payload or our own beacon.
     pub fn note_beacon(&self, payload: &[u8]) -> Option<(String, String)> {
-        let (call, grid, pos) = kahf_core::msg::grid::learn(payload)?;
-        if call.eq_ignore_ascii_case(&self.config.callsign) || !valid_call(&call) {
-            return None;
-        }
-        {
-            let mut h = lock(&self.shared.heard);
-            if h.get(&call).is_none() {
-                let obs = Observation {
-                    snr_db: 0.0,
-                    channel_khz: 0.0,
-                    via: None,
-                };
-                h.hear(&call, now_unix_secs().max(0) as u64, obs, 0);
-            }
-            match pos {
-                Some((la, lo)) => h.set_position(&call, la, lo),
-                None => h.set_grid(&call, &grid),
-            }
-            save_heard(&self.config.data_dir, &h);
-        }
-        let _io = lock(&self.shared.contacts_io);
-        let path = self.config.data_dir.join("contacts.txt");
-        if let Ok(mut list) = contacts::load(&path) {
-            if contacts::fill_grid(&mut list, &call, &grid) {
-                let _ = fs::create_dir_all(&self.config.data_dir);
-                let _ = contacts::save(&path, &list);
+        learn_beacon(
+            &self.shared,
+            &self.config.data_dir,
+            &self.config.callsign,
+            payload,
+        )
+    }
+
+    /// Turns location beacons on or off and sets what they say: a GPS position (receivers turn
+    /// it into a grid) or, without GPS, a Maidenhead grid such as "IO91". Beacons go out on air
+    /// every 15 minutes at most, slower while the position does not change, as a short
+    /// unconnected burst. Needs the HF burst mode and is refused in listen-only mode.
+    pub fn set_beacon(
+        &self,
+        enabled: bool,
+        position: Option<(f64, f64)>,
+        grid: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(g) = grid {
+            if !kahf_core::msg::grid::valid(g) {
+                return Err(format!("invalid grid locator: {g:?}"));
             }
         }
-        Some((call, grid))
+        if enabled {
+            if let Some(why) = tx_refusal(&self.shared.flags) {
+                return Err(why.into());
+            }
+            if position.is_none() && grid.is_none() {
+                return Err("set a position or a grid locator to beacon".into());
+            }
+        }
+        let mut c = lock(&self.shared.beacon);
+        c.enabled = enabled;
+        c.position = position;
+        c.grid = grid.map(str::to_ascii_uppercase);
+        Ok(())
+    }
+
+    /// Delivery state of a message sent by this station, by the id `send_*` and events use:
+    /// one (callsign, status) per recipient, status one of queued, held, sent, delivered, read,
+    /// failed, expired. None until the message has gone on air. "delivered" comes from the link
+    /// ACK when the addressee was the link peer, or from an on-air receipt (the message reached
+    /// it through relays).
+    pub fn delivery(&self, public_id: u64) -> Option<Vec<(String, String)>> {
+        Self::delivery_of(&self.shared, public_id)
+    }
+
+    fn delivery_of(shared: &Shared, public_id: u64) -> Option<Vec<(String, String)>> {
+        let wire = *lock(&shared.wire_ids).get(&public_id)?;
+        let t = lock(&shared.delivery);
+        let tr = t.get(wire)?;
+        Some(
+            tr.recipients
+                .iter()
+                .map(|(c, s)| (c.clone(), format!("{s:?}").to_lowercase()))
+                .collect(),
+        )
     }
 
     /// Joins the group `name` (letters, digits and '-', for example "net17") and tells each
@@ -818,6 +903,9 @@ impl Engine {
                     .map(|t| GroupBook::from_text(&config.callsign, &t))
                     .unwrap_or_else(|_| GroupBook::new(&config.callsign)),
             ),
+            beacon: Mutex::new(BeaconCfg::default()),
+            delivery: Mutex::new(Tracker::new()),
+            wire_ids: Mutex::new(HashMap::new()),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -1359,14 +1447,14 @@ fn rung(name: &str) -> usize {
 
 /// Audio for `frames` as ladder bursts at rung `level`: groups of up to the rung's long size, with
 /// gaps between, lead-in and tail silence like [`burst`].
-fn hf_bursts(frames: &[Vec<u8>], level: usize) -> Vec<f32> {
+fn hf_bursts(frames: &[Vec<u8>], level: usize, kind: burst::FrameKind) -> Vec<f32> {
     let mode = &burst::LADDER[level.min(burst::LADDER.len() - 1)];
     let mut out = vec![0f32; LEAD_SILENCE];
     for (i, group) in frames.chunks(burst::long_codewords(mode)).enumerate() {
         if i > 0 {
             out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
         }
-        out.extend(burst::modulate_frames(group, mode));
+        out.extend(burst::modulate_frames(group, mode, kind));
     }
     out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
     out
@@ -1947,6 +2035,9 @@ enum TxStep {
 }
 
 struct Worker {
+    /// Decides when a location beacon is due.
+    beacon: BeaconScheduler,
+    beacon_checked: Instant,
     cmds: Receiver<Cmd>,
     shared: Arc<Shared>,
     factory: Factory,
@@ -2147,6 +2238,8 @@ impl Worker {
             hf_heard: rung(HF_LINK_START),
             hf_buf: Vec::new(),
             hf_scan_at: Instant::now(),
+            beacon: BeaconScheduler::new(BeaconSettings::default()),
+            beacon_checked: Instant::now(),
             hf_hot_until: Instant::now(),
             link_state: LinkState::Idle,
             qso: None,
@@ -2190,6 +2283,7 @@ impl Worker {
         }
         'main: loop {
             self.tick_link();
+            self.tick_beacon();
             loop {
                 match self.cmds.try_recv() {
                     Ok(Cmd::Shutdown) | Err(TryRecvError::Disconnected) => break 'main,
@@ -2679,6 +2773,9 @@ impl Worker {
                 });
             }
         }
+        if let Payload::Msg { msg, .. } = &payload {
+            self.track_sent(public, msg, &chunks);
+        }
         if let Payload::Forward { from, to, .. } = payload {
             // A relayed message is done only once the next station has acknowledged it
             // (see `settle_forwards`); until then it stays held.
@@ -2939,9 +3036,9 @@ impl Worker {
             self.hf_level = self.hf_level.max(floor);
         }
         let built = if hf && weak {
-            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG)))
+            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG), burst::FrameKind::Link))
         } else if hf {
-            Ok(hf_bursts(frames, self.hf_level))
+            Ok(hf_bursts(frames, self.hf_level, burst::FrameKind::Link))
         } else if weak {
             weak_burst(frames)
         } else {
@@ -3141,7 +3238,10 @@ impl Worker {
                 self.hf_hot_until = now + HF_HOT_FOR;
                 self.hf_scan_at = now;
                 for payload in h.frames {
-                    self.on_frame(payload);
+                    match h.kind {
+                        burst::FrameKind::Link => self.on_frame(payload),
+                        kind => self.on_unlinked_frame(kind, payload),
+                    }
                 }
             }
         }
@@ -3262,6 +3362,122 @@ impl Worker {
             .any(|(_, frames)| frames.iter().any(|f| f == payload))
     }
 
+    /// A frame of a burst that is not for the link layer (beacon, receipt, relay), heard without
+    /// a link session. Nothing consumes these yet: the messaging layer hooks in here.
+    fn on_unlinked_frame(&mut self, kind: burst::FrameKind, payload: Vec<u8>) {
+        match kind {
+            burst::FrameKind::Beacon => {
+                if let Some((call, grid)) =
+                    learn_beacon(&self.shared, &self.data_dir, &self.callsign, &payload)
+                {
+                    self.log(format!("heard a beacon from {call} in {grid}"));
+                }
+            }
+            burst::FrameKind::Receipt => {
+                if let Some((receipt, from)) = receipts::parse_receipt_frame(&payload) {
+                    let now = now_unix_secs().max(0) as u64;
+                    self.note_heard(&from);
+                    let id = lock(&self.shared.delivery).on_receipt(&receipt, &from, now);
+                    if id.is_some() {
+                        self.log(format!("{from} confirmed delivery"));
+                    }
+                }
+            }
+            burst::FrameKind::Link | burst::FrameKind::Relay => {}
+        }
+    }
+
+    /// Sends one single-frame unconnected burst of `kind` at the beacon rung.
+    fn send_unlinked(&mut self, payload: Vec<u8>, kind: burst::FrameKind) {
+        let samples = hf_bursts(&[payload], rung(HF_LINK_START), kind);
+        self.bursts.push_back(samples);
+    }
+
+    /// May this station send an unattended single burst now: HF burst mode on, not listen-only,
+    /// and nothing on the air or queued.
+    fn unattended_burst_ok(&self) -> bool {
+        self.shared.flags.hf_burst.load(Ordering::SeqCst)
+            && tx_refusal(&self.shared.flags).is_none()
+            && !self.airing()
+            && matches!(self.link_state, LinkState::Idle)
+    }
+
+    /// Sends a location beacon when one is due and the operator turned beacons on.
+    fn tick_beacon(&mut self) {
+        if self.beacon_checked.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.beacon_checked = Instant::now();
+        let cfg = lock(&self.shared.beacon).clone();
+        self.beacon.set_enabled(cfg.enabled);
+        if !cfg.enabled || !self.unattended_burst_ok() {
+            return;
+        }
+        if let Err(e) = self.ensure_radio() {
+            self.log(format!("beacon not sent: {e}"));
+            self.beacon_checked = Instant::now() + Duration::from_secs(55); // try again in a minute
+            return;
+        }
+        let now = now_unix_secs().max(0) as u64;
+        // A hand-set grid counts as a position for timing, so the same back-off applies.
+        let pos = cfg
+            .position
+            .or_else(|| cfg.grid.as_deref().and_then(kahf_core::msg::grid::from_grid));
+        // Status changes are not beaconed yet: note them as sent so position beacons are reached.
+        if let Some(d @ Due::Status(_)) = self.beacon.due(now, pos) {
+            self.beacon.beaconed(d, now, pos);
+        }
+        if let Some(Due::Position) = self.beacon.due(now, pos) {
+            if let Some(p) =
+                kahf_core::msg::grid::beacon_payload(&self.callsign, cfg.position, cfg.grid.as_deref())
+            {
+                self.send_unlinked(p, burst::FrameKind::Beacon);
+                self.beacon.beaconed(Due::Position, now, pos);
+                self.log("sent a location beacon");
+            }
+        }
+    }
+
+    /// Records a sent message for delivery tracking, once its chunks are on the link.
+    fn track_sent(&mut self, public: u64, msg: &Message, chunks: &[Vec<u8>]) {
+        if !matches!(msg, Message::Chat { .. } | Message::Mail { .. }) {
+            return;
+        }
+        let to = dest_of(msg).to_string();
+        if kahf_core::msg::groups::is_group_addr(&to) {
+            return;
+        }
+        let wire = Messenger::wire_id(&self.callsign, &to, chunks);
+        let now = now_unix_secs().max(0) as u64;
+        let at_peer =
+            matches!(&self.link_state, LinkState::Connected { peer } if peer.eq_ignore_ascii_case(&to));
+        let mut t = lock(&self.shared.delivery);
+        t.track(wire, std::slice::from_ref(&to), now);
+        t.advance(wire, Some(&to), DeliveryStatus::Sent, now);
+        if at_peer {
+            // The addressee itself acknowledged every chunk on the link.
+            t.advance(wire, Some(&to), DeliveryStatus::Delivered, now);
+        }
+        drop(t);
+        lock(&self.shared.wire_ids).insert(public, wire);
+    }
+
+    /// A message for us arrived by a path other than a link with its sender (through relays):
+    /// tell the sender with a one-frame receipt. A link with the sender already acknowledges it.
+    fn send_receipt(&mut self, from: &str, wire: u64) {
+        let on_link =
+            matches!(&self.link_state, LinkState::Connected { peer } if peer.eq_ignore_ascii_case(from));
+        if on_link || !self.transmit_allowed() || !self.unattended_burst_ok() {
+            return;
+        }
+        let r = kahf_core::extras::Receipt::Delivered {
+            message_id: kahf_core::msg::short_id(wire),
+        };
+        if let Some(frame) = receipts::receipt_frame(&r, &self.callsign) {
+            self.send_unlinked(frame, burst::FrameKind::Receipt);
+        }
+    }
+
     fn on_frame(&mut self, payload: Vec<u8>) {
         if self.is_own_echo(&payload) {
             return;
@@ -3290,6 +3506,17 @@ impl Worker {
                 // A private message is for its addressee's inbox only; other stations drop it.
                 if signed.private && !dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
                     return;
+                }
+                let (from, to) = (
+                    sender_of(&signed.message).to_string(),
+                    dest_of(&signed.message).to_string(),
+                );
+                let wanted = matches!(signed.message, Message::Chat { .. } | Message::Mail { .. })
+                    && to.eq_ignore_ascii_case(&self.callsign)
+                    && !from.eq_ignore_ascii_case(&self.callsign);
+                if wanted {
+                    let wire = Messenger::wire_id(&from, &to, &chunks);
+                    self.send_receipt(&from, wire);
                 }
                 self.on_message(signed.message);
             }
@@ -4032,7 +4259,7 @@ mod tests {
         for name in ["R4", "Q12", "S12", "T34"] {
             let level = rung(name);
             let mut air = vec![0f32; 3000];
-            air.extend(hf_bursts(&frames, level));
+            air.extend(hf_bursts(&frames, level, burst::FrameKind::Link));
             air.extend(vec![0f32; 3000]);
             match burst::scan(&air, rung(HF_LINK_START)) {
                 burst::Scan::Heard(h) => {
@@ -4639,6 +4866,129 @@ mod tests {
         assert!(a.groups().is_empty());
     }
 
+    #[test]
+    fn beacon_over_the_air_teaches_grid_to_a_listener() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let a = Engine::spawn(
+            config("AA1AAA", temp_dir("bcn-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("bcn-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        assert!(a.set_beacon(true, None, None).is_err(), "nothing to say");
+        assert!(a.set_beacon(true, None, Some("nope")).is_err());
+        b.listen().unwrap();
+        a.set_beacon(true, None, Some("io91")).unwrap();
+        let mut learned = None;
+        for _ in 0..90 {
+            let _ = b.poll_events();
+            if let Some(h) = b.heard_stations(5).into_iter().find(|h| h.call == "AA1AAA") {
+                learned = Some(h);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let h = learned.expect("B did not hear A's beacon");
+        assert_eq!(h.position.map(|p| (p.0.round(), p.1.round())), Some((52.0, -1.0)));
+        let contacts = contacts::load(&b.config.data_dir.join("contacts.txt")).unwrap();
+        assert_eq!(contacts.iter().find(|c| c.call == "AA1AAA").unwrap().qth, "IO91");
+    }
+
+    #[test]
+    fn link_ack_marks_a_message_delivered() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir("dlv-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("dlv-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        let id = a.send_mail("BB1BBB", "subject", "body", &[]).unwrap();
+        assert_eq!(a.delivery(id), None, "not on air yet");
+        let mut state = None;
+        for _ in 0..90 {
+            let _ = b.poll_events();
+            let _ = a.poll_events();
+            state = a.delivery(id);
+            if state.as_ref().is_some_and(|s| s[0].1 == "delivered") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert_eq!(state, Some(vec![("BB1BBB".to_string(), "delivered".to_string())]));
+    }
+
+    #[test]
+    fn on_air_receipt_confirms_a_relayed_message() {
+        let mut w = bare_worker("rcpt", "AA1AAA");
+        // A message to CC3CCC went out while no link to CC3CCC was up: sent, not delivered.
+        let msg = chat("AA1AAA", "CC3CCC", "via relay");
+        let chunks = session::encode_signed(&msg, None, false);
+        w.track_sent(7, &msg, &chunks);
+        let id = Engine::delivery_of(&w.shared, 7).unwrap();
+        assert_eq!(id, vec![("CC3CCC".to_string(), "sent".to_string())]);
+        // A receipt from someone else, or for another message, changes nothing.
+        let wire = Messenger::wire_id("AA1AAA", "CC3CCC", &chunks);
+        let other = receipts::receipt_frame(
+            &kahf_core::extras::Receipt::Delivered {
+                message_id: kahf_core::msg::short_id(wire),
+            },
+            "DD4DDD",
+        )
+        .unwrap();
+        w.on_unlinked_frame(burst::FrameKind::Receipt, other);
+        assert_eq!(Engine::delivery_of(&w.shared, 7).unwrap()[0].1, "sent");
+        // The addressee's receipt confirms it.
+        let good = receipts::receipt_frame(
+            &kahf_core::extras::Receipt::Delivered {
+                message_id: kahf_core::msg::short_id(wire),
+            },
+            "CC3CCC",
+        )
+        .unwrap();
+        w.on_unlinked_frame(burst::FrameKind::Receipt, good);
+        assert_eq!(Engine::delivery_of(&w.shared, 7).unwrap()[0].1, "delivered");
+        assert!(logged(&w).iter().any(|l| l.contains("CC3CCC confirmed delivery")));
+        // Garbage in an unlinked burst is ignored.
+        w.on_unlinked_frame(burst::FrameKind::Receipt, vec![1, 2]);
+        w.on_unlinked_frame(burst::FrameKind::Beacon, vec![9, 9, 9]);
+    }
+
+    #[test]
+    fn receipt_is_sent_only_when_unattended_sending_is_allowed() {
+        let mut w = bare_worker("rcpt-tx", "BB1BBB");
+        w.send_receipt("AA1AAA", 5);
+        assert!(
+            w.bursts.is_empty(),
+            "no operator link and no relay mode: stay quiet"
+        );
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        w.send_receipt("AA1AAA", 5);
+        assert_eq!(w.bursts.len(), 1);
+        w.bursts.clear();
+        w.shared.flags.listen_only.store(true, Ordering::SeqCst);
+        w.send_receipt("AA1AAA", 5);
+        assert!(w.bursts.is_empty(), "listen only never transmits");
+    }
+
     /// One station with a fake radio whose transmit output is `a_to_b`.
     fn lone_station(tag: &str) -> (Engine, Pipe) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
@@ -4830,6 +5180,9 @@ mod tests {
             heard: Mutex::new(HeardList::default()),
             contacts_io: Mutex::new(()),
             groups: Mutex::new(GroupBook::new(callsign)),
+            beacon: Mutex::new(BeaconCfg::default()),
+            delivery: Mutex::new(Tracker::new()),
+            wire_ids: Mutex::new(HashMap::new()),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, dir);

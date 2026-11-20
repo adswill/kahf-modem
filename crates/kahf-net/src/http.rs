@@ -65,8 +65,29 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
+            // Read the whole request before answering. Closing a socket that still
+            // holds unread data makes Windows reset the connection, which the
+            // client sees as a transport error instead of the response.
+            let mut req = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_lowercase();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
             let reply = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
