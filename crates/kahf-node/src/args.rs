@@ -25,6 +25,7 @@ run options:
   --radio half|full|sdr  half duplex (default), full duplex, or SDR receive assist
   --i-hold-a-licence     confirm you hold an amateur licence for this station
   --accept-relay-terms   accept the terms of relay operation
+  --api ADDR             scripting API on a loopback address, e.g. 127.0.0.1:7373 (JSON lines)
   --seconds N            stop after N seconds (default: run until stopped)
 ";
 
@@ -43,6 +44,7 @@ pub struct RunArgs {
     pub licence: bool,
     pub terms: bool,
     pub seconds: Option<u64>,
+    pub api: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,7 @@ fn parse_run(rest: &[String]) -> Result<RunArgs, String> {
         licence: false,
         terms: false,
         seconds: None,
+        api: None,
     };
     let mut station_too = false;
     let mut relay = false;
@@ -127,6 +130,7 @@ fn parse_run(rest: &[String]) -> Result<RunArgs, String> {
             }
             "--i-hold-a-licence" => a.licence = true,
             "--accept-relay-terms" => a.terms = true,
+            "--api" => a.api = Some(value(&mut it, f)?),
             "--seconds" => {
                 a.seconds = Some(
                     value(&mut it, f)?
@@ -197,6 +201,10 @@ mod tests {
         assert!(p("run --call X --data-dir /d --slot 3").is_err());
         assert!(p("run --call X --data-dir /d --station-too").is_err());
         assert!(p("run --call X --data-dir /d --bogus").is_err());
+        let Command::Run(a) = p("run --call X --data-dir /d --api 127.0.0.1:7373").unwrap() else {
+            panic!()
+        };
+        assert_eq!(a.api.as_deref(), Some("127.0.0.1:7373"));
         assert!(p("run --call").is_err());
         assert_eq!(p("").unwrap(), Command::Help);
         assert_eq!(p("rigs").unwrap(), Command::Rigs);

@@ -2854,6 +2854,7 @@ dependencies = [
  "kahf-core",
  "kahf-daemon",
  "kahf-rig",
+ "serde_json",
 ]
 
 [[package]]
