@@ -1345,14 +1345,14 @@ fn rung(name: &str) -> usize {
 
 /// Audio for `frames` as ladder bursts at rung `level`: groups of up to the rung's long size, with
 /// gaps between, lead-in and tail silence like [`burst`].
-fn hf_bursts(frames: &[Vec<u8>], level: usize) -> Vec<f32> {
+fn hf_bursts(frames: &[Vec<u8>], level: usize, kind: burst::FrameKind) -> Vec<f32> {
     let mode = &burst::LADDER[level.min(burst::LADDER.len() - 1)];
     let mut out = vec![0f32; LEAD_SILENCE];
     for (i, group) in frames.chunks(burst::long_codewords(mode)).enumerate() {
         if i > 0 {
             out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
         }
-        out.extend(burst::modulate_frames(group, mode));
+        out.extend(burst::modulate_frames(group, mode, kind));
     }
     out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
     out
@@ -2836,9 +2836,9 @@ impl Worker {
             self.hf_level = self.hf_level.max(floor);
         }
         let built = if hf && weak {
-            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG)))
+            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG), burst::FrameKind::Link))
         } else if hf {
-            Ok(hf_bursts(frames, self.hf_level))
+            Ok(hf_bursts(frames, self.hf_level, burst::FrameKind::Link))
         } else if weak {
             weak_burst(frames)
         } else {
@@ -3024,7 +3024,10 @@ impl Worker {
                 self.hf_hot_until = now + HF_HOT_FOR;
                 self.hf_scan_at = now;
                 for payload in h.frames {
-                    self.on_frame(payload);
+                    match h.kind {
+                        burst::FrameKind::Link => self.on_frame(payload),
+                        kind => self.on_unlinked_frame(kind, payload),
+                    }
                 }
             }
         }
@@ -3084,6 +3087,12 @@ impl Worker {
                 self.on_frame(payload);
             }
         }
+    }
+
+    /// A frame of a burst that is not for the link layer (beacon, receipt, relay), heard without
+    /// a link session. Nothing consumes these yet: the messaging layer hooks in here.
+    fn on_unlinked_frame(&mut self, kind: burst::FrameKind, payload: Vec<u8>) {
+        let _ = (kind, payload);
     }
 
     fn on_frame(&mut self, payload: Vec<u8>) {
@@ -3756,7 +3765,7 @@ mod tests {
         for name in ["R4", "Q12", "S12", "T34"] {
             let level = rung(name);
             let mut air = vec![0f32; 3000];
-            air.extend(hf_bursts(&frames, level));
+            air.extend(hf_bursts(&frames, level, burst::FrameKind::Link));
             air.extend(vec![0f32; 3000]);
             match burst::scan(&air, rung(HF_LINK_START)) {
                 burst::Scan::Heard(h) => {
