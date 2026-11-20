@@ -10,7 +10,7 @@ use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{canvas, image, operation, text_editor};
 use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
-use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, TxState};
+use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, RelayStep, TxState};
 
 use crate::live::{self, Live};
 use crate::sample::{self, Kind};
@@ -1229,8 +1229,16 @@ impl App {
                 }
                 self.engine_note = msg;
             }
-            // Relay progress is shown through the log for now.
-            EngineEvent::Relay { .. } => {}
+            EngineEvent::Relay { from, to, step } => {
+                let line = match step {
+                    RelayStep::Held => format!("{} {from} {} {to}", s::RELAY_EV_HELD, s::RELAY_EV_TO),
+                    RelayStep::Sent => format!("{} {from} {} {to}", s::RELAY_EV_SENT, s::RELAY_EV_TO),
+                    RelayStep::Dropped(why) => {
+                        format!("{} {from} {} {to}: {why}", s::RELAY_EV_DROPPED, s::RELAY_EV_TO)
+                    }
+                };
+                self.note_event(line);
+            }
             EngineEvent::Tx { state } => match state {
                 TxState::Starting | TxState::Sending => {
                     self.busy = Some((Busy::Transmitting, now + Duration::from_secs(30)));
@@ -1257,14 +1265,15 @@ impl App {
     /// Sends the relay start request to the daemon, with the acknowledgement of both ticks.
     /// The daemon's own relay start must also refuse without it; the panel is not the only gate.
     fn start_relay(&mut self, role: Role) {
+        if !(self.relay_licence && self.relay_terms) {
+            return;
+        }
+        // The relay network works on 17 m, so relay mode always starts there.
+        self.set_band(spectrum::Band::M17);
         let channels: Vec<f32> = spectrum::channels()
             .iter()
             .map(|(hz, _)| (*hz / 1000.0) as f32)
             .collect();
-        let acknowledged = self.relay_licence && self.relay_terms;
-        if !acknowledged {
-            return;
-        }
         let core_role = if role == Role::Both {
             kahf_core::relay::Role::RelayAndStation
         } else {
@@ -1293,11 +1302,21 @@ impl App {
         }
     }
 
-    fn toast(&mut self, text: &str, kind: ToastKind) {
-        self.events.push((crate::view::utc_clock(), text.to_string()));
+    fn set_band(&mut self, b: spectrum::Band) {
+        self.band = b;
+        spectrum::set_centre_hz(b.centre_hz());
+    }
+
+    /// Adds a line to Last events without a toast.
+    fn note_event(&mut self, text: String) {
+        self.events.push((crate::view::utc_clock(), text));
         if self.events.len() > 8 {
             self.events.remove(0);
         }
+    }
+
+    fn toast(&mut self, text: &str, kind: ToastKind) {
+        self.note_event(text.to_string());
         self.toast = Some(Toast {
             text: text.to_string(),
             kind,
@@ -1804,8 +1823,7 @@ impl App {
                 self.save();
             }
             Message::BandChosen(b) => {
-                self.band = b;
-                spectrum::set_centre_hz(b.centre_hz());
+                self.set_band(b);
                 self.tune = 0.5;
             }
             Message::VolIn(v) => {
@@ -2123,6 +2141,47 @@ mod tests {
         let _ = app.update(Message::RoleChosen(Role::Relay));
         assert_eq!(app.confirm, Some(Confirm::Relay));
         assert!(!app.relay_licence && !app.relay_terms);
+    }
+
+    #[test]
+    fn band_list_covers_the_band_plan_and_relay_uses_17m() {
+        for seg in kahf_core::bandplan::KAHF_SEGMENTS {
+            assert!(
+                spectrum::Band::ALL.iter().any(|b| b.to_string() == seg.name),
+                "{} has no band entry",
+                seg.name
+            );
+        }
+        let mut app = App::init();
+        app.relay_licence = true;
+        app.relay_terms = true;
+        app.start_relay(Role::Relay);
+        assert_eq!(app.band, spectrum::Band::M17);
+        assert!(spectrum::channels()
+            .iter()
+            .all(|(hz, _)| (18_111_000.0..=18_120_000.0).contains(hz)));
+        assert!(!spectrum::channels().is_empty());
+    }
+
+    #[test]
+    fn relay_events_are_listed() {
+        let mut app = App::init();
+        let ev = |step| EngineEvent::Relay {
+            from: "XX1AA".into(),
+            to: "XX9ZZ".into(),
+            step,
+        };
+        app.on_engine_event(ev(RelayStep::Sent), Instant::now());
+        app.on_engine_event(ev(RelayStep::Dropped("queue full".into())), Instant::now());
+        let lines: Vec<&str> = app.events.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "Relayed a message from XX1AA to XX9ZZ",
+                "Did not relay a message from XX1AA to XX9ZZ: queue full"
+            ]
+        );
+        assert!(app.toast.is_none());
     }
 
     #[test]
