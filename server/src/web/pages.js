@@ -149,7 +149,7 @@ export const SITE_PAGES = {
 <div class="grid even">
 <div>
 <h2 id="l-lic">Licence</h2>
-<p>KAHF Source Licence, version 1.0. The source can be read and built, and official builds can be installed by anyone. Copyright (c) 2026 adswill, all rights reserved. Nothing here grants a licence to copy or redistribute the code.</p>
+<p>KAHF is free software under the GNU General Public License, version 3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill). You can use, study, change and share it. Changed versions, and programs built on it, must be shared under the same licence with their source.</p>
 <h3>Your responsibility</h3>
 <p>KAHF is for licensed amateur radio operators. Bands, modes, power and rules on third-party traffic differ from country to country, and you are responsible for staying inside yours. KAHF asks you to confirm each transmission. It does not decide for you.</p>
 <h3>Content</h3>

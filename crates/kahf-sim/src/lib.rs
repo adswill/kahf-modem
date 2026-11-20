@@ -96,6 +96,14 @@ pub enum Profile {
     FreqOffset,
     ClockOffset,
     Fade,
+    /// ITU-R F.1487 / CCIR 520 Watterson "good" channel: 2 paths, 0.5 ms, 0.1 Hz spread.
+    WattersonGood,
+    /// Watterson "moderate": 1 ms, 0.5 Hz spread.
+    WattersonModerate,
+    /// Watterson "poor": 2 ms, 1 Hz spread.
+    WattersonPoor,
+    /// Watterson "flutter" (high-latitude): 0.5 ms, 10 Hz spread.
+    WattersonFlutter,
 }
 
 /// Apply a named channel profile, then AWGN at `snr_db` (measured against the
@@ -113,6 +121,10 @@ pub fn apply(samples: &[f32], profile: Profile, snr_db: f32, seed: u64) -> Vec<f
         }
         Profile::ClockOffset => clock_offset(samples),
         Profile::Fade => fade(samples),
+        Profile::WattersonGood => watterson(samples, 0.0005, 0.1, seed),
+        Profile::WattersonModerate => watterson(samples, 0.001, 0.5, seed),
+        Profile::WattersonPoor => watterson(samples, 0.002, 1.0, seed),
+        Profile::WattersonFlutter => watterson(samples, 0.0005, 10.0, seed),
     };
     awgn(&impaired, snr_db, seed)
 }
@@ -171,6 +183,18 @@ fn fft(buf: &mut [(f64, f64)], inverse: bool) {
 /// The input is zero-padded to at least twice its length so the circular
 /// Hilbert transform does not wrap around the buffer.
 fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
+    let z = analytic(x);
+    z.iter()
+        .enumerate()
+        .map(|(i, &(zr, zi))| {
+            let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
+            (zr * theta.cos() - zi * theta.sin()) as f32
+        })
+        .collect()
+}
+
+/// Analytic signal z = x + i*H{x} (FFT method, zero-padded against wrap-around).
+fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
     let n = x.len();
     if n == 0 {
         return Vec::new();
@@ -191,11 +215,53 @@ fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
     }
     fft(&mut spec, true);
     let scale = 1.0 / big as f64;
+    (0..n).map(|i| (spec[i].0 * scale, spec[i].1 * scale)).collect()
+}
+
+/// Number of sinusoids per Rayleigh tap in the sum-of-sinusoids fading generator.
+const FADE_SINUSOIDS: usize = 64;
+
+/// Complex Rayleigh gain process with a Gaussian Doppler power spectrum. `spread_hz`
+/// is the two-sigma Doppler spread (ITU-R F.1487 definition). Unit mean power.
+/// Sum of sinusoids at Gaussian-distributed frequencies with random phases.
+fn rayleigh_gain(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> {
+    let sigma = spread_hz / 2.0;
+    let comps: Vec<(f64, f64)> = (0..FADE_SINUSOIDS)
+        .map(|_| (2.0 * PI * sigma * rng.gaussian(), 2.0 * PI * rng.uniform_open()))
+        .collect();
+    let a = (1.0 / FADE_SINUSOIDS as f64).sqrt();
+    (0..len)
+        .map(|n| {
+            let t = n as f64 / SAMPLE_RATE_HZ;
+            comps.iter().fold((0.0, 0.0), |(re, im), &(w, ph)| {
+                let th = w * t + ph;
+                (re + a * th.cos(), im + a * th.sin())
+            })
+        })
+        .collect()
+}
+
+/// Watterson two-path channel: two independent Rayleigh paths of equal power, the second
+/// delayed by `delay_s`, each with Gaussian Doppler spread `spread_hz` (two-sigma).
+/// Applied to the analytic signal; the real part is returned. Output power averages
+/// to the input power.
+fn watterson(x: &[f32], delay_s: f64, spread_hz: f64, seed: u64) -> Vec<f32> {
+    let z = analytic(x);
+    let n = z.len();
+    let d = (delay_s * SAMPLE_RATE_HZ).round() as usize;
+    let mut rng = Rng::new(seed ^ 0x57A7_7E55_0000_0001);
+    let g1 = rayleigh_gain(n, spread_hz, &mut rng);
+    let g2 = rayleigh_gain(n, spread_hz, &mut rng);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
     (0..n)
         .map(|i| {
-            let (zr, zi) = (spec[i].0 * scale, spec[i].1 * scale);
-            let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
-            (zr * theta.cos() - zi * theta.sin()) as f32
+            let (zr, zi) = z[i];
+            let mut re = h * (g1[i].0 * zr - g1[i].1 * zi);
+            if i >= d {
+                let (dr, di) = z[i - d];
+                re += h * (g2[i].0 * dr - g2[i].1 * di);
+            }
+            re as f32
         })
         .collect()
 }
@@ -515,5 +581,27 @@ mod tests {
             "FER profile={name} snr={snr} dB frames={n} errors={errors} fer={:.4}",
             errors as f64 / n as f64
         );
+    }
+
+    #[test]
+    fn watterson_keeps_length_is_deterministic_and_unit_mean_power() {
+        let n = 80_000usize;
+        let sig: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / SAMPLE_RATE_HZ).sin() as f32)
+            .collect();
+        let sp = sig.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        // Mean over many independent fades is the input power (unit gain channel).
+        let mut acc = 0.0;
+        let runs = 60u64;
+        for seed in 0..runs {
+            let y = apply(&sig, Profile::WattersonModerate, 200.0, seed);
+            assert_eq!(y.len(), n);
+            acc += y.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        }
+        let ratio = acc / runs as f64 / sp;
+        assert!((0.6..1.6).contains(&ratio), "mean power ratio {ratio}");
+        let a = apply(&sig, Profile::WattersonPoor, 10.0, 5);
+        let b = apply(&sig, Profile::WattersonPoor, 10.0, 5);
+        assert_eq!(a, b);
     }
 }

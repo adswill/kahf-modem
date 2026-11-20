@@ -115,12 +115,23 @@ impl App {
     /// The controls of one setup step.
     pub fn step_controls(&self, i: usize) -> El<'_> {
         match i {
-            0 => text_input("", &self.callsign)
-                .on_input(Message::Callsign)
-                .padding(5)
-                .style(theme::input)
-                .width(220)
-                .into(),
+            0 => column![
+                text_input("", &self.callsign)
+                    .on_input(Message::Callsign)
+                    .padding(5)
+                    .style(theme::input)
+                    .width(220),
+                field(
+                    s::SET_LOCATOR,
+                    text_input("KP20", &self.locator)
+                        .on_input(Message::Locator)
+                        .padding(5)
+                        .style(theme::input)
+                        .width(220),
+                ),
+            ]
+            .spacing(8)
+            .into(),
             1 => {
                 let mut col = column![
                     pick_list(RigControl::ALL, Some(self.rig), Message::RigChosen).style(theme::dropdown)

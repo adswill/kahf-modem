@@ -13,6 +13,7 @@ pub mod ldpc;
 pub mod ldpc_std;
 pub mod link;
 pub mod marker;
+pub mod msg;
 pub mod outbox;
 pub mod payload_position;
 pub mod payload_presence;
