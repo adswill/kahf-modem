@@ -484,6 +484,7 @@ impl App {
             Event::Spectrum(values) => self.push_spectrum(ctx, &values),
             Event::Tx { state } => self.on_tx(state),
             Event::Log(line) => self.log_line(line),
+            Event::Relay { .. } => {}
         }
     }
 

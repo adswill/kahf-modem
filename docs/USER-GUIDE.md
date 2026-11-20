@@ -174,6 +174,28 @@ When it is available, a relay station asks the operator to:
 
 Do not take on the relay role unless you can keep the station running as agreed.
 
+How radio relay works in the engine:
+
+- A message waits two minutes for its station. If the station is not reached and you have named
+  relays, the log says **Could not reach XX1XX on air. It goes by radio relay through ... once
+  connected.** Connect to one of those relays and the message goes to it.
+- A relay in relay mode, with **Relay other stations' messages** on, holds a message for another
+  station. In its next transmit slot it calls that station, passes the message on exactly as
+  heard (the signature and the private mark stay), and hangs up when the station has
+  acknowledged it. A relay does not show these messages in its own inbox.
+- Each message is passed on once. Copies heard again and messages that loop back are dropped.
+  A relay holds at most 64 messages for other stations.
+- A relay that cannot reach the station either passes the message to its own relays, so a
+  message can cross several relays (up to four hops are planned).
+- Relays work on 17 m by default, 18.111 to 18.120 MHz, in three 2.7 kHz channels. IARU Region 1
+  marks this part of 17 m for digital modes and automatically controlled data stations. It sits
+  above the 18.110 MHz beacon and clear of FT8 and FT4. Check your own country's rules.
+- Which relays to name can come from the route planner, which estimates when 17 m is open
+  between each pair of stations: ground wave up to about 30 km, sky wave from the MUF and LUF.
+  Between those two there is a skip zone, where two nearby stations cannot hear each other on
+  17 m and need a distant relay. The planner is an estimate and has not been checked against
+  real contacts yet.
+
 ## 10. Location sharing
 
 Location sharing decides how much of your position other stations and a map may learn. There are

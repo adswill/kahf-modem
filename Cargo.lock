@@ -2780,9 +2780,11 @@ dependencies = [
  "kahf-audio",
  "kahf-core",
  "kahf-log",
+ "kahf-prop",
  "kahf-radio",
  "kahf-sdr",
  "kahf-sim",
+ "sha2 0.11.1",
 ]
 
 [[package]]

@@ -1229,6 +1229,8 @@ impl App {
                 }
                 self.engine_note = msg;
             }
+            // Relay progress is shown through the log for now.
+            EngineEvent::Relay { .. } => {}
             EngineEvent::Tx { state } => match state {
                 TxState::Starting | TxState::Sending => {
                     self.busy = Some((Busy::Transmitting, now + Duration::from_secs(30)));
