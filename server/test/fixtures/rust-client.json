@@ -1,0 +1,5 @@
+{
+  "_comment": "Request bodies made by crates/kahf-net (key seed [7; 32]). The Rust and server tests both check them.",
+  "register": "{\"area\":\"N54E25\",\"callsign\":\"LY1ABC\",\"public_key\":\"6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=\",\"signature\":\"lgLRsoBImqyQRkh9YsDM9CI4AOlJ7/pOOFi0BFct0lmUOeCDlPoAzdc+h2i5BrKul68EKOSGaFHG7ralRIKLAA==\"}",
+  "schedule": "{\"public_key\":\"6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=\",\"relay\":\"LY1ABC\",\"requests\":[{\"channel\":1,\"direction\":\"tx\",\"duration\":60,\"latency_budget_s\":600,\"urgent\":true}],\"signature\":\"9VT3XMTCROZTjZ6A8M3SUaLW/lGCHi1UZrt+jyO1DAcbxlZo4FO5dxR0QkPCSxSu4LPtl339BJUESKzd5d8lAQ==\"}"
+}

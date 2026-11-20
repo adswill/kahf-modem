@@ -2780,6 +2780,7 @@ dependencies = [
  "kahf-audio",
  "kahf-core",
  "kahf-log",
+ "kahf-net",
  "kahf-prop",
  "kahf-radio",
  "kahf-sdr",
@@ -2800,6 +2801,17 @@ dependencies = [
 [[package]]
 name = "kahf-log"
 version = "0.0.1"
+
+[[package]]
+name = "kahf-net"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "kahf-core",
+ "serde_json",
+ "ureq",
+]
 
 [[package]]
 name = "kahf-prop"
