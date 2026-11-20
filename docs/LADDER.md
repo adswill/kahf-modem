@@ -51,8 +51,9 @@ frames). A link starts at Q12 and moves one rung per peer report: up under 2 per
 the 2.5 s link timeouts. Weak mode (`set_weak_mode`) sends every frame as an R32 burst (about 7 s each,
 about -9 dB) instead of eight copies.
 
-There is no header. Each codeword's id byte (covered by its CRC) holds a flag, the rung and short or
-long burst (1 codeword, or 5 for Q12, 4 for Q23, 8 for 16QAM, 16 for 64QAM). The receiver finds the
+There is no header. Each codeword's id byte (covered by its CRC) holds a flag, the rung, the frame kind
+(`FrameKind`: link, beacon, receipt, relay; the daemon routes non-link bursts to `on_unlinked_frame`, which
+the messaging layer fills in) and short or long burst (1 codeword, or 5 for Q12, 4 for Q23, 8 for 16QAM, 16 for 64QAM). The receiver finds the
 preamble once, then tries every (rung, size) whose audio has arrived, and takes the first whose codewords
 pass their CRC and carry the matching id. It scans the last 16 s of audio every 1 s while a link is active
 and every 4 s otherwise, about 0.2 s of CPU per scan. The ladder is on top of the old receiver, which still

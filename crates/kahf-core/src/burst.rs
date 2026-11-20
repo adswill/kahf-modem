@@ -129,20 +129,46 @@ pub fn index_of(mode: &Mode) -> usize {
 /// by its CRC: a flag, the ladder index and short or long. The receiver of [`scan`] has to
 /// try several (mode, size) guesses, and a guess that is a prefix of the real burst, or the same
 /// waveform (one codeword of R4 is four of Q12), would otherwise decode to the wrong thing.
-fn descriptor(mode: &Mode, long: bool) -> u8 {
-    0x80 | ((index_of(mode) as u8) << 3) | long as u8
+fn descriptor(mode: &Mode, long: bool, kind: FrameKind) -> u8 {
+    0x80 | ((index_of(mode) as u8) << 3) | ((kind as u8) << 1) | long as u8
+}
+
+/// What a burst's frames are for, so a receiver can route them without a link session. Two bits
+/// of the codeword id byte, the same for every codeword of the burst.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FrameKind {
+    /// Link frames (connect, data, ack): the default.
+    #[default]
+    Link = 0,
+    /// A beacon (position, grid, presence), sent unconnected.
+    Beacon = 1,
+    /// A delivery receipt, sent unconnected.
+    Receipt = 2,
+    /// A relay-held item.
+    Relay = 3,
+}
+
+impl FrameKind {
+    fn from_bits(b: u8) -> FrameKind {
+        match b & 3 {
+            0 => FrameKind::Link,
+            1 => FrameKind::Beacon,
+            2 => FrameKind::Receipt,
+            _ => FrameKind::Relay,
+        }
+    }
 }
 
 /// Frames (each up to [`CW_BYTES`] bytes) as one burst. One frame, or a mode with long bursts of
 /// one codeword, sends a short burst; more frames fill a long burst, padded with empty
 /// codewords. Panics if there are more frames than [`long_codewords`].
-pub fn modulate_frames(frames: &[Vec<u8>], mode: &Mode) -> Vec<f32> {
+pub fn modulate_frames(frames: &[Vec<u8>], mode: &Mode, kind: FrameKind) -> Vec<f32> {
     let long = long_codewords(mode);
     assert!(frames.len() <= long, "too many frames for one burst");
     let n_cw = if frames.len() <= 1 { 1 } else { long };
     let mut cws: Vec<Vec<u8>> = frames.to_vec();
     cws.resize(n_cw, Vec::new());
-    modulate_codewords(&cws, mode, descriptor(mode, n_cw > 1))
+    modulate_codewords(&cws, mode, descriptor(mode, n_cw > 1, kind))
 }
 
 /// A burst heard by [`scan`].
@@ -150,6 +176,8 @@ pub fn modulate_frames(frames: &[Vec<u8>], mode: &Mode) -> Vec<f32> {
 pub struct Heard {
     /// Index in [`LADDER`] of the mode it was sent with.
     pub mode: usize,
+    /// What the burst's frames are for.
+    pub kind: FrameKind,
     /// Payloads of the codewords that decoded and were not empty.
     pub frames: Vec<Vec<u8>>,
     /// Sample index just past the burst in the scanned buffer.
@@ -200,18 +228,37 @@ pub fn scan(samples: &[f32], prefer: usize) -> Scan {
         let Some(sets) = wf.llrs(mode.modulation, mode.coded_bits(n), &VARIANTS) else {
             continue;
         };
-        let cws: Vec<Option<Vec<u8>>> = (0..n)
+        let cws: Vec<Option<(Vec<u8>, u8)>> = (0..n)
             .map(|c| {
                 sets.iter().find_map(|llr| {
                     let (data, id) = ldpc::decode(&combine(llr, mode, n, c), 50)
                         .and_then(|b| frame::parse_payload_id(&b))?;
-                    (id == descriptor(mode, n > 1)).then_some(data)
+                    // The kind bits (2..1) are free; everything else must match this guess.
+                    let want = descriptor(mode, n > 1, FrameKind::Link);
+                    (id & !0b110 == want).then_some((data, id))
                 })
             })
             .collect();
         if cws.iter().any(|c| c.is_some()) {
-            let frames = cws.into_iter().flatten().filter(|f| !f.is_empty()).collect();
-            return Scan::Heard(Heard { mode: i, frames, end });
+            // Every decoded codeword carries the burst's kind; the first one speaks for it.
+            let kind = cws
+                .iter()
+                .flatten()
+                .map(|(_, id)| FrameKind::from_bits(id >> 1))
+                .next()
+                .unwrap_or_default();
+            let frames = cws
+                .into_iter()
+                .flatten()
+                .map(|(d, _)| d)
+                .filter(|f| !f.is_empty())
+                .collect();
+            return Scan::Heard(Heard {
+                mode: i,
+                kind,
+                frames,
+                end,
+            });
         }
     }
     Scan::Pending { from }
@@ -341,7 +388,7 @@ mod tests {
             let long = long_codewords(mode);
             for n in [1, long.min(3)] {
                 let frames: Vec<Vec<u8>> = (0..n).map(|k| vec![(i * 16 + k) as u8; 5 + k]).collect();
-                let air = on_air(&modulate_frames(&frames, mode));
+                let air = on_air(&modulate_frames(&frames, mode, FrameKind::Link));
                 // Deliberately prefer the wrong mode: the scan must still find it.
                 match scan(&air, (i + 3) % LADDER.len()) {
                     Scan::Heard(h) => {
@@ -367,8 +414,28 @@ mod tests {
     #[test]
     fn scan_waits_for_a_burst_that_is_not_all_here() {
         let mode = &LADDER[index_of(&LADDER.iter().find(|m| m.name == "R4").copied().unwrap())];
-        let air = on_air(&modulate_frames(&[vec![1, 2, 3]], mode));
+        let air = on_air(&modulate_frames(&[vec![1, 2, 3]], mode, FrameKind::Link));
         let cut = &air[..air.len() - 4000 - 2000];
         assert!(matches!(scan(cut, 0), Scan::Pending { .. } | Scan::Nothing));
+    }
+
+    #[test]
+    fn frame_kind_travels_with_the_burst() {
+        let q12 = LADDER.iter().find(|m| m.name == "Q12").unwrap();
+        for kind in [
+            FrameKind::Link,
+            FrameKind::Beacon,
+            FrameKind::Receipt,
+            FrameKind::Relay,
+        ] {
+            let air = on_air(&modulate_frames(&[vec![42; 9]], q12, kind));
+            match scan(&air, 0) {
+                Scan::Heard(h) => {
+                    assert_eq!(h.kind, kind);
+                    assert_eq!(h.frames, vec![vec![42; 9]]);
+                }
+                other => panic!("{kind:?}: {other:?}"),
+            }
+        }
     }
 }
