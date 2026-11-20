@@ -34,3 +34,8 @@ node_modules/
 
 # Wrangler local cache (holds the Cloudflare account name)
 server/.wrangler/
+
+# Desktop app
+app/dist/
+app/shots/
+app/src-tauri/gen/
