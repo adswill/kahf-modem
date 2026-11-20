@@ -306,6 +306,7 @@ pub enum Message {
     Profile(&'static str),
     Level(f32),
     CheckUpdates,
+    UpdateChecked(Result<crate::update::Outcome, String>),
 }
 
 pub const PROFILES: &[&str] = &[s::PROFILE_AUTO, s::PROFILE_ROBUST, s::PROFILE_FAST];
@@ -322,6 +323,8 @@ pub struct App {
     pub file_sel: Option<usize>,
     pub listen_only: bool,
     pub sample: bool,
+    /// Result of the last update check, shown in Settings.
+    pub update_status: String,
     pub role: Role,
     pub callsign: String,
     pub palette: Option<Palette>,
@@ -488,6 +491,7 @@ impl App {
             sample: false,
             role: Role::Station,
             callsign: String::new(),
+            update_status: s::UPDATE_NOT_CHECKED.to_string(),
             palette: None,
             confirm: None,
             modal_since: None,
@@ -1836,7 +1840,36 @@ impl App {
             Message::ShowSample(on) => self.load_sample(on),
             Message::Profile(p) => self.profile = p,
             Message::Level(v) => self.level = v,
-            Message::CheckUpdates => self.toast(s::SET_CHECK_DONE, ToastKind::Info),
+            Message::CheckUpdates => {
+                if self.update_status != s::UPDATE_CHECKING {
+                    self.update_status = s::UPDATE_CHECKING.to_string();
+                    return Task::perform(
+                        async {
+                            std::thread::spawn(|| crate::update::check(env!("CARGO_PKG_VERSION")))
+                                .join()
+                                .unwrap_or_else(|_| Err("the check stopped".into()))
+                        },
+                        Message::UpdateChecked,
+                    );
+                }
+            }
+            Message::UpdateChecked(result) => match result {
+                Ok(crate::update::Outcome::UpToDate) => {
+                    self.update_status = s::UPDATE_CURRENT.to_string();
+                }
+                Ok(crate::update::Outcome::Newer(latest)) => {
+                    self.update_status = s::UPDATE_NEWER.replace("{v}", &latest.version);
+                    let text = self.update_status.clone();
+                    self.toast(&text, ToastKind::Info);
+                    if !latest.url.is_empty() {
+                        let _ = open_in_browser(&latest.url);
+                    }
+                }
+                Err(_) => {
+                    self.update_status = s::UPDATE_FAILED.to_string();
+                    self.toast(s::UPDATE_FAILED, ToastKind::Warning);
+                }
+            },
         }
         Task::none()
     }

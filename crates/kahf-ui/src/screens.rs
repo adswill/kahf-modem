@@ -1262,7 +1262,7 @@ impl App {
         let updates = column![
             muted(s::SET_UPDATES_DESC),
             key_value(s::SET_VERSION, env!("CARGO_PKG_VERSION")),
-            key_value(s::STATUS_UPDATES, s::UPDATE_NOT_CHECKED),
+            key_value(s::STATUS_UPDATES, self.update_status.as_str()),
             tip(
                 btn(s::SET_CHECK, Kind::Secondary).on_press(Message::CheckUpdates),
                 s::TIP_CHECK
