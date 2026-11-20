@@ -4,6 +4,7 @@ pub mod access;
 pub mod auth;
 pub mod bandplan;
 pub mod blank;
+pub mod burst;
 pub mod extras;
 pub mod frame;
 pub mod image;

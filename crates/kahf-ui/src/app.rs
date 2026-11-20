@@ -2510,3 +2510,29 @@ mod config_dir_tests {
         assert_eq!(config_dir_from(None, None, false), None);
     }
 }
+
+#[cfg(test)]
+mod smoke {
+    use super::*;
+
+    /// Headless smoke test for CI: every section builds its widget tree and lays out
+    /// in an offscreen window (no GPU, no display) without panicking, and the
+    /// navigation shows that section's label.
+    #[test]
+    fn every_section_renders() {
+        let settings = iced::Settings {
+            default_font: crate::theme::UI_FONT,
+            ..Default::default()
+        };
+        for section in Section::ALL {
+            let mut app = App::init();
+            app.section = section;
+            let mut sim =
+                iced_test::Simulator::with_size(settings.clone(), iced::Size::new(1280.0, 800.0), app.view());
+            assert!(
+                sim.find(section.label()).is_ok(),
+                "{section:?} screen did not render its label"
+            );
+        }
+    }
+}

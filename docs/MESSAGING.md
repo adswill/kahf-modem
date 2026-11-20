@@ -49,7 +49,25 @@ recipient status: Queued, Held, Sent, Delivered, Read, Failed, Expired; `overall
   from relay bulk limits. Emergency text still needs the two-step confirmation in
   `payload_urgent`.
 
+## Daemon API (`kahf_daemon::Engine`)
+
+- `heard_stations(limit)`: stations heard on air, most recent first (`kahf_core::msg::heard::Heard`:
+  call, last heard, count, SNR, position, grid, status). Link peers and senders of received
+  messages are recorded automatically and saved as `heard.txt` in the data folder.
+- `note_beacon(payload)`: feed any location beacon payload heard on air (position or grid beacon).
+  Updates the heard list and fills the contact's QTH with the grid when it is empty, so the 17 m
+  route planner knows where stations are. Returns `(callsign, grid)`.
+
+- Group chat: `join_group(name, invite)` (invite lists callsigns to tell, for example picked from
+  `heard_stations`), `leave_group`, `send_group(name, text)` (one chat per known member through
+  the outbox, so members that are off air get it when reached) and `groups()`. A group message
+  shows up as an `Event::Message` from the sender with text `#GROUP text`; control lines never
+  show. Replies to a join (the member list) are queued and, like all unattended sends, go out only
+  while an operator link or relay mode is active. Saved as `groups.txt`.
+
 ## Not wired yet
 
-The daemon does not call `Messenger` yet; the integration (feed `on_heard` from the receive path,
-persist `snapshot`, surface events) is the next change. The API above is what the UI will bind to.
+The mailbox, receipts, groups and beacon scheduler (`Messenger`) are not driven by the daemon's
+worker yet, and the daemon does not transmit or decode beacons on its own; the daemon's outbox
+already retries messages to stations that were not reached. Next steps are feeding `Messenger`
+from the receive path and sending beacons from `Messenger::tick`.
