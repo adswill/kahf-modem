@@ -10,7 +10,10 @@ use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{canvas, image, operation, text_editor};
 use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
-use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, RelayStep, TxState};
+use kahf_daemon::{
+    Area, Config, Engine, Event as EngineEvent, RelayAck, RelayStep, ServerSync, ServerSyncOptions, TxState,
+    RELAY_SERVER_URL,
+};
 
 use crate::live::{self, Live};
 use crate::sample::{self, Kind};
@@ -290,6 +293,7 @@ pub enum Message {
     LogExport,
     OpenMap,
     Callsign(String),
+    Locator(String),
     RoleChosen(Role),
     AudioIn(String),
     AudioOut(String),
@@ -375,6 +379,12 @@ pub struct App {
     pub setup_focus: Option<usize>,
     pub tx_intro_seen: bool,
     pub rig_addr: String,
+    /// Maidenhead locator; the relay server is told which square this relay serves.
+    pub locator: String,
+    /// Keeps this relay registered and scheduled on the server while relay mode runs.
+    server_sync: Option<ServerSync>,
+    /// Why the server sync is not running while relay mode is, if it is not.
+    pub server_note: Option<&'static str>,
     pub detected_audio: Vec<String>,
     pub detected_sdr: Vec<String>,
     pub composer: text_editor::Content,
@@ -534,6 +544,9 @@ impl App {
             setup_focus: None,
             tx_intro_seen: false,
             rig_addr: String::new(),
+            locator: String::new(),
+            server_sync: None,
+            server_note: None,
             detected_audio: Vec::new(),
             detected_sdr: Vec::new(),
             composer: text_editor::Content::new(),
@@ -917,6 +930,7 @@ impl App {
 
     /// Drops the engine so the next use rebuilds it with the new settings.
     fn restart_engine(&mut self) {
+        self.stop_server_sync();
         self.engine = None;
         self.connect_try = None;
         self.link = None;
@@ -975,6 +989,7 @@ impl App {
                 .into(),
             ),
             ("rigctld", self.rig_addr.clone()),
+            ("locator", self.locator.clone()),
         ]
     }
 
@@ -1000,6 +1015,7 @@ impl App {
             _ => RigControl::None,
         };
         self.rig_addr = get("rigctld");
+        self.locator = get("locator");
     }
 
     /// Finishes setup. Refused, with a sentence on what to do, until a callsign is set.
@@ -1080,6 +1096,8 @@ impl App {
         // The daemon decides whether relay mode runs; the role shown follows it.
         if self.role.is_relay() && !engine.relay_running() {
             self.role = Role::Station;
+            self.server_sync = None;
+            self.server_note = None;
         }
         self.outbox = engine.outbox_pending().len();
         for ev in events {
@@ -1106,7 +1124,8 @@ impl App {
             .station_sel
             .and_then(|i| self.live.stations.get(i))
             .map(|c| c.call.clone());
-        self.live.refresh(self.engine.as_ref(), &self.data_dir);
+        self.live
+            .refresh(self.engine.as_ref(), self.server_sync.as_ref(), &self.data_dir);
         self.station_sel = selected.and_then(|call| self.live.stations.iter().position(|c| c.call == call));
     }
 
@@ -1293,6 +1312,7 @@ impl App {
             Ok(()) => {
                 self.role = role;
                 self.toast(s::TOAST_RELAY_STARTED, ToastKind::Info);
+                self.start_server_sync();
             }
             Err(why) => {
                 // Relay stays off.
@@ -1300,6 +1320,41 @@ impl App {
                 self.toast(&why, ToastKind::Warning);
             }
         }
+    }
+
+    /// Registers this relay with the relay server and keeps its schedule current.
+    /// Relay mode still runs on the air without it; the Relay screen says why it is off.
+    fn start_server_sync(&mut self) {
+        self.server_sync = None;
+        let Some((lat, lon)) = live::locator_position(&self.locator) else {
+            self.server_note = Some(s::SERVER_NEEDS_LOCATOR);
+            return;
+        };
+        let started = match (Area::from_position(lat, lon), self.engine.as_ref()) {
+            (Ok(area), Some(e)) => e.start_server_sync(ServerSyncOptions {
+                base_url: RELAY_SERVER_URL.to_string(),
+                area,
+                requests: Vec::new(),
+            }),
+            (Err(e), _) => Err(e),
+            (_, None) => Err(s::BLOCK_NO_ENGINE.to_string()),
+        };
+        match started {
+            Ok(sync) => {
+                self.server_sync = Some(sync);
+                self.server_note = None;
+            }
+            Err(why) => {
+                self.server_note = Some(s::SERVER_NOT_STARTED);
+                self.note_event(why);
+            }
+        }
+        self.live_at = None;
+    }
+
+    fn stop_server_sync(&mut self) {
+        self.server_sync = None;
+        self.server_note = None;
     }
 
     fn set_band(&mut self, b: spectrum::Band) {
@@ -1790,6 +1845,10 @@ impl App {
                 self.restart_engine();
                 self.save();
             }
+            Message::Locator(l) => {
+                self.locator = l.trim().chars().take(6).collect();
+                self.save();
+            }
             Message::RoleChosen(r) => {
                 if r.is_relay() && !self.role.is_relay() {
                     // Starting relay mode always asks, every time.
@@ -1801,6 +1860,7 @@ impl App {
                         if let Some(e) = self.engine.as_ref() {
                             e.stop_relay();
                         }
+                        self.stop_server_sync();
                         self.relay_reset();
                     }
                     self.role = r;
@@ -2161,6 +2221,16 @@ mod tests {
             .iter()
             .all(|(hz, _)| (18_111_000.0..=18_120_000.0).contains(hz)));
         assert!(!spectrum::channels().is_empty());
+    }
+
+    #[test]
+    fn server_sync_needs_a_locator() {
+        let mut app = App::init();
+        app.start_server_sync();
+        assert_eq!(app.server_note, Some(s::SERVER_NEEDS_LOCATOR));
+        let _ = app.update(Message::Locator(" kp20le7 ".into()));
+        assert_eq!(app.locator, "kp20le");
+        assert!(app.state().contains(&("locator", "kp20le".to_string())));
     }
 
     #[test]

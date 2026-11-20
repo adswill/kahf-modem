@@ -191,6 +191,18 @@ pub const COL_DURATION: &str = "Duration";
 pub const COL_DIR: &str = "Direction";
 pub const COL_FROM_TO: &str = "From and to";
 pub const RELAY_OUTBOX: &str = "Waiting to send";
+pub const RELAY_SERVER: &str = "Relay server";
+pub const SERVER_STATUS: &str = "Status";
+pub const SERVER_REGISTERED: &str = "Registered";
+pub const SERVER_NOT_REGISTERED: &str = "Not registered yet";
+pub const SERVER_SCHEDULE: &str = "Schedule";
+pub const SERVER_NO_SCHEDULE: &str = "None received yet";
+pub const SERVER_NEXT: &str = "Next contact (UTC)";
+pub const SERVER_ERROR: &str = "Last problem";
+pub const SERVER_NEEDS_LOCATOR: &str =
+    "Set your grid locator in Settings, then start relay mode again to register with the relay server.";
+pub const SERVER_NOT_STARTED: &str =
+    "The relay server could not be reached from this station. See Last events.";
 pub const RELAY_EV_HELD: &str = "Holding a message from";
 pub const RELAY_EV_SENT: &str = "Relayed a message from";
 pub const RELAY_EV_DROPPED: &str = "Did not relay a message from";
@@ -235,6 +247,10 @@ pub const SET_STATION: &str = "Station";
 pub const SET_STATION_DESC: &str = "Who you are on air.";
 pub const SET_CALLSIGN: &str = "Callsign";
 pub const SET_CALLSIGN_DESC: &str = "Sent with every transmission.";
+pub const SET_LOCATOR: &str = "Grid locator";
+pub const SET_LOCATOR_DESC: &str =
+    "Your Maidenhead square, such as KP20. A relay tells the relay server which area it serves.";
+pub const SET_LOCATOR_BAD: &str = "Use four or six characters, such as KP20 or KP20le.";
 pub const SET_FINGERPRINT: &str = "Key fingerprint";
 pub const SET_FINGERPRINT_DESC: &str = "Other stations use this to check your signed messages.";
 pub const SET_FINGERPRINT_NONE: &str = "No key created yet";
