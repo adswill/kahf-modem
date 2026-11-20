@@ -1630,6 +1630,7 @@ impl App {
             }
             Message::AttachPath(p) => self.attach_path = p,
             Message::RigAddr(a) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig_addr = a;
                 self.restart_engine();
                 self.save();
@@ -1852,6 +1853,7 @@ impl App {
                 }
             }
             Message::AudioIn(d) => {
+                self.tests[Probe::AudioIn as usize] = None;
                 self.audio_in = d;
                 self.restart_engine();
                 self.save();
@@ -1870,11 +1872,13 @@ impl App {
                 self.save();
             }
             Message::AudioOut(d) => {
+                self.tests[Probe::AudioOut as usize] = None;
                 self.audio_out = d;
                 self.restart_engine();
                 self.save();
             }
             Message::RigChosen(r) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig = r;
                 self.restart_engine();
                 self.save();

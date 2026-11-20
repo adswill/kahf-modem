@@ -17,13 +17,25 @@ pub fn test_rig(addr: &str) -> Result<String, String> {
     if addr.is_empty() {
         return Err("No rigctld address is set.".into());
     }
-    let sock = addr
+    let socks: Vec<_> = addr
         .to_socket_addrs()
         .map_err(|_| format!("\"{addr}\" is not a host:port address."))?
-        .next()
-        .ok_or_else(|| format!("\"{addr}\" did not resolve."))?;
-    let mut stream = TcpStream::connect_timeout(&sock, RIG_TIMEOUT)
-        .map_err(|e| format!("Cannot reach rigctld at {addr}: {e}. Is it running?"))?;
+        .collect();
+    let mut last = None;
+    let mut stream = None;
+    for sock in &socks {
+        match TcpStream::connect_timeout(sock, RIG_TIMEOUT) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| match last {
+        Some(e) => format!("Cannot reach rigctld at {addr}: {e}. Is it running?"),
+        None => format!("\"{addr}\" did not resolve."),
+    })?;
     let _ = stream.set_read_timeout(Some(RIG_TIMEOUT));
     let _ = stream.set_write_timeout(Some(RIG_TIMEOUT));
     stream

@@ -102,7 +102,8 @@ pub fn init(dir: &Path) {
 /// Appends one line. Does nothing before `init` or if the disk refuses.
 pub fn log(level: &str, message: &str) {
     if let Some(m) = SINK.get() {
-        if let Ok(mut sink) = m.lock() {
+        // try_lock: a panic raised while the lock is held must not deadlock the hook.
+        if let Ok(mut sink) = m.try_lock() {
             let line = format!("{} {level} {}\n", stamp(), message.replace('\n', " "));
             write_line(&mut sink, &line);
         }
