@@ -26,66 +26,41 @@ it on the frequency you use.
 
 ## 3. Install and start KAHF
 
-There is no installer yet. The desktop app is in progress. For now you build KAHF from source
-with Rust (the `cargo` tool).
+Download the archive for your system from the Releases page of the repository, together with
+`SHA256SUMS.txt`. Check the download with `sha256sum -c SHA256SUMS.txt` (macOS: `shasum -a 256 -c`).
 
-### All systems
+- **macOS (Apple silicon):** unzip, move `KAHF.app` to Applications. The app is not signed yet.
+  Open it with right-click, Open.
+- **Windows x64:** unzip and run `KAHF.exe`. If Windows warns, choose More info, then Run anyway.
+- **Linux x64:** unpack the archive and run `./kahf`.
 
-1. Install Rust from https://rustup.rs and follow its steps.
-2. Download the source code of the repository.
-3. Open a terminal in the folder that holds the repository.
-4. Build the desktop app:
+Each archive also holds `kahf-cli`, a command-line tool. KAHF does not update itself. Download a
+new release when you want one.
 
-   ```
-   cargo build --release -p kahf-gui
-   ```
+To build from source instead, see `docs/BUILD.md`. The desktop app is the `kahf-ui` crate:
+`cargo run --release -p kahf-ui`.
 
-5. Start it:
-
-   ```
-   cargo run --release -p kahf-gui
-   ```
-
-   The built program is in `target/release/`. It is named `kahf-gui` on macOS and Linux,
-   and `kahf-gui.exe` on Windows.
-
-### macOS
-
-- Install the Xcode command line tools if you do not have them: `xcode-select --install`.
-- If a build step asks for HackRF or RTL-SDR libraries, that is only for SDR use. Install them
-  with Homebrew: `brew install hackrf librtlsdr`.
-
-### Linux
-
-- Install the ALSA development package for your system. On Debian and Ubuntu it is
-  `libasound2-dev`. The sound-card layer needs it to build.
-- SDR libraries are needed only for SDR use. See the README.
-
-### Windows
-
-- Install the Visual Studio C++ build tools, which rustup asks for on Windows.
-- The settings folder uses the `HOME` variable. Windows often does not set it. If the data
-  folder looks wrong, set the data folder in Settings to a folder you choose.
+Settings are saved in `%APPDATA%\kahf` on Windows and `~/.config/kahf` elsewhere.
 
 ## 4. First-run setup
 
-When KAHF starts for the first time, the top bar shows **No callsign set**. Open **Settings**
-in the left sidebar. Set these values, then click **Save**.
+The first time KAHF starts, and whenever no callsign or no receiving path is set, a **Set up KAHF**
+screen opens. Work through it from the top. You can change every choice later in **Settings**,
+which also has **Run the full setup**.
 
-- **Callsign.** Three to ten letters or digits, no spaces. It is sent with every transmission.
-- **Audio input** and **Audio output.** Pick your sound-card devices from the drop-down lists,
-  or leave **System default**. In this build the lists are empty, so **System default** is the
-  normal choice.
-- **Rig control address.** Optional. Use `host:port`, for example `127.0.0.1:4532`, if you run
-  a rig control program (rigctld). Leave it empty if you do not.
-- **SDR setting.** Optional. Leave it empty to use the sound card.
-- **Data folder.** Where recent stations and received files are kept. The default is a folder
-  named `.kahf` in your home folder. KAHF always keeps its `gui.conf` settings file there.
-- **Theme.** Dark or Light.
+- **Callsign.** Your own callsign. It is sent with every transmission, and setup will not finish
+  without it.
+- **Rig control.** None (you tune by hand), Serial CAT through a rig control program (rigctld),
+  or VOX. For CAT, enter the rigctld address as `host:port`, for example `127.0.0.1:4532`.
+- **Receiver.** A sound card, or an SDR such as a HackRF or RTL-SDR.
+- **Audio input** and **Audio output.** Pick your sound-card devices from the lists. KAHF lists the
+  devices it finds.
 
-If you change settings while a link is open, they apply after you disconnect.
+Setup shows each step as **Done** or **Needs attention**. KAHF starts in **Listen only**, so nothing
+is transmitted until you turn that off in Settings or the top bar.
 
-KAHF starts the radio engine only when you first connect or send. It does not start at launch.
+**Show sample data** in Settings is off by default. Leave it off for real use; turn it on only to
+look at the screens with example stations and messages.
 
 ## 5. The main screen
 
@@ -93,14 +68,8 @@ The window has these parts.
 
 - **Top bar.** Your callsign, the link status, the frequency in large numbers, the band and
   mode, the transmit and receive state, a **Listen only** button, and the UTC clock.
-- **Left sidebar.** Four groups:
-  - **Connect.** The station callsign box, and the **Connect** and **Disconnect** buttons.
-    Below them is a line that says what the link is doing.
-  - **Stations.** Stations you have connected to, with the time last heard and a count of
-    unread messages. Click a callsign to choose it.
-  - **Relay.** Shown only when this station is set up as a relay. In this build it is not shown.
-    See section 9.
-  - **Settings.** Every setting, in one page.
+- **Left sidebar.** The sections: Operate, Stations, Messages, Mail, Files, Relay, Logbook, Map
+  and Settings.
 - **Centre.** The spectrum and the waterfall, with the messages under them. The spectrum shows
   signal strength across the frequencies. The waterfall shows the same signals over time.
 - **Right column.** The link state, the transmit state (queue, last transmit, speed and frame
@@ -108,8 +77,11 @@ The window has these parts.
   message, and the event log.
 - **Status bar.** Plain-language messages about what KAHF has just done or refused to do.
 
-A second screen design, called kahf-ui, is also in the code. It shows sample data and does not
-use the radio. Do not use it for real work.
+The older `kahf-gui` window is still in the code but is no longer released.
+
+> **Note.** Sections 6 to 13 were written for `kahf-gui` and are being revised for the current
+> app. Button names and where things sit can differ. The rules they describe (confirm before
+> transmitting, Listen only, private is not encryption) still hold.
 
 ## 6. Connect to a station
 
