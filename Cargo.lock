@@ -2800,6 +2800,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kahf-export"
+version = "1.0.0"
+dependencies = [
+ "kahf-log",
+ "ureq",
+]
+
+[[package]]
 name = "kahf-gui"
 version = "1.0.0"
 dependencies = [
