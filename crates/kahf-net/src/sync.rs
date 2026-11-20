@@ -17,6 +17,10 @@ pub struct SyncConfig {
     pub schedule_lead_s: u64,
     /// Wait this long after a schedule with no slots.
     pub empty_retry_s: u64,
+    /// Shortest wait between two schedule calls, so a schedule that is
+    /// already nearly over (or a station clock that runs ahead) cannot make
+    /// the client ask again and again.
+    pub min_refetch_s: u64,
     /// First wait after a failure; it doubles with each failure in a row.
     pub backoff_min_s: u64,
     /// Longest wait after failures. Errors that a retry cannot fix (a refused
@@ -33,6 +37,7 @@ impl SyncConfig {
             register_every_s: 12 * 3600,
             schedule_lead_s: 60,
             empty_retry_s: 300,
+            min_refetch_s: 30,
             backoff_min_s: 5,
             backoff_max_s: 900,
         }
@@ -61,6 +66,10 @@ pub struct RelaySync {
     schedule_until: u64,
     next_attempt: u64,
     failures: u32,
+    /// The last failure was "not registered". A registration that follows it
+    /// keeps the failure count, so a server that keeps forgetting the relay
+    /// is not asked twice every few seconds.
+    after_not_registered: bool,
 }
 
 impl RelaySync {
@@ -71,6 +80,7 @@ impl RelaySync {
             schedule_until: 0,
             next_attempt: 0,
             failures: 0,
+            after_not_registered: false,
         }
     }
 
@@ -89,6 +99,23 @@ impl RelaySync {
         self.registered_at.is_some()
     }
 
+    /// Replace the slot requests (for example after the relay's channels
+    /// changed). The current schedule is dropped and a new one is asked for
+    /// on the next step.
+    pub fn set_requests(&mut self, requests: Vec<SlotRequest>) {
+        self.cfg.requests = requests;
+        self.schedule_until = 0;
+        self.next_attempt = 0;
+    }
+
+    /// The relay refused the last schedule. Ask for a new one after a back-off
+    /// instead of waiting for the refused one to run out.
+    pub fn schedule_rejected(&mut self, now_unix: u64) {
+        self.schedule_until = 0;
+        self.failures = self.failures.saturating_add(1);
+        self.next_attempt = now_unix + self.backoff();
+    }
+
     /// Make at most one request, if one is due at `now_unix`.
     pub fn step<T: Transport>(&mut self, client: &Client<T>, key: &StationKey, now_unix: u64) -> Step {
         if now_unix < self.next_attempt {
@@ -101,6 +128,9 @@ impl RelaySync {
             return match client.register(key, &self.cfg.callsign, &self.cfg.area) {
                 Ok(r) => {
                     self.registered_at = Some(now_unix);
+                    if !self.after_not_registered {
+                        self.failures = 0;
+                    }
                     // Ask for slots straight away.
                     self.next_attempt = now_unix;
                     Step::Registered(r)
@@ -115,9 +145,12 @@ impl RelaySync {
         match client.schedule(key, &self.cfg.callsign, &self.cfg.requests) {
             Ok(s) => {
                 self.failures = 0;
+                self.after_not_registered = false;
                 self.schedule_until = s.end_unix().unwrap_or(0);
                 self.next_attempt = match s.end_unix() {
-                    Some(_) => self.next_schedule_time(now_unix),
+                    Some(_) => self
+                        .next_schedule_time(now_unix)
+                        .max(now_unix + self.cfg.min_refetch_s),
                     None => now_unix + self.cfg.empty_retry_s,
                 };
                 Step::Schedule(s)
@@ -143,17 +176,23 @@ impl RelaySync {
 
     fn fail(&mut self, e: Error, now_unix: u64) -> Step {
         self.failures = self.failures.saturating_add(1);
+        self.after_not_registered = e.is_not_registered();
         let wait = if e.is_retryable() || e.is_not_registered() {
-            let doubled = self
-                .cfg
-                .backoff_min_s
-                .saturating_mul(1u64 << (self.failures - 1).min(20));
-            doubled.min(self.cfg.backoff_max_s)
+            self.backoff()
         } else {
             self.cfg.backoff_max_s
         };
         self.next_attempt = now_unix + wait;
         Step::Failed(e)
+    }
+
+    /// Doubling wait for the current failure count, capped.
+    fn backoff(&self) -> u64 {
+        let doublings = self.failures.saturating_sub(1).min(20);
+        self.cfg
+            .backoff_min_s
+            .saturating_mul(1u64 << doublings)
+            .min(self.cfg.backoff_max_s)
     }
 }
 
@@ -328,5 +367,68 @@ mod tests {
         s.step(&c, &key(), T0);
         assert!(matches!(s.step(&c, &key(), T0), Step::Schedule(sc) if sc.slots.is_empty()));
         assert_eq!(s.next_attempt_unix(), T0 + 300);
+    }
+
+    #[test]
+    fn a_schedule_that_is_nearly_over_does_not_cause_a_tight_loop() {
+        let t = FakeTransport::default();
+        let c = Client::new(&t, "https://kahf.dev");
+        let mut s = RelaySync::new(cfg());
+        registered(&t);
+        schedule(&t, T0, 60);
+        s.step(&c, &key(), T0);
+        assert!(matches!(s.step(&c, &key(), T0), Step::Schedule(_)));
+        assert_eq!(s.next_attempt_unix(), T0 + 30, "waits the minimum gap");
+        assert_eq!(s.step(&c, &key(), T0), Step::Waiting);
+    }
+
+    #[test]
+    fn a_rejected_schedule_is_asked_for_again_after_a_back_off() {
+        let t = FakeTransport::default();
+        let c = Client::new(&t, "https://kahf.dev");
+        let mut s = RelaySync::new(cfg());
+        registered(&t);
+        schedule(&t, T0, 3600);
+        s.step(&c, &key(), T0);
+        s.step(&c, &key(), T0);
+        s.schedule_rejected(T0);
+        assert_eq!(s.next_attempt_unix(), T0 + 5);
+        schedule(&t, T0 + 5, 3600);
+        assert!(matches!(s.step(&c, &key(), T0 + 5), Step::Schedule(_)));
+    }
+
+    #[test]
+    fn new_requests_drop_the_current_schedule() {
+        let t = FakeTransport::default();
+        let c = Client::new(&t, "https://kahf.dev");
+        let mut s = RelaySync::new(cfg());
+        registered(&t);
+        schedule(&t, T0, 3600);
+        s.step(&c, &key(), T0);
+        s.step(&c, &key(), T0);
+        s.set_requests(cfg().requests);
+        schedule(&t, T0 + 1, 3600);
+        assert!(matches!(s.step(&c, &key(), T0 + 1), Step::Schedule(_)));
+    }
+
+    #[test]
+    fn registering_after_an_outage_resets_the_back_off() {
+        let t = FakeTransport::default();
+        let c = Client::new(&t, "https://kahf.dev");
+        let mut s = RelaySync::new(cfg());
+        for _ in 0..5 {
+            t.offline();
+            s.step(&c, &key(), s.next_attempt_unix());
+        }
+        let now = s.next_attempt_unix();
+        registered(&t);
+        t.answer(503, json!({"error": "busy"}));
+        s.step(&c, &key(), now);
+        s.step(&c, &key(), now);
+        assert_eq!(
+            s.next_attempt_unix(),
+            now + 5,
+            "first failure after a success waits the minimum"
+        );
     }
 }

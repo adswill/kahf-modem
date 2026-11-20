@@ -11,6 +11,9 @@ use std::fmt;
 /// Most slot requests the server takes in one call (`MAX_SCHEDULE_REQUESTS`).
 pub const MAX_SCHEDULE_REQUESTS: usize = 20;
 
+/// Longest slot the server books, in seconds (`SLOT_MAX_S`).
+pub const MAX_SLOT_S: u32 = 300;
+
 /// Largest latency budget the server takes, in seconds (`MAX_LATENCY_BUDGET_S`).
 pub const MAX_LATENCY_BUDGET_S: u32 = 3600;
 
@@ -205,8 +208,11 @@ impl<T: Transport> Client<T> {
                 q.channel_khz
             ))
         })?;
-        if q.duration_s == 0 {
-            return Err(Error::BadInput("a slot must last at least one second".into()));
+        if q.duration_s == 0 || q.duration_s > MAX_SLOT_S {
+            return Err(Error::BadInput(format!(
+                "a slot must last 1 to {MAX_SLOT_S} seconds, not {}",
+                q.duration_s
+            )));
         }
         let mut m = Map::new();
         m.insert("channel".into(), channel.into());
@@ -522,11 +528,22 @@ pub(crate) mod tests {
             ..ok
         };
         let zero = SlotRequest { duration_s: 0, ..ok };
+        let long = SlotRequest {
+            duration_s: 301,
+            ..ok
+        };
         let budget = SlotRequest {
             latency_budget_s: Some(3601),
             ..ok
         };
-        for reqs in [vec![], vec![ok; 21], vec![off_grid], vec![zero], vec![budget]] {
+        for reqs in [
+            vec![],
+            vec![ok; 21],
+            vec![off_grid],
+            vec![zero],
+            vec![long],
+            vec![budget],
+        ] {
             assert!(matches!(
                 c.schedule(&key(), "LY1ABC", &reqs),
                 Err(Error::BadInput(_))
