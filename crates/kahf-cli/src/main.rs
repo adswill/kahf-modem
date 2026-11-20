@@ -27,7 +27,7 @@ const USAGE: &str = "usage:
               (Monte-Carlo frame error rate, QPSK + LDPC, awgn SNR per real sample)
   kahf doctor (list audio, HackRF and RTL-SDR devices and check the SDR libraries)
   kahf audio-test [--device NAME] (read the input for 3 s and print its level)
-  kahf e2e --profile <awgn|two-path|freq-offset|clock-offset|fade> --snr <dB> --bytes <n> [--seed <n>]
+  kahf e2e --profile <awgn|two-path|freq-offset|clock-offset|fade|watterson-good|watterson-moderate|watterson-poor|watterson-flutter> --snr <dB> --bytes <n> [--seed <n>]
               (random file -> tx WAV -> channel -> rx WAV -> compare; exit 0 on PASS, 1 on FAIL)";
 
 enum Fail {
@@ -373,8 +373,12 @@ fn parse_profile(name: &str) -> Result<Profile, String> {
         "freq-offset" => Ok(Profile::FreqOffset),
         "clock-offset" => Ok(Profile::ClockOffset),
         "fade" => Ok(Profile::Fade),
+        "watterson-good" => Ok(Profile::WattersonGood),
+        "watterson-moderate" => Ok(Profile::WattersonModerate),
+        "watterson-poor" => Ok(Profile::WattersonPoor),
+        "watterson-flutter" => Ok(Profile::WattersonFlutter),
         _ => Err(format!(
-            "unknown profile {name} (awgn, two-path, freq-offset, clock-offset, fade)"
+            "unknown profile {name} (awgn, two-path, freq-offset, clock-offset, fade, watterson-good|moderate|poor|flutter)"
         )),
     }
 }
