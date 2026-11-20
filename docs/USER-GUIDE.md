@@ -79,135 +79,135 @@ The window has these parts.
 
 The older `kahf-gui` window is still in the code but is no longer released.
 
-> **Note.** Sections 6 to 13 were written for `kahf-gui` and are being revised for the current
-> app. Button names and where things sit can differ. The rules they describe (confirm before
-> transmitting, Listen only, private is not encryption) still hold.
-
 ## 6. Connect to a station
 
-1. Type the other station's callsign in the **Connect** box. The box checks the format.
-2. Click **Connect**. A window called **Transmit and connect?** opens. It shows:
-   - the callsign that will be sent (yours),
-   - the station you are calling,
-   - the frequency,
-   - the mode (QPSK).
-3. Read it. Click **Transmit and connect** to send the connection request, or **Cancel** to
-   stop. If you cancel, the status bar says **Connection cancelled. Nothing was sent.**
+You do not need a separate connect step to send a message. Open **Operate**, type the other
+station's callsign in **To**, write the message and press **Send**. The app connects for you.
 
-After you confirm, the link line moves through these steps:
+To connect without sending, type the callsign in **Station** in the right column and choose
+**Connect...**.
 
-- **Connecting to XX1XX. Waiting for the other station.** Your radio has sent the request and
-  KAHF is waiting for a reply.
-- **Connected to XX1XX.** The other station has answered and the link is open.
-- **Disconnecting.** The link is closing.
-- **Not connected.** The link is closed.
+Either way, a **Transmit now?** window opens first. It shows the action, the station, your
+callsign and the frequency. Read it. Choose **Transmit** to go ahead, or **Cancel** (or press
+Escape). Nothing is sent until you choose **Transmit**.
 
-If there is no reply, KAHF gives up after about 6 seconds. The event log then shows
-**No reply to the connection request**.
+The **Link** panel shows the state: **No link** or **Linked**. If the other station does not
+answer, the event log says so and nothing is left open.
 
-To close the link, click **Disconnect**. A window asks **Disconnect from XX1XX now?**. Click
-**Disconnect** again to close it, or **Stay connected** to keep it open.
+To close a link, choose **Disconnect**. A **Disconnect?** window warns that anything still being
+sent will stop. Choose **Disconnect** again, or **Keep link** to stay connected.
+
+**Send beacon** sends a short call so other stations can hear you. It asks for the same
+confirmation.
 
 ## 7. Send a message, mail and a file
 
-First choose a station in the **Stations** list, or type its callsign and connect. The
-**Messages** area then shows the station you are talking to.
-
 ### Message
 
-1. Make sure **Message** is selected above the text box.
-2. Type your text. Press **Ctrl+Enter** or click **Send**.
-3. The message is added to the outbox. The outbox count shows how many are still waiting.
+1. Open **Operate**. In **To**, type the callsign.
+2. Write the text. The limit is 500 characters.
+3. Choose a **Kind**: Chat, Urgent, Signed or Private (see sections 12 and 13).
+4. Press **Send** or **Ctrl+Enter**, then confirm in the **Transmit now?** window.
+
+**Messages** lists your conversations. A message that cannot go out yet stays in the outbox.
 
 ### Mail
 
-1. Click **Mail**.
-2. Enter a **Subject**. The send button stays off until there is a subject.
-3. Type the mail text.
-4. To add a file, click **Attach**, type its full path, and click **Add to mail**.
-5. Click **Send mail**.
+1. Open **Mail** and choose **Write mail**.
+2. Fill in **To**, **Subject** and the text. Tick **Sign this mail** to sign it.
+3. To add a file, choose **Attach file** and enter its path.
+4. Choose **Queue for sending**. The mail goes out when you confirm the transmission.
+
+Received mail appears in the inbox. Choose a message to read it.
 
 ### File
 
-1. Click **Send file** (in Message mode).
-2. Type the full path of the file.
-3. Click **Send file**. If the path does not point to a file, KAHF says
-   **No file at that path. Check the path and try again.**
+1. On **Operate**, choose **Attach file** (or **Send a file** on the Files page).
+2. Type the full path of the file and choose **Send file**.
+3. Confirm in the **Transmit now?** window.
 
-Progress appears in the file list. Each item shows whether it is waiting, active, paused,
-done or cancelled.
+**Files** lists each transfer with its size, progress and state: Waiting, Active, Paused, Done or
+Cancelled. You can **Start**, **Pause** or **Cancel** a transfer there. Every file carries a
+checksum, so a damaged file is detected.
 
-### The confirmation before transmitting
+### Stations, logbook and the map
 
-Connecting shows the **Transmit and connect?** window described in section 6. Nothing is sent
-until you click its **Transmit and connect** button.
-
-In this build, messages, mail and files have no separate confirmation window. Clicking **Send**
-queues them for sending. Before you click, check the frequency, that your radio is in the right
-mode, and that **Listen only** is off if you do want to transmit.
+- **Stations** lists stations heard, with last heard time and how often. Use the filter box to
+  find one.
+- **Logbook** records each completed link. **Export ADIF** writes `logbook.adi` to the data
+  folder, ready to import into logging software.
+- **Map** opens the live map at https://kahf.dev/map in your browser. The app does not draw a
+  map itself.
 
 ## 8. Listen only
 
-**Listen only** means KAHF never transmits. When it is on:
+**Listen only** means KAHF never transmits. KAHF starts with it on. While it is on, nothing leaves
+your computer, even if a message is waiting, and the right column says **Transmit is off because
+Listen only is on**.
 
-- **Connect** is disabled.
-- **Send** is disabled.
-- Nothing leaves your radio, even if a message is waiting.
-
-Turn it on with the **Listen only** button in the top bar, or with the tick box in Settings
-under **Transmit**. The status bar confirms the change. Turn it off again to transmit.
-
-Use Listen only when you only want to hear what is on the channel.
+Turn it off or on with the **Listen only** control in the top bar, **Ctrl+L**, the command palette
+(**Ctrl+K**), the **Turn off Listen only** button in the right column, or **Settings**.
 
 ## 9. The relay role
 
-A relay passes messages between stations that cannot hear each other. A relay station works
-to a schedule. Only the relay-role parts of the code are written; the desktop app does not yet
-let you set the role or see a schedule. **Coming later.**
+A relay passes messages between stations that cannot hear each other. It works to a schedule.
 
-When it is available, a relay station asks the operator to:
+1. Open **Settings** and set **Role** to **Relay** or **Station and relay**.
+2. A **Relay mode** window explains the legal position. In some countries an automatic station
+   needs a licence. In Finland it needs a permit from Traficom. Tick both boxes (your licence
+   and the terms) and choose **Start relay**. KAHF asks again every time relay mode starts.
+3. Open **Relay**. It shows the **Schedule**, **Statistics**, **Waiting to send** and the
+   **Hop log** of messages forwarded.
+4. A schedule offered by the network must be accepted before it runs. Choose **Accept** or
+   **Decline** on each one. A relay sends only inside an accepted slot.
 
-- keep the radio on for the times in the schedule,
-- accept or decline a schedule before it runs,
-- follow the send and receive slots. A radio that cannot receive while it transmits must take
-  turns.
+Do not take on the relay role unless you can keep the station running as agreed. The relay
+works on the 17 m relay segment, and the radio must take turns between receiving and sending.
 
-Do not take on the relay role unless you can keep the station running as agreed.
+How radio relay works in the engine:
+
+- A message waits two minutes for its station. If the station is not reached and you have named
+  relays, the log says **Could not reach XX1XX on air. It goes by radio relay through ... once
+  connected.** Connect to one of those relays and the message goes to it.
+- A relay in relay mode, with **Relay other stations' messages** on, holds a message for another
+  station. In its next transmit slot it calls that station, passes the message on exactly as
+  heard (the signature and the private mark stay), and hangs up when the station has
+  acknowledged it. A relay does not show these messages in its own inbox.
+- Each message is passed on once. Copies heard again and messages that loop back are dropped.
+  A relay holds at most 64 messages for other stations.
+- A relay that cannot reach the station either passes the message to its own relays, so a
+  message can cross several relays (up to four hops are planned).
+- Relays work on 17 m by default, 18.111 to 18.120 MHz, in three 2.7 kHz channels. IARU Region 1
+  marks this part of 17 m for digital modes and automatically controlled data stations. It sits
+  above the 18.110 MHz beacon and clear of FT8 and FT4. Check your own country's rules.
+- Which relays to name can come from the route planner, which estimates when 17 m is open
+  between each pair of stations: ground wave up to about 30 km, sky wave from the MUF and LUF.
+  Between those two there is a skip zone, where two nearby stations cannot hear each other on
+  17 m and need a distant relay. The planner is an estimate and has not been checked against
+  real contacts yet.
 
 ## 10. Location sharing
 
-Location sharing decides how much of your position other stations and a map may learn. There are
-three choices:
+Location sharing decides how much of your position other stations and the map may learn. Set it in
+**Settings**, **Location sharing**:
 
-- **Off.** Your position is not shared. This is the default.
-- **Precise.** Your position is shared to about 200 m. Anyone who can see the map can see it.
-- **Area.** The map shows a circle with a radius you choose, from 1 to 100 km (50 km by default).
-  Your position is somewhere inside the circle.
+- **Off.** Nobody sees your location. This is the default.
+- **Precise.** Your exact position is shared.
+- **Area.** Only a circle around you is shared. Set **Area radius** from 1 to 100 km.
 
-In this build the choice is saved in the settings file, but nothing uses it yet. No position is
-sent. The map is not in the desktop app. **Coming later.**
+The choice is saved with your other settings.
 
 ## 11. Internet relay
 
-Internet relay would let a message travel over the internet when a station cannot be reached on
-air. It is **off by default**. The engine has the switch for it, but the internet gateway is not
-available yet, so it cannot be turned on in this build. **Coming later.**
+Internet relay lets a message travel over the internet when a station cannot be reached on air. It
+is **off by default**. Turn it on with **Use internet relay** in **Settings**.
 
-When a message cannot reach its station on air, the status and event log say:
-
-> Could not reach XX1XX on air. The station did not respond on any relay path. Try again later,
-> or enable internet relay in Settings.
-
-This means KAHF waited about 2 minutes for the station and got no answer on any path. It is not
-an error in your setup. Try again later, or check that the other station is on frequency and
-listening.
-
-If internet relay were on and failed, the message would read
-**Could not reach ... and internet relay failed**. The message then stays in the outbox.
+When a message cannot reach its station on air, the status says so and the message stays in the
+outbox. Try again later, or check that the other station is on frequency and listening.
 
 ## 12. Signed messages
 
-A signed message carries a signature made with the sender's key. The signature proves:
+A signed message carries a signature made with your station key. The signature proves:
 
 - the content was not changed after it was signed,
 - it was signed by the key of the station named as the sender.
@@ -218,33 +218,24 @@ The signature does not:
 - prove who is at the keyboard.
 - prove that the sender is honest or that the message is true.
 
-The desktop app does not sign or check messages yet. **Coming later.**
+Choose **Signed** as the message **Kind**, or tick **Sign this mail**. Your key fingerprint is
+in **Settings**, **Station**. Other stations use it to check your signed messages. The label on a
+received message says who signed it.
 
 ## 13. Private messages are not encryption
 
-A **private** message is a routing rule. Only the addressee's station keeps it in its inbox. It
+A **Private** message is a routing rule. Only the addressee's station keeps it in its inbox. It
 is **not encryption**. The words are readable on air, and anyone with a receiver and the same
 mode can read them. Do not send anything on air that you would not say in plain speech.
 
-The engine can send a message marked private. The desktop app does not yet show the choice.
-**Coming later.**
-
 ## 14. Updates
 
-KAHF checks for updates only when you ask. It does not update itself without asking.
+KAHF checks for updates only when you ask. It never updates itself.
 
-There are two kinds of update prompt in the code:
-
-- **Optional update.** You can install it now or skip it. KAHF keeps working.
-- **Required update.** KAHF cannot transmit or receive until the update is installed. If you
-  choose to skip a required update, the **Accept** button stays off for 10 seconds. After you
-  accept the skip, KAHF will not transmit or receive until the update is installed.
-
-A message shown while a required update is pending says:
-**A required update is pending. Install it before you transmit.**
-
-The update prompt is not yet connected to the desktop window. The Settings line says
-**Update checks are not connected yet.** **Coming later.**
+Open **Settings**, **Updates**, and choose **Check for updates**. The line above the button shows
+the result: **Checking...**, **You have the newest version.**, or a message that the check failed.
+If a newer version exists, KAHF says so and opens its download page in your browser. Download and
+install it yourself, and check the file with `SHA256SUMS.txt`.
 
 ## 15. Troubleshooting
 

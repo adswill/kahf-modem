@@ -98,7 +98,9 @@ calls are not checked against each other's earlier slots.
 All channel numbers come from one constant, `BAND_SEGMENT_KHZ` in
 `src/core.js` (lower edge included, upper edge excluded), and the channel width
 `CHANNEL_WIDTH_KHZ` (2.7 kHz). `BAND_CHANNELS` is derived from them. The segment
-values are a working choice and must be confirmed before deployment.
+is the 17 m relay segment, 18.111 to 18.120 MHz, which holds 3 channels
+(centres 18112.35, 18115.05 and 18117.75 kHz). The segment values are a working
+choice and must be confirmed before deployment.
 
 ### POST /report
 
@@ -138,6 +140,14 @@ values are a working choice and must be confirmed before deployment.
 `signed_at` is covered by the signature and must be within 5 minutes of the server time (past or future). A removal can be used once; replaying it returns `409`.
 
 Responses: `200 {"ok":true,"removed":true}`, `400`, `401`, `409` (replayed), `403` (the record belongs to another key), `404` (no such record).
+
+## Relay client
+
+`crates/kahf-net` is the station side of `/register` and `/schedule`, and
+`Engine::start_server_sync` in `kahf-daemon` runs it while relay mode is on.
+Its channel grid (`ChannelGrid::RELAY_17M`) must match `BAND_SEGMENT_KHZ`
+here. `test/client-fixture.test.mjs` checks that these routes accept the bodies
+the Rust client makes (`test/fixtures/rust-client.json`).
 
 ## Signing
 
@@ -221,3 +231,28 @@ npx wrangler secret put RELEASE_PUBLIC_KEY
 Until it is set, `POST /release` answers `503`. The owner runs these steps by hand.
 
 Local development: `npx wrangler dev`.
+
+## HF backbone for relays
+
+Relays are always online and operators are radio-only, so relays carry messages for each
+other through this server (docs/NETWORK-SCENARIOS.md, section H). Code: `src/backbone.js`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /relay/heard` | `{relay, heard:[{callsign, snr?, at}], ts}`: records which relay last heard each callsign (kept 2 h from `at`; 1 to 200 entries). |
+| `POST /msg/submit` | `{relay, id, origin, dest, kind:"chat"\|"mail", subject?, body, created, ttl_s, hops, urgent?}`: the first submit of an `id` (`ORIGIN-<counter>`) wins and is queued for `dest`; a repeat returns `{ok:true, duplicate:true}` and stores nothing. `body` is base64, at most 1024 bytes (chat) or 4096 (mail). `ttl_s` is clamped to 30 min .. 48 h. |
+| `POST /msg/pull` | `{relay, callsigns:[...up to 100], ts}`: queued messages for the callsigns the relay hears now (at most 20, urgent first, then oldest) plus pending receipts for those callsigns as origin. Handed messages not receipted within 10 minutes can be pulled by any relay again. |
+| `POST /msg/receipt` | `{relay, id, status:"delivered"\|"failed", reason?}`: closes the message, removes the payload, stores a short receipt (24 h) for the origin. Only the relay holding the message may send it. |
+| `GET /relay/wanted` | Public: `{wanted:[callsigns]}` with queued messages (max 500), for beacons. |
+
+Signing is the same as `/register` and `/schedule`: the JSON body carries every field above
+plus `public_key` (base64, 32 bytes) and `signature` (base64, 64 bytes). The signature is
+Ed25519 over the canonical JSON (keys sorted, no whitespace) of the body without
+`public_key` and `signature`. The relay must be registered, and `public_key` must be the key
+it registered. `ts` is unix seconds and must be within 10 minutes of the server clock.
+Backbone requests may be up to 16 KB; a relay may make 600 backbone calls a minute (429 after).
+An expired message gives its origin a `failed` receipt with reason `expired`.
+
+`/schedule` plans transmit slots for the whole world: two relays never get overlapping
+transmit slots on one channel, whatever their area (HF skywave is global). A request that
+would overlap is shifted later, or left in `unplaced` when its latency budget is too short.

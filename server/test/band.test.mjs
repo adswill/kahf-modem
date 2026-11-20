@@ -22,16 +22,19 @@ const SIG = encodeBase64(new Uint8Array(64));
 test("band: channel count is derived from the one segment constant", () => {
   const span = BAND_SEGMENT_KHZ.high - BAND_SEGMENT_KHZ.low;
   assert.equal(BAND_CHANNELS, Math.floor(span / CHANNEL_WIDTH_KHZ));
-  assert.equal(BAND_CHANNELS, 129);
+  assert.equal(BAND_CHANNELS, Math.floor((span * 10) / (CHANNEL_WIDTH_KHZ * 10)));
   assert.ok(BAND_CHANNELS > 0);
   assert.ok(Object.isFrozen(BAND_SEGMENT_KHZ));
 });
 
 test("band: channelOf maps the segment edges and rejects what lies outside", () => {
   assert.equal(channelOf(BAND_SEGMENT_KHZ.low), 0);
-  assert.equal(channelOf(BAND_SEGMENT_KHZ.low + 3), 1);
-  assert.equal(channelOf(BAND_SEGMENT_KHZ.low + 27), 10);
-  assert.equal(channelOf(BAND_SEGMENT_KHZ.high - 3), BAND_CHANNELS - 1);
+  // Every channel's own lower edge and centre map back to that channel.
+  for (let n = 0; n < BAND_CHANNELS; n += 1) {
+    assert.equal(channelOf(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * n), n);
+    assert.equal(channelOf(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * (n + 0.5)), n);
+  }
+  assert.equal(channelOf(BAND_SEGMENT_KHZ.high - 1), BAND_CHANNELS - 1);
   assert.equal(channelOf(BAND_SEGMENT_KHZ.high), null);
   assert.equal(channelOf(BAND_SEGMENT_KHZ.low - 1), null);
   assert.equal(channelOf(NaN), null);
@@ -48,7 +51,7 @@ test("area keys: one-degree squares named by the south-west corner", () => {
 test("zone reports: out-of-band and undated records are skipped", () => {
   const base = { reporter_location: { mode: "precise", latitude: 51.5, longitude: -0.1 }, heard_at: "2026-11-17T11:59:00Z" };
   const reports = zoneReports([
-    { ...base, frequency_khz: BAND_SEGMENT_KHZ.low + 3 },
+    { ...base, frequency_khz: BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * 1.5 },
     { ...base, frequency_khz: BAND_SEGMENT_KHZ.high + 10 },
     { ...base, frequency_khz: 145_000, heard_at: "not a time" },
     { ...base, frequency_khz: 145_000, reporter_location: null },
@@ -88,7 +91,7 @@ test("register: callsign format and area format are checked", () => {
 test("schedule: a well-formed request is accepted with the relay normalised", () => {
   const s = validateSchedule({
     relay: "k1abc",
-    requests: [{ channel: 4, duration: 30, direction: "rx", urgent: true }],
+    requests: [{ channel: BAND_CHANNELS - 1, duration: 30, direction: "rx", urgent: true }],
     public_key: KEY,
     signature: SIG,
   });

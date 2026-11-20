@@ -8,8 +8,9 @@
 use crate::bandplan;
 
 /// Channel spacing in Hz. The default grid uses only channels that lie wholly inside a
-/// KAHF segment (bandplan::KAHF_SEGMENTS, IARU Region 1): 40 m 7.040 to 7.045 MHz and
-/// 20 m 14.101 to 14.112 MHz. That gives five channels. 14.070 to 14.100 MHz (beacons),
+/// KAHF segment (bandplan::KAHF_SEGMENTS, IARU Region 1): 40 m 7.040 to 7.045 MHz,
+/// 20 m 14.101 to 14.112 MHz and the 17 m relay segment 18.111 to 18.120 MHz. That gives
+/// eight channels. 14.070 to 14.100 MHz (beacons),
 /// 14.230 MHz (SSTV and FAX) and 30 m are left out on purpose.
 pub const DEFAULT_SPACING_HZ: f32 = 2_700.0;
 
@@ -227,10 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn default_grid_is_the_five_kahf_channels() {
+    fn default_grid_is_the_eight_kahf_channels() {
         let plan = Plan::default_plan();
         let freqs: Vec<f32> = plan.channels.iter().map(|c| c.0).collect();
-        // 40 m: one channel (7 041 350 Hz). 20 m: four channels from 14 102 350 Hz.
+        // 40 m: one channel (7 041 350 Hz). 20 m: four from 14 102 350 Hz. 17 m: three
+        // from 18 112 350 Hz.
         assert_eq!(
             freqs,
             vec![
@@ -238,7 +240,10 @@ mod tests {
                 14_102_350.0,
                 14_105_050.0,
                 14_107_750.0,
-                14_110_450.0
+                14_110_450.0,
+                18_112_350.0,
+                18_115_050.0,
+                18_117_750.0
             ]
         );
     }

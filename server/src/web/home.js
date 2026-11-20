@@ -130,7 +130,6 @@ export function homeBody() {
 <div class="wrap">
 <div class="hero">
 <div>
-<p class="label">HF digital modem and relay network</p>
 <h1 id="top-title">Messages, mail and files over <em>HF</em>, relayed when the path is not there.</h1>
 <p class="lede">KAHF is an amateur radio modem with a relay network, built for 17 metres. It runs from a sound card and an ordinary radio, or from an SDR.</p>
 <div class="cta"><a class="primary" href="/start">Get started</a><a href="/map">Open the live map</a><a href="/network">How the network works</a></div>
@@ -142,18 +141,16 @@ ${bandStrip()}
 
 <div class="wrap">
 <section class="sec" id="why17" aria-labelledby="why17-t">
-<p class="label"><b>01</b>Why 17 metres</p>
 <h2 id="why17-t">A quiet band that is open to the whole world.</h2>
-<div class="grid three">
-<div class="fact"><h3>100 kHz wide</h3><p>18.068 to 18.168 MHz. The same allocation in all three ITU regions, so one frequency plan works for every operator.</p></div>
-<div class="fact"><h3>Room for the modem</h3><p>One KAHF signal is 2.4 kHz wide. The band holds dozens of them side by side, with space between.</p></div>
-<div class="fact"><h3>Long daytime paths</h3><p>17 m carries well over intercontinental distances when the sun is up, and it is less crowded than 20 m.</p></div>
-</div>
+<dl class="ledger">
+<div><dt>Allocation</dt><dd class="v">18.068 to 18.168 MHz</dd><dd class="n">The same in all three ITU regions, so one frequency plan works for every operator.</dd></div>
+<div><dt>Width</dt><dd class="v">100 kHz</dd><dd class="n">One KAHF signal is 2.4 kHz wide. The band holds dozens side by side, with space between.</dd></div>
+<div><dt>Paths</dt><dd class="v">daytime, long</dd><dd class="n">17 m carries over intercontinental distances when the sun is up, and it is less crowded than 20 m.</dd></div>
+</dl>
 <p class="note">KAHF is not limited to 17 m. It works on any HF or VHF channel your licence allows, and warns when a frequency is outside the amateur segments.</p>
 </section>
 
 <section class="sec" id="what" aria-labelledby="what-t">
-<p class="label"><b>02</b>What it does</p>
 <h2 id="what-t">A message goes in at one radio and comes out at another.</h2>
 <div class="grid even">
 <div>
@@ -172,7 +169,6 @@ ${bandStrip()}
 </section>
 
 <section class="sec" id="relays" aria-labelledby="relays-t">
-<p class="label"><b>03</b>The relay network</p>
 <h2 id="relays-t">Stations that cannot hear each other can still talk.</h2>
 <div class="grid two">
 <div>
@@ -185,7 +181,6 @@ ${bandStrip()}
 </section>
 
 <section class="sec" id="how" aria-labelledby="how-t">
-<p class="label"><b>04</b>How a message travels</p>
 <h2 id="how-t">Five steps, 153 carriers, 2.4 kHz of audio.</h2>
 <div class="grid two">
 <figure class="diagram">${travelDiagram()}</figure>
@@ -206,12 +201,11 @@ ${bandStrip()}
 </section>
 
 <section class="sec" id="licences" aria-labelledby="lic-t">
-<p class="label"><b>05</b>Licence and responsibility</p>
 <h2 id="lic-t">Read this before you transmit.</h2>
 <div class="grid even">
 <div>
 <h3>Licence</h3>
-<p>Source-available. Copyright (c) 2026 adswill, all rights reserved. Nothing here grants a licence to copy or redistribute it.</p>
+<p>Free software under the GNU General Public License, version 3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill). You can use, study, change and share it. Changed versions, and programs built on it, must be shared under the same licence with their source.</p>
 <h3>Your responsibility</h3>
 <p>KAHF is for licensed amateur radio operators. You are responsible for staying inside your licence: bands, modes, power and rules on third-party traffic differ from country to country. KAHF asks you to confirm each transmission. It does not decide for you.</p>
 </div>

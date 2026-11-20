@@ -27,12 +27,14 @@ pub const MAX_CALLSIGN: usize = 15;
 pub const WINDOW: usize = 8;
 /// Largest data body carried by one DATA frame.
 pub const MAX_CHUNK: usize = MAX_PAYLOAD - 2;
-/// Handshake retransmit interval.
-pub const CONNECT_TIMEOUT_MS: u64 = 1000;
+/// Handshake retransmit interval. Like `DATA_TIMEOUT_MS` it must cover the peer's reply on
+/// air (about one second for a burst at 8 kHz), so the caller's clock should not run while
+/// the caller itself is transmitting.
+pub const CONNECT_TIMEOUT_MS: u64 = 2_500;
 /// Handshake retransmissions before giving up.
 pub const MAX_CONNECT_RETRIES: u32 = 5;
 /// DATA retransmit timeout.
-pub const DATA_TIMEOUT_MS: u64 = 500;
+pub const DATA_TIMEOUT_MS: u64 = 2_500;
 /// DATA retransmissions of one frame before the link drops to Idle.
 pub const MAX_DATA_RETRIES: u32 = 8;
 /// Highest suggested modulation level.
@@ -207,6 +209,12 @@ impl Link {
         let mut out = Vec::new();
         self.pump(&mut out);
         out
+    }
+
+    /// True when every data chunk handed to `send` has been acknowledged by the peer:
+    /// nothing is queued and nothing is in flight. A caller can hang up safely then.
+    pub fn is_flushed(&self) -> bool {
+        self.tx_queue.is_empty() && self.slots.iter().all(Option::is_none)
     }
 
     /// Advance the clock to `now_ms`: retransmit handshake and DATA frames whose timers
@@ -702,6 +710,18 @@ mod tests {
             n.send_a(&chunk);
         }
         assert_eq!(session::decode(&n.b_rx), Some(msg));
+    }
+
+    #[test]
+    fn flushed_only_once_the_peer_has_acknowledged_everything() {
+        let mut n = connected_pair();
+        assert!(n.a.is_flushed());
+        // Held on the wire: the frames are in flight, not acknowledged.
+        let acts = n.a.send(&[7u8; 100]);
+        n.apply(true, acts);
+        assert!(!n.a.is_flushed());
+        n.run();
+        assert!(n.a.is_flushed());
     }
 
     #[test]

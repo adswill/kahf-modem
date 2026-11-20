@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use kahf_core::relay::{Direction, Hop, Slot, Stats};
-use kahf_daemon::Engine;
+use kahf_daemon::{Engine, ServerSync, SyncStatus};
 use kahf_log::contacts::{self, Contact};
 use kahf_log::Qso;
 
@@ -33,6 +33,8 @@ pub struct Live {
     pub hops: Vec<Hop>,
     /// Outbox items as (id, description), in sending order.
     pub outbox: Vec<(u64, String)>,
+    /// What the relay server sync last did; None while it is not running.
+    pub server: Option<SyncStatus>,
     /// Why a data file could not be read, if one could not.
     pub file_error: Option<String>,
 }
@@ -40,7 +42,8 @@ pub struct Live {
 impl Live {
     /// Copies the engine's relay state and rereads the two data files.
     /// A file that cannot be read keeps its last good contents.
-    pub fn refresh(&mut self, engine: Option<&Engine>, data_dir: &Path) {
+    pub fn refresh(&mut self, engine: Option<&Engine>, sync: Option<&ServerSync>, data_dir: &Path) {
+        self.server = sync.map(ServerSync::status);
         match engine {
             Some(e) => {
                 self.stats = e.relay_stats();
@@ -81,6 +84,29 @@ impl Live {
     }
 }
 
+/// Centre of a Maidenhead locator square ("KP20" or "KP20le") as (latitude, longitude).
+pub fn locator_position(loc: &str) -> Option<(f64, f64)> {
+    let b = loc.trim().as_bytes();
+    if b.len() != 4 && b.len() != 6 {
+        return None;
+    }
+    let letter = |c: u8, max: u8| {
+        let c = c.to_ascii_uppercase();
+        (c.is_ascii_uppercase() && c - b'A' < max).then(|| f64::from(c - b'A'))
+    };
+    let digit = |c: u8| c.is_ascii_digit().then(|| f64::from(c - b'0'));
+    let mut lon = letter(b[0], 18)? * 20.0 - 180.0 + digit(b[2])? * 2.0;
+    let mut lat = letter(b[1], 18)? * 10.0 - 90.0 + digit(b[3])?;
+    let (w_lon, w_lat) = if b.len() == 6 {
+        lon += letter(b[4], 24)? * 2.0 / 24.0;
+        lat += letter(b[5], 24)? / 24.0;
+        (2.0 / 24.0, 1.0 / 24.0)
+    } else {
+        (2.0, 1.0)
+    };
+    Some((lat + w_lat / 2.0, lon + w_lon / 2.0))
+}
+
 /// Writes the logbook as ADIF next to it and returns the path written.
 pub fn export_adif(qsos: &[Qso], data_dir: &Path) -> Result<std::path::PathBuf, String> {
     let path = data_dir.join(ADIF_FILE);
@@ -113,6 +139,25 @@ pub fn time(hhmmss: &str) -> String {
 pub fn utc_hm(unix: u64) -> String {
     let day_s = unix % 86_400;
     format!("{:02}:{:02}", day_s / 3600, day_s % 3600 / 60)
+}
+
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// UTC hour (0 to 23) and month (1 to 12) of a unix time.
+pub fn utc_hour_month(unix: u64) -> (u8, u8) {
+    let hour = (unix % 86_400 / 3600) as u8;
+    // Civil-from-days (H. Hinnant), month only.
+    let z = (unix / 86_400) as i64 + 719_468;
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (hour, month as u8)
 }
 
 /// Seconds as "45 s", "15 min" or "1 h 30 min".
@@ -162,6 +207,19 @@ mod tests {
         assert_eq!(time("140530"), "14:05");
         assert_eq!(time("0912"), "09:12");
         assert_eq!(utc_hm(86_400 * 3 + 3600 * 7 + 60 * 5 + 9), "07:05");
+        assert_eq!(utc_hour_month(1_763_643_600), (13, 11)); // 2025-11-20 13:00
+        assert_eq!(utc_hour_month(0), (0, 1));
+        assert_eq!(utc_hour_month(951_782_400), (0, 2)); // 2000-02-29
+    }
+
+    #[test]
+    fn locators_give_the_square_centre() {
+        assert_eq!(locator_position("KP20"), Some((60.5, 25.0)));
+        let (lat, lon) = locator_position("kp20le").unwrap();
+        assert!((lat - 60.1875).abs() < 1e-9 && (lon - 24.958_333).abs() < 1e-5);
+        for bad in ["", "KP2", "ZZ20", "KP2X", "KP20zz", "KP20l"] {
+            assert_eq!(locator_position(bad), None, "{bad}");
+        }
     }
 
     #[test]
@@ -212,7 +270,7 @@ mod tests {
         }
 
         let mut live = Live::default();
-        live.refresh(None, &dir);
+        live.refresh(None, None, &dir);
         let calls: Vec<_> = live.stations.iter().map(|c| c.call.as_str()).collect();
         assert_eq!(calls, ["XX3CC", "XX1AA", "XX2BB"]);
         assert_eq!(live.qsos[0].call, "XX3CC");
@@ -269,6 +327,13 @@ mod tests {
                 heard_by_next: true,
             }],
             outbox: vec![(9, "relay of a message from XX1AA to XX9ZZ".into())],
+            server: Some(SyncStatus {
+                registered: true,
+                last_schedule_unix: Some(1_763_640_000),
+                slots: 4,
+                last_error: None,
+                next_attempt_unix: 1_763_643_600,
+            }),
             file_error: None,
         }
     }
@@ -293,6 +358,9 @@ mod tests {
                     "Heard",
                     "relay of a message from XX1AA to XX9ZZ",
                     "3",
+                    "Registered",
+                    "4 slots, received at 12:00",
+                    "13:00",
                 ],
             ),
             (Section::Stations, &["XX3RL", "Relay North", "2026-11-20", "KP20"]),

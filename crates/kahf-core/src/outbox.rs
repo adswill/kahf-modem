@@ -80,11 +80,15 @@ impl Outbox {
     /// Returns the highest-priority item that is due at `now_ms` (FIFO within a
     /// priority), with its id. The item stays queued until `done` or `failed`.
     pub fn next(&mut self, now_ms: u64) -> Option<(u64, OutItem)> {
-        self.entries
-            .iter()
-            .filter(|e| e.next_try_ms <= now_ms)
-            .min_by_key(|e| (e.priority, e.id))
-            .map(|e| (e.id, e.item.clone()))
+        self.due(now_ms).first().map(|(id, item)| (*id, (*item).clone()))
+    }
+
+    /// Every item due at `now_ms`, in sending order: priority first, then FIFO.
+    /// Lets a caller skip items it cannot send yet (for example, ones for another station).
+    pub fn due(&self, now_ms: u64) -> Vec<(u64, &OutItem)> {
+        let mut due: Vec<&Entry> = self.entries.iter().filter(|e| e.next_try_ms <= now_ms).collect();
+        due.sort_by_key(|e| (e.priority, e.id));
+        due.into_iter().map(|e| (e.id, &e.item)).collect()
     }
 
     /// Records a failed send. The item is retried after an exponential wait
@@ -232,6 +236,18 @@ mod tests {
             kind: kind.to_string(),
             payload: payload.to_vec(),
         }
+    }
+
+    #[test]
+    fn due_lists_every_due_item_in_sending_order() {
+        let mut q = Outbox::new();
+        let a = q.push(item("message", b"a"), Priority::Normal);
+        let b = q.push(item("message", b"b"), Priority::Urgent);
+        let c = q.push(item("message", b"c"), Priority::Normal);
+        q.failed(c, 0);
+        let ids: Vec<u64> = q.due(0).iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![b, a], "waiting item left out, urgent first");
+        assert_eq!(q.next(0).map(|(id, _)| id), Some(b));
     }
 
     #[test]

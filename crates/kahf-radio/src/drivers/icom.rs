@@ -315,7 +315,6 @@ struct IqDecoder {
 }
 
 impl IqDecoder {
-    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn feed(&mut self, bytes: &[u8], out: &mut Vec<(i16, i16)>) {
         let mut rest = bytes;
         if let Some(lo) = self.byte_carry.take() {
@@ -330,11 +329,11 @@ impl IqDecoder {
                 }
             }
         }
-        let mut pairs = rest.chunks_exact(2);
-        for w in &mut pairs {
-            self.word(i16::from_le_bytes([w[0], w[1]]), out);
+        let (pairs, tail) = rest.as_chunks::<2>();
+        for w in pairs {
+            self.word(i16::from_le_bytes(*w), out);
         }
-        if let [b] = pairs.remainder() {
+        if let [b] = tail {
             self.byte_carry = Some(*b);
         }
     }
