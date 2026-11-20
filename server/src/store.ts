@@ -49,6 +49,29 @@ export interface StationStore {
   ): Promise<{ ok: true; slots: unknown[] } | { ok: false; error: string }>;
 }
 
+/** The HF backbone operations (src/backbone.js). Results are the objects' own JSON replies. */
+export interface BackboneStore {
+  msgClaim(origin: string, id: string, dest: string, nowMs: number): Promise<{ ok: true; duplicate: boolean }>;
+  msgGetClaim(origin: string, id: string, nowMs: number): Promise<{ claim: { dest: string; status: string } | null }>;
+  msgEnqueue(dest: string, message: object, nowMs: number): Promise<{ ok: true; until: number }>;
+  msgPeek(dest: string, nowMs: number): Promise<{ messages: any[]; expired: { id: string; origin: string; dest: string }[]; remaining: number }>;
+  msgHandout(dest: string, ids: string[], relay: string, nowMs: number): Promise<{ messages: any[] }>;
+  msgComplete(
+    dest: string,
+    id: string,
+    relay: string,
+    nowMs: number,
+  ): Promise<{ ok: true; found: boolean; dest?: string; remaining: number } | { ok: false; error: string }>;
+  msgPutReceipt(origin: string, receipt: { id: string; dest: string; status: string; reason?: string }, nowMs: number): Promise<{ ok: true }>;
+  msgTakeReceipts(origin: string, nowMs: number): Promise<{ receipts: any[] }>;
+  idxNoteHeard(relay: string, heard: object[], nowMs: number): Promise<{ ok: true; recorded: number; ignored: number }>;
+  idxGetHeard(callsign: string, nowMs: number): Promise<{ heard: { callsign: string; relay: string; at: number; snr?: number } | null }>;
+  idxWant(dest: string, until: number): Promise<{ ok: true }>;
+  idxUnwant(dest: string): Promise<{ ok: true }>;
+  idxWanted(nowMs: number): Promise<{ wanted: string[] }>;
+  idxRate(relay: string, nowMs: number, limit: number): Promise<{ ok: boolean }>;
+}
+
 /** KV expires entries on its own after 48 h; refreshing a report resets the timer. */
 const TTL_SECONDS = 48 * 60 * 60;
 
@@ -136,8 +159,26 @@ async function callObject<T>(ns: DurableObjectNamespace, name: string, op: strin
 export function objectStore(env: Env): Pick<
   StationStore,
   "claimOwner" | "claimRemoval" | "claimRelay" | "getRelay" | "joinArea" | "leaveArea" | "bookSchedule"
-> {
+> &
+  BackboneStore {
+  const mail = <T>(call: string, op: string, args: object) => callObject<T>(env.MAILBOXES, call, op, args);
+  const index = <T>(op: string, args: object) => callObject<T>(env.BACKBONE, "index", op, args);
   return {
+    msgClaim: (origin, id, dest, nowMs) => mail(origin, "claim", { id, dest, nowMs }),
+    msgGetClaim: (origin, id, nowMs) => mail(origin, "getClaim", { id, nowMs }),
+    msgEnqueue: (dest, message, nowMs) => mail(dest, "enqueue", { message, nowMs }),
+    msgPeek: (dest, nowMs) => mail(dest, "peek", { nowMs }),
+    msgHandout: (dest, ids, relay, nowMs) => mail(dest, "handout", { ids, relay, nowMs }),
+    msgComplete: (dest, id, relay, nowMs) => mail(dest, "complete", { id, relay, nowMs }),
+    msgPutReceipt: (origin, receipt, nowMs) => mail(origin, "putReceipt", { ...receipt, nowMs }),
+    msgTakeReceipts: (origin, nowMs) => mail(origin, "takeReceipts", { nowMs }),
+    idxNoteHeard: (relay, heard, nowMs) => index("noteHeard", { relay, heard, nowMs }),
+    idxGetHeard: (callsign, nowMs) => index("getHeard", { callsign, nowMs }),
+    idxWant: (dest, until) => index("want", { dest, until }),
+    idxUnwant: (dest) => index("unwant", { dest }),
+    idxWanted: (nowMs) => index("wanted", { nowMs }),
+    idxRate: (relay, nowMs, limit) => index("rate", { relay, nowMs, limit }),
+
     claimOwner(reporter, publicKey, nowMs) {
       return callObject<Claim>(env.CALLSIGNS, reporter, "claimOwner", { publicKey, nowMs });
     },
