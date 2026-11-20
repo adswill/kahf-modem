@@ -120,7 +120,7 @@ pub fn duration(secs: u32) -> String {
     match secs {
         0..=59 => format!("{secs} s"),
         60..=3599 => format!("{} min", secs / 60),
-        _ if secs % 3600 == 0 => format!("{} h", secs / 3600),
+        _ if secs.is_multiple_of(3600) => format!("{} h", secs / 3600),
         _ => format!("{} h {} min", secs / 3600, secs % 3600 / 60),
     }
 }
