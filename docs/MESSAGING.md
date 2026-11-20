@@ -58,6 +58,13 @@ recipient status: Queued, Held, Sent, Delivered, Read, Failed, Expired; `overall
   Updates the heard list and fills the contact's QTH with the grid when it is empty, so the 17 m
   route planner knows where stations are. Returns `(callsign, grid)`.
 
+- Group chat: `join_group(name, invite)` (invite lists callsigns to tell, for example picked from
+  `heard_stations`), `leave_group`, `send_group(name, text)` (one chat per known member through
+  the outbox, so members that are off air get it when reached) and `groups()`. A group message
+  shows up as an `Event::Message` from the sender with text `#GROUP text`; control lines never
+  show. Replies to a join (the member list) are queued and, like all unattended sends, go out only
+  while an operator link or relay mode is active. Saved as `groups.txt`.
+
 ## Not wired yet
 
 The mailbox, receipts, groups and beacon scheduler (`Messenger`) are not driven by the daemon's

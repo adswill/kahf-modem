@@ -24,6 +24,7 @@ use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
+use kahf_core::msg::groups::{Control, GroupBook};
 use kahf_core::msg::heard::{Heard, HeardList, Observation, DEFAULT_CAP as HEARD_CAP};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::{self, Modulation};
@@ -211,6 +212,8 @@ struct Shared {
     heard: Mutex<HeardList>,
     /// Serialises reads and writes of `contacts.txt` between the worker and `note_beacon`.
     contacts_io: Mutex<()>,
+    /// Group chat membership, saved as `groups.txt`.
+    groups: Mutex<GroupBook>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -655,6 +658,114 @@ impl Engine {
         Some((call, grid))
     }
 
+    /// Joins the group `name` (letters, digits and '-', for example "net17") and tells each
+    /// station in `invite` so they add this station and answer with their member list. Returns
+    /// the group address, `#NET17`. Group chat is plain chat to each member; nothing is hidden.
+    pub fn join_group(&mut self, name: &str, invite: &[&str]) -> Result<String, String> {
+        let ctl = lock(&self.shared.groups).join(name)?;
+        self.save_groups();
+        let Control::Join { group, .. } = &ctl else {
+            unreachable!()
+        };
+        let group = group.clone();
+        let me = self.config.callsign.clone();
+        let msgs: Vec<Message> = invite
+            .iter()
+            .filter(|c| valid_call(c) && !c.eq_ignore_ascii_case(&me))
+            .map(|c| Message::Chat {
+                from: me.clone(),
+                to: c.to_string(),
+                text: ctl.encode(),
+            })
+            .collect();
+        if !msgs.is_empty() {
+            self.queue(msgs)?;
+        }
+        Ok(group)
+    }
+
+    /// Leaves a group and tells the members this station knows.
+    pub fn leave_group(&mut self, name: &str) -> Result<(), String> {
+        let (ctl, members) = {
+            let mut g = lock(&self.shared.groups);
+            let addr = kahf_core::msg::groups::group_addr(name)?;
+            let members = g.fanout(&addr, &self.config.callsign);
+            (g.leave(name)?, members)
+        };
+        self.save_groups();
+        let me = self.config.callsign.clone();
+        let msgs: Vec<Message> = members
+            .into_iter()
+            .map(|to| Message::Chat {
+                from: me.clone(),
+                to,
+                text: ctl.encode(),
+            })
+            .collect();
+        if msgs.is_empty() {
+            Ok(())
+        } else {
+            self.queue(msgs).map(|_| ())
+        }
+    }
+
+    /// Sends `text` to every known member of a joined group, one chat each (so the outbox
+    /// keeps trying for members that are off air). Returns how many members it was queued for.
+    pub fn send_group(&mut self, name: &str, text: &str) -> Result<usize, String> {
+        if text.is_empty() {
+            return Err("empty message".into());
+        }
+        let addr = kahf_core::msg::groups::group_addr(name)?;
+        let members = {
+            let g = lock(&self.shared.groups);
+            if !g.is_joined(&addr) {
+                return Err(format!("not in group {addr}; join it first"));
+            }
+            g.fanout(&addr, &self.config.callsign)
+        };
+        if members.is_empty() {
+            return Err(format!("no other members known in {addr} yet"));
+        }
+        let me = self.config.callsign.clone();
+        let say = Control::Say {
+            group: addr,
+            text: text.to_string(),
+        }
+        .encode();
+        let msgs: Vec<Message> = members
+            .iter()
+            .map(|to| Message::Chat {
+                from: me.clone(),
+                to: to.clone(),
+                text: say.clone(),
+            })
+            .collect();
+        self.queue(msgs)?;
+        Ok(members.len())
+    }
+
+    /// Joined groups with their known members (this station included).
+    pub fn groups(&self) -> Vec<(String, Vec<String>)> {
+        let g = lock(&self.shared.groups);
+        g.joined()
+            .into_iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    g.members(n).into_iter().map(String::from).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn save_groups(&self) {
+        let _ = fs::create_dir_all(&self.config.data_dir);
+        let _ = fs::write(
+            self.config.data_dir.join("groups.txt"),
+            lock(&self.shared.groups).to_text(),
+        );
+    }
+
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
@@ -682,6 +793,11 @@ impl Engine {
                     .unwrap_or_default(),
             ),
             contacts_io: Mutex::new(()),
+            groups: Mutex::new(
+                fs::read_to_string(config.data_dir.join("groups.txt"))
+                    .map(|t| GroupBook::from_text(&config.callsign, &t))
+                    .unwrap_or_else(|_| GroupBook::new(&config.callsign)),
+            ),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -3060,10 +3176,48 @@ impl Worker {
         save_heard(&self.data_dir, &h);
     }
 
+    /// A chat arrived. Group control lines are handled here; a group message shows as
+    /// `#GROUP text` from the sender, and only when this station has joined that group.
+    fn on_chat(&mut self, from: String, text: String) {
+        let Some(ctl) = Control::decode(&text) else {
+            if text.starts_with(kahf_core::msg::groups::CTL_PREFIX) {
+                return; // a malformed control line is not text for the operator
+            }
+            self.emit(Event::Message { from, text });
+            return;
+        };
+        let (reply, shown) = {
+            let mut g = lock(&self.shared.groups);
+            match &ctl {
+                Control::Say { group, text } => (None, g.is_joined(group).then(|| format!("{group} {text}"))),
+                _ => (g.apply(&ctl, &from), None),
+            }
+        };
+        let _ = fs::write(
+            self.data_dir.join("groups.txt"),
+            lock(&self.shared.groups).to_text(),
+        );
+        if let Some(t) = shown {
+            self.emit(Event::Message {
+                from: from.clone(),
+                text: t,
+            });
+        }
+        if let Some(r) = reply {
+            let m = Message::Chat {
+                from: self.callsign.clone(),
+                to: from,
+                text: r.encode(),
+            };
+            let id = self.ids.fetch_add(1, Ordering::Relaxed);
+            self.enqueue(vec![m], vec![id], false);
+        }
+    }
+
     fn on_message(&mut self, msg: Message) {
         self.note_heard(sender_of(&msg).to_string().as_str());
         match msg {
-            Message::Chat { from, text, .. } => self.emit(Event::Message { from, text }),
+            Message::Chat { from, text, .. } => self.on_chat(from, text),
             Message::Mail {
                 from,
                 to,
@@ -3822,6 +3976,71 @@ mod tests {
         assert!(a.heard_stations(5).iter().any(|h| h.call == "BB1BBB"));
     }
 
+    #[test]
+    fn group_chat_between_two_engines() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let (da, db) = (temp_dir("grp-a"), temp_dir("grp-b"));
+        let mut a = Engine::spawn(
+            config("AA1AAA", da.clone()),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b =
+            Engine::spawn(config("BB1BBB", db), fake_factory(a_to_b.clone(), b_to_a.clone())).unwrap();
+        assert!(a.send_group("net", "x").is_err(), "not joined");
+        assert!(a.join_group("bad name", &[]).is_err());
+        assert_eq!(b.join_group("net", &[]).unwrap(), "#NET");
+        assert_eq!(
+            a.join_group("net", &["BB1BBB", "AA1AAA", "bad call"]).unwrap(),
+            "#NET"
+        );
+        assert!(a.send_group("net", "x").is_err(), "nobody else known yet");
+        b.listen().unwrap();
+        // B's operator is at the radio (queued replies only go out when someone is attending).
+        b.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        // B learns about A from the join line and answers with its roster; wait for A to know B.
+        for _ in 0..60 {
+            if a.groups().iter().any(|(_, m)| m.iter().any(|c| c == "BB1BBB")) {
+                break;
+            }
+            let _ = a.poll_events();
+            let _ = b.poll_events();
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert_eq!(
+            a.groups(),
+            vec![(
+                "#NET".to_string(),
+                vec!["AA1AAA".to_string(), "BB1BBB".to_string()]
+            )]
+        );
+        assert_eq!(a.send_group("net", "hello net").unwrap(), 1);
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "#NET hello net"),
+            60,
+        );
+        assert!(got.is_some(), "group message did not arrive");
+        // Control lines never show up as chat, and membership is saved.
+        assert!(!b
+            .poll_events()
+            .iter()
+            .any(|e| matches!(e, Event::Message { text, .. } if text.contains("KAHFGRP1"))));
+        assert!(fs::read_to_string(da.join("groups.txt"))
+            .unwrap()
+            .contains("#NET\t1\t"));
+        a.leave_group("net").unwrap();
+        assert!(a.groups().is_empty());
+    }
+
     /// One station with a fake radio whose transmit output is `a_to_b`.
     fn lone_station(tag: &str) -> (Engine, Pipe) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
@@ -4005,6 +4224,7 @@ mod tests {
             relay_paths: Mutex::new(Vec::new()),
             heard: Mutex::new(HeardList::default()),
             contacts_io: Mutex::new(()),
+            groups: Mutex::new(GroupBook::new(callsign)),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, dir);

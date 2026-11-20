@@ -47,6 +47,11 @@ pub enum Control {
         group: String,
         members: Vec<String>,
     },
+    /// A group message. The text is the rest of the chat body, spaces and all.
+    Say {
+        group: String,
+        text: String,
+    },
 }
 
 impl Control {
@@ -55,11 +60,19 @@ impl Control {
             Control::Join { group, call } => format!("{CTL_PREFIX}JOIN {group} {call}"),
             Control::Leave { group, call } => format!("{CTL_PREFIX}LEAVE {group} {call}"),
             Control::Roster { group, members } => format!("{CTL_PREFIX}ROSTER {group} {}", members.join(",")),
+            Control::Say { group, text } => format!("{CTL_PREFIX}SAY {group} {text}"),
         }
     }
 
     pub fn decode(body: &str) -> Option<Control> {
         let rest = body.strip_prefix(CTL_PREFIX)?;
+        if let Some(say) = rest.strip_prefix("SAY ") {
+            let (group, text) = say.split_once(' ')?;
+            return is_group_addr(group).then(|| Control::Say {
+                group: group.to_string(),
+                text: text.to_string(),
+            });
+        }
         let mut it = rest.split(' ');
         let verb = it.next()?;
         let group = it.next()?.to_string();
@@ -154,6 +167,44 @@ impl GroupBook {
             members: self.members(&g).into_iter().map(String::from).collect(),
             group: g,
         })
+    }
+
+    /// Saves joined groups and known members as text.
+    pub fn to_text(&self) -> String {
+        let mut s = String::from("KGB1\n");
+        for (g, m) in &self.members {
+            let j = if self.joined.contains(g) { "1" } else { "0" };
+            s.push_str(&format!(
+                "{g}\t{j}\t{}\n",
+                m.iter().cloned().collect::<Vec<_>>().join(",")
+            ));
+        }
+        s
+    }
+
+    /// Restores a saved book; damaged input gives an empty book.
+    pub fn from_text(my_call: &str, text: &str) -> Self {
+        let mut b = Self::new(my_call);
+        let mut lines = text.lines();
+        if lines.next() != Some("KGB1") {
+            return b;
+        }
+        for l in lines {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() == 3 && is_group_addr(f[0]) {
+                if f[1] == "1" {
+                    b.joined.insert(f[0].to_string());
+                }
+                b.members.insert(
+                    f[0].to_string(),
+                    f[2].split(',')
+                        .filter(|c| !c.is_empty())
+                        .map(String::from)
+                        .collect(),
+                );
+            }
+        }
+        b
     }
 
     /// Applies a control line heard from `from` (must match the callsign it names, for join
@@ -315,6 +366,37 @@ mod tests {
         );
         assert_eq!(a.members("#NET"), ["A1"]);
         let _ = join_a;
+    }
+
+    #[test]
+    fn say_and_persistence() {
+        let c = Control::Say {
+            group: "#X1".into(),
+            text: "hello  there, all".into(),
+        };
+        assert_eq!(Control::decode(&c.encode()), Some(c));
+        assert_eq!(Control::decode("KAHFGRP1 SAY #X1"), None);
+        let mut a = GroupBook::new("A1");
+        a.join("net").unwrap();
+        a.apply(
+            &Control::Roster {
+                group: "#NET".into(),
+                members: vec!["B1".into()],
+            },
+            "B1",
+        );
+        a.apply(
+            &Control::Join {
+                group: "#OTHER".into(),
+                call: "C1".into(),
+            },
+            "C1",
+        );
+        let b = GroupBook::from_text("A1", &a.to_text());
+        assert!(b.is_joined("#NET") && !b.is_joined("#OTHER"));
+        assert_eq!(b.members("#NET"), ["A1", "B1"]);
+        assert_eq!(b.members("#OTHER"), ["C1"]);
+        assert!(GroupBook::from_text("A1", "junk").joined().is_empty());
     }
 
     #[test]
