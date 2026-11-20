@@ -984,7 +984,10 @@ fn weak_sync(samples: &[f32]) -> Option<(Vec<C>, usize)> {
     }
 
     let nh = (2.0 * WEAK_CFO_RANGE / WEAK_CFO_STEP).round() as i32;
-    let mut best = (0f64, 0usize, 0f64);
+    // Best score and its carrier offset for every start t. Several bursts in one buffer score
+    // alike, and the earliest is the one to take, so the peak is chosen after the whole search.
+    let mut score = vec![0f64; nt + 1];
+    let mut score_f = vec![0f64; nt + 1];
     let mut buf = vec![C::ZERO; size];
     for h in 0..=nh {
         let f = -WEAK_CFO_RANGE + h as f64 * WEAK_CFO_STEP;
@@ -1002,16 +1005,22 @@ fn weak_sync(samples: &[f32]) -> Option<(Vec<C>, usize)> {
         }
         inverse(&mut buf);
         for t in 0..=nt {
-            let rho = buf[t].norm2() / (energy[t] * tpl_e).max(1e-30);
-            if rho * l as f64 > best.0 {
-                best = (rho * l as f64, t, f);
+            let rho = buf[t].norm2() / (energy[t] * tpl_e).max(1e-30) * l as f64;
+            if rho > score[t] {
+                score[t] = rho;
+                score_f[t] = f;
             }
         }
     }
-    if best.0 < WEAK_THRESH {
+    let top = score.iter().cloned().fold(0f64, f64::max);
+    if top < WEAK_THRESH {
         return None;
     }
-    let (_, t0, f0) = best;
+    // First start that scores at least half the best, then the peak within a short span after it.
+    let first = score.iter().position(|&v| v >= 0.5 * top)?;
+    let span = (first..(first + 64).min(nt + 1)).collect::<Vec<_>>();
+    let t0 = *span.iter().max_by(|&&a, &&b| score[a].total_cmp(&score[b]))?;
+    let f0 = score_f[t0];
 
     // Fine CFO from the phase advance between the two halves of the preamble.
     let w = -2.0 * PI * f0 / FS;
@@ -1061,12 +1070,48 @@ pub fn demodulate_weak_variants(
     n_bits: usize,
     windows: &[Option<usize>],
 ) -> Option<Vec<Vec<f32>>> {
-    let p = phy();
-    let (y, start) = weak_sync(samples)?;
-    windows
-        .iter()
-        .map(|&w| demod_aligned(p, &y, start, m, n_bits, true, w))
-        .collect()
+    weak_acquire(samples)?.llrs(m, n_bits, windows)
+}
+
+/// A weak-signal frame that has been found: timing and carrier offset are fixed, but the
+/// modulation and length are not yet, so several hypotheses can be tried without syncing again.
+pub struct WeakFrame {
+    y: Vec<C>,
+    start: usize,
+}
+
+/// Search `samples` for a weak-signal preamble (about 0.2 s of CPU for a 16 s window).
+pub fn weak_acquire(samples: &[f32]) -> Option<WeakFrame> {
+    weak_sync(samples).map(|(y, start)| WeakFrame { y, start })
+}
+
+impl WeakFrame {
+    /// Index in the searched samples where the frame's first OFDM symbol starts (the preamble
+    /// is [`WEAK_PRE_LEN`] samples before it).
+    pub fn frame_start(&self) -> usize {
+        self.start
+    }
+
+    /// Index just past the end of a frame of `n_bits` coded bits sent with `m`.
+    pub fn end_of(&self, m: Modulation, n_bits: usize) -> usize {
+        let per_sym = phy().data.len() * 2 * bits_per_axis(m);
+        self.start + WEAK_EARLY + SYM * (2 + n_bits.div_ceil(per_sym))
+    }
+
+    /// Samples available from the frame start to the end of the searched buffer.
+    pub fn available(&self) -> usize {
+        self.y.len().saturating_sub(self.start)
+    }
+
+    /// Coded-bit LLRs for a frame of `n_bits` coded bits sent with `m`, one set per window
+    /// (see [`demodulate_weak_variants`]). None if the buffer ends before the frame does.
+    pub fn llrs(&self, m: Modulation, n_bits: usize, windows: &[Option<usize>]) -> Option<Vec<Vec<f32>>> {
+        let p = phy();
+        windows
+            .iter()
+            .map(|&w| demod_aligned(p, &self.y, self.start, m, n_bits, true, w))
+            .collect()
+    }
 }
 
 #[cfg(test)]

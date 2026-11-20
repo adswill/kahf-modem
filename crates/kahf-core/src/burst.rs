@@ -108,6 +108,115 @@ impl Mode {
     }
 }
 
+/// Codewords in a "long" burst of `mode`. Bursts carry either 1 codeword or this many, so the
+/// receiver can find the length by trying two sizes per mode (no header is sent).
+pub fn long_codewords(mode: &Mode) -> usize {
+    match mode.modulation {
+        Modulation::Qpsk if mode.reps > 1 => 1,
+        // 5, not 4: four codewords of Q12 are the same waveform as one codeword of R4.
+        Modulation::Qpsk => 5,
+        Modulation::Qam16 => 8,
+        Modulation::Qam64 => 16,
+    }
+}
+
+/// Position of `mode` in [`LADDER`].
+pub fn index_of(mode: &Mode) -> usize {
+    LADDER.iter().position(|m| m == mode).unwrap_or(0)
+}
+
+/// What every codeword of a [`modulate_frames`] burst carries in the frame's id byte, covered
+/// by its CRC: a flag, the ladder index and short or long. The receiver of [`scan`] has to
+/// try several (mode, size) guesses, and a guess that is a prefix of the real burst, or the same
+/// waveform (one codeword of R4 is four of Q12), would otherwise decode to the wrong thing.
+fn descriptor(mode: &Mode, long: bool) -> u8 {
+    0x80 | ((index_of(mode) as u8) << 3) | long as u8
+}
+
+/// Frames (each up to [`CW_BYTES`] bytes) as one burst. One frame, or a mode with long bursts of
+/// one codeword, sends a short burst; more frames fill a long burst, padded with empty
+/// codewords. Panics if there are more frames than [`long_codewords`].
+pub fn modulate_frames(frames: &[Vec<u8>], mode: &Mode) -> Vec<f32> {
+    let long = long_codewords(mode);
+    assert!(frames.len() <= long, "too many frames for one burst");
+    let n_cw = if frames.len() <= 1 { 1 } else { long };
+    let mut cws: Vec<Vec<u8>> = frames.to_vec();
+    cws.resize(n_cw, Vec::new());
+    modulate_codewords(&cws, mode, descriptor(mode, n_cw > 1))
+}
+
+/// A burst heard by [`scan`].
+#[derive(Debug, PartialEq)]
+pub struct Heard {
+    /// Index in [`LADDER`] of the mode it was sent with.
+    pub mode: usize,
+    /// Payloads of the codewords that decoded and were not empty.
+    pub frames: Vec<Vec<u8>>,
+    /// Sample index just past the burst in the scanned buffer.
+    pub end: usize,
+}
+
+/// Result of [`scan`].
+#[derive(Debug, PartialEq)]
+pub enum Scan {
+    /// No preamble in the buffer.
+    Nothing,
+    /// A preamble was found but the burst is not all here yet, or did not decode.
+    /// `from` is where the preamble starts, so the caller can drop earlier audio.
+    Pending {
+        from: usize,
+    },
+    Heard(Heard),
+}
+
+/// Fewest samples worth scanning: a preamble and a minimal burst.
+pub const MIN_SCAN_SAMPLES: usize = 4000;
+
+/// Look for a burst of any mode in `samples` (about the last 16 s of audio). `prefer` is the
+/// ladder index tried first (the mode last heard). Cost is about 0.2 s of CPU per call when a
+/// preamble is present or not, a little more after a hit.
+pub fn scan(samples: &[f32], prefer: usize) -> Scan {
+    let Some(wf) = phy::weak_acquire(samples) else {
+        return Scan::Nothing;
+    };
+    let from = wf.frame_start().saturating_sub(phy::WEAK_PRE_LEN + 32);
+    // Every (mode, size) hypothesis whose audio is already here, shortest first, the preferred mode first.
+    let mut hyps: Vec<(usize, usize, usize)> = Vec::new(); // (mode, n_cw, end)
+    for (i, m) in LADDER.iter().enumerate() {
+        let mut sizes = vec![1usize];
+        if long_codewords(m) > 1 {
+            sizes.push(long_codewords(m));
+        }
+        for n in sizes {
+            let end = wf.end_of(m.modulation, m.coded_bits(n));
+            if end <= wf.frame_start() + wf.available() {
+                hyps.push((i, n, end));
+            }
+        }
+    }
+    hyps.sort_by_key(|&(i, _, end)| (i != prefer, end));
+    for (i, n, end) in hyps {
+        let mode = &LADDER[i];
+        let Some(sets) = wf.llrs(mode.modulation, mode.coded_bits(n), &VARIANTS) else {
+            continue;
+        };
+        let cws: Vec<Option<Vec<u8>>> = (0..n)
+            .map(|c| {
+                sets.iter().find_map(|llr| {
+                    let (data, id) = ldpc::decode(&combine(llr, mode, n, c), 50)
+                        .and_then(|b| frame::parse_payload_id(&b))?;
+                    (id == descriptor(mode, n > 1)).then_some(data)
+                })
+            })
+            .collect();
+        if cws.iter().any(|c| c.is_some()) {
+            let frames = cws.into_iter().flatten().filter(|f| !f.is_empty()).collect();
+            return Scan::Heard(Heard { mode: i, frames, end });
+        }
+    }
+    Scan::Pending { from }
+}
+
 /// Encode up to `MAX_CODEWORDS * CW_BYTES` bytes of `payload` as one burst of audio samples.
 /// Returns the samples and the codeword count the receiver must be told.
 pub fn modulate(payload: &[u8], mode: &Mode) -> (Vec<f32>, usize) {
@@ -116,25 +225,31 @@ pub fn modulate(payload: &[u8], mode: &Mode) -> (Vec<f32>, usize) {
         "burst payload too long"
     );
     let n_cw = payload.len().div_ceil(CW_BYTES).max(1);
-    let mut coded = Vec::with_capacity(mode.coded_bits(n_cw));
-    let mut cws: Vec<Vec<u8>> = Vec::with_capacity(n_cw);
-    for c in 0..n_cw {
-        let lo = c * CW_BYTES;
-        let chunk = &payload[lo.min(payload.len())..(lo + CW_BYTES).min(payload.len())];
-        let cw = ldpc::encode(&frame::build_payload(chunk));
-        cws.push(cw[..mode.keep].to_vec());
-    }
+    let cws: Vec<Vec<u8>> = (0..n_cw)
+        .map(|c| {
+            let lo = c * CW_BYTES;
+            payload[lo.min(payload.len())..(lo + CW_BYTES).min(payload.len())].to_vec()
+        })
+        .collect();
+    (modulate_codewords(&cws, mode, 0), n_cw)
+}
+
+fn modulate_codewords(cws: &[Vec<u8>], mode: &Mode, id: u8) -> Vec<f32> {
+    let sent: Vec<Vec<u8>> = cws
+        .iter()
+        .map(|c| ldpc::encode(&frame::build_payload_as(c, id))[..mode.keep].to_vec())
+        .collect();
+    let mut coded = Vec::with_capacity(mode.coded_bits(cws.len()));
     for _ in 0..mode.reps {
-        for cw in &cws {
+        for cw in &sent {
             coded.extend_from_slice(cw);
         }
     }
-    let samples = if mode.weak {
+    if mode.weak {
         phy::modulate_weak(&coded, mode.modulation)
     } else {
         phy::modulate_frame(&coded, mode.modulation)
-    };
-    (samples, n_cw)
+    }
 }
 
 /// Channel-estimate variants tried in turn: static, then tracked over 7 symbols (about 0.5 s),
@@ -166,7 +281,9 @@ pub fn demodulate(samples: &[f32], mode: &Mode, n_cw: usize) -> Option<Vec<Optio
         (0..n_cw)
             .map(|c| {
                 sets.iter().find_map(|llr| {
-                    ldpc::decode(&combine(llr, mode, n_cw, c), 50).and_then(|b| frame::parse_payload(&b))
+                    let (data, id) = ldpc::decode(&combine(llr, mode, n_cw, c), 50)
+                        .and_then(|b| frame::parse_payload_id(&b))?;
+                    (id == 0).then_some(data)
                 })
             })
             .collect(),
@@ -209,5 +326,49 @@ mod tests {
         assert_eq!(pick(-30.0, 0.0).name, "R32");
         assert_eq!(pick(40.0, 0.0).name, "T56");
         assert_eq!(pick(11.0, 2.0).name, "S12");
+    }
+
+    fn on_air(tx: &[f32]) -> Vec<f32> {
+        let mut s = vec![0f32; 5000];
+        s.extend_from_slice(tx);
+        s.extend(std::iter::repeat_n(0f32, 4000));
+        s
+    }
+
+    #[test]
+    fn scan_finds_any_mode_and_size_without_a_header() {
+        for (i, mode) in LADDER.iter().enumerate().filter(|(_, m)| m.reps <= 4) {
+            let long = long_codewords(mode);
+            for n in [1, long.min(3)] {
+                let frames: Vec<Vec<u8>> = (0..n).map(|k| vec![(i * 16 + k) as u8; 5 + k]).collect();
+                let air = on_air(&modulate_frames(&frames, mode));
+                // Deliberately prefer the wrong mode: the scan must still find it.
+                match scan(&air, (i + 3) % LADDER.len()) {
+                    Scan::Heard(h) => {
+                        assert_eq!(h.mode, i, "{}", mode.name);
+                        assert_eq!(h.frames, frames, "{} n={n}", mode.name);
+                        assert!(h.end <= air.len());
+                    }
+                    other => panic!("{} n={n}: {other:?}", mode.name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scan_on_silence_or_noise_finds_nothing() {
+        assert_eq!(scan(&vec![0f32; 20_000], 0), Scan::Nothing);
+        let noise: Vec<f32> = (0..30_000u32)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 16) as f32 / 32768.0) - 1.0)
+            .collect();
+        assert_eq!(scan(&noise, 0), Scan::Nothing);
+    }
+
+    #[test]
+    fn scan_waits_for_a_burst_that_is_not_all_here() {
+        let mode = &LADDER[index_of(&LADDER.iter().find(|m| m.name == "R4").copied().unwrap())];
+        let air = on_air(&modulate_frames(&[vec![1, 2, 3]], mode));
+        let cut = &air[..air.len() - 4000 - 2000];
+        assert!(matches!(scan(cut, 0), Scan::Pending { .. } | Scan::Nothing));
     }
 }
