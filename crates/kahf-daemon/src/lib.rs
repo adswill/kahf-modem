@@ -3276,7 +3276,7 @@ impl Worker {
         let at_peer =
             matches!(&self.link_state, LinkState::Connected { peer } if peer.eq_ignore_ascii_case(&to));
         let mut t = lock(&self.shared.delivery);
-        t.track(wire, &[to.clone()], now);
+        t.track(wire, std::slice::from_ref(&to), now);
         t.advance(wire, Some(&to), DeliveryStatus::Sent, now);
         if at_peer {
             // The addressee itself acknowledged every chunk on the link.
