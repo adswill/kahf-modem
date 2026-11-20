@@ -38,6 +38,7 @@ use kahf_radio::{GainSetting, RadioSpec, RxRadio};
 use kahf_sdr::hackrf::HackrfTx;
 use sha2::{Digest, Sha256};
 
+mod lbt;
 mod server_sync;
 pub use kahf_net::{Area, SlotRequest, DEFAULT_BASE_URL as RELAY_SERVER_URL};
 pub use server_sync::{ServerSync, ServerSyncOptions, SyncStatus, DEFAULT_SLOT_S};
@@ -652,6 +653,10 @@ impl Engine {
         if let Some(why) = tx_refusal(&self.shared.flags) {
             return Err(why.into());
         }
+        // An operator who sends is attending the station, whichever side started the link: the
+        // station that answered a call may reply. (Forwards for other stations do not come
+        // through here; they stay bound to relay mode.)
+        self.shared.flags.operator_link.store(true, Ordering::SeqCst);
         let ids: Vec<u64> = msgs
             .iter()
             .map(|_| self.ids.fetch_add(1, Ordering::Relaxed))
@@ -1674,6 +1679,8 @@ struct Worker {
     tuned_hz: Option<u64>,
     /// Carrier sense over the receive audio (plan 2.1).
     sense: Sense,
+    /// Half-duplex rules: no transmit over someone else, a quiet wait, a random backoff.
+    watch: lbt::ChannelWatch,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -1825,6 +1832,12 @@ impl Worker {
             freq_mhz,
             tuned_hz,
             sense: Sense::new(RATE as f32),
+            watch: lbt::ChannelWatch::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1),
+            ),
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
             carrier_fed: None,
@@ -1905,7 +1918,17 @@ impl Worker {
                 }
                 continue;
             }
-            if let Some(samples) = self.bursts.pop_front() {
+            if !self.bursts.is_empty() {
+                // Nothing goes out over someone else's signal. Listening goes on meanwhile.
+                if !self.watch.may_transmit(Instant::now()) {
+                    if self.rx_step() == 0 {
+                        thread::sleep(POLL);
+                    }
+                    continue;
+                }
+                let Some(samples) = self.bursts.pop_front() else {
+                    continue;
+                };
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2658,6 +2681,7 @@ impl Worker {
                 let secs = job.samples.len() as f64 / RATE as f64;
                 self.stop_radio_tx();
                 self.end_rx_gap();
+                self.watch.tx_finished(Instant::now());
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -2665,6 +2689,7 @@ impl Worker {
             Err(e) => {
                 self.stop_radio_tx();
                 self.end_rx_gap();
+                self.watch.tx_finished(Instant::now());
                 self.emit_tx(TxState::Failed(e.clone()));
                 self.log(format!("transmit failed: {e}"));
                 true
@@ -2713,11 +2738,18 @@ impl Worker {
             return 0;
         }
         let n = fresh.len();
-        self.rx_buf.extend_from_slice(&fresh);
+        let now = Instant::now();
+        // What arrives just after our own burst is our own signal played back (a monitoring
+        // radio, or a virtual cable such as BlackHole). It is neither someone else's carrier nor
+        // a frame to decode: our own frames must never reach our own link layer.
+        let echo = self.watch.in_echo_guard(now);
+        self.watch.push(&fresh, now);
+        if !echo {
+            self.rx_buf.extend_from_slice(&fresh);
+        }
 
         self.sense.push(&fresh);
         self.spec.push(&fresh);
-        let now = Instant::now();
         if now >= self.spec_due {
             if let Some(bins) = self.spec.spectrum_db() {
                 debug_assert_eq!(bins.len(), SPEC_BINS);
@@ -3153,7 +3185,35 @@ mod tests {
         want()
     }
 
+    /// Delivers what is written to the returned pipe into `to` at the speed of sound-card
+    /// playback (8000 samples a second), as a real sound path does. Without it a whole burst
+    /// would reach the other station at once, long before it had really been sent.
+    fn paced(to: Pipe) -> Pipe {
+        let staging: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let from = staging.clone();
+        thread::spawn(move || {
+            let mut due = 0.0f64;
+            let mut last = Instant::now();
+            loop {
+                thread::sleep(Duration::from_millis(10));
+                let now = Instant::now();
+                due += now.duration_since(last).as_secs_f64() * RATE as f64;
+                last = now;
+                let mut q = from.lock().unwrap();
+                if q.is_empty() {
+                    due = 0.0;
+                    continue;
+                }
+                let n = (due as usize).min(q.len());
+                due -= n as f64;
+                to.lock().unwrap().extend(q.drain(..n));
+            }
+        });
+        staging
+    }
+
     fn fake_factory(rx: Pipe, tx: Pipe) -> Factory {
+        let tx = paced(tx);
         Box::new(move || {
             Ok(Box::new(FakeRadio {
                 rx: rx.clone(),
@@ -3675,26 +3735,28 @@ mod tests {
             (tx_a.clone(), vec![rx_a.clone(), rx_b.clone()]),
             (tx_b.clone(), vec![rx_a.clone(), rx_b.clone()]),
         ];
+        // A sound device that is always running: every 10 ms each station reads 80 samples of
+        // whatever is on the bus (silence and a noise floor when nobody transmits), at the
+        // speed of real playback. Both stations hear both, and themselves.
         thread::spawn(move || {
             let mut seed = 7u64;
+            let mut due = 0.0f64;
+            let mut last = Instant::now();
             loop {
-                thread::sleep(Duration::from_millis(5));
-                // The noise floor runs all the time, whether or not anyone transmits.
+                thread::sleep(Duration::from_millis(10));
+                let now = Instant::now();
+                due += now.duration_since(last).as_secs_f64() * RATE as f64;
+                last = now;
+                let n = due as usize;
+                due -= n as f64;
                 seed += 1;
-                let mut heard = vec![0f32; 40];
+                let mut mixed = noise(n, floor, seed);
                 for (tx, _) in &wires {
-                    let moved: Vec<f32> = tx.lock().unwrap().drain(..).collect();
-                    if heard.len() < moved.len() {
-                        heard.resize(moved.len(), 0.0);
+                    let mut q = tx.lock().unwrap();
+                    let take = n.min(q.len());
+                    for (m, s) in mixed.iter_mut().zip(q.drain(..take)) {
+                        *m += s * gain;
                     }
-                    for (h, m) in heard.iter_mut().zip(&moved) {
-                        *h += m * gain;
-                    }
-                }
-                let n = heard.len();
-                let mut mixed = noise(n, floor, seed + 1000);
-                for (m, h) in mixed.iter_mut().zip(&heard) {
-                    *m += h;
                 }
                 for o in &wires[0].1 {
                     o.lock().unwrap().extend(mixed.iter().copied());
@@ -3789,6 +3851,14 @@ mod tests {
             60,
         );
         assert!(got.is_some(), "the message did not arrive on a shared bus");
+        // The station that was called answers on the same link, without calling back.
+        b.send_message("ZZ1ALPHA", "and back again").unwrap();
+        let back = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Message { text, .. } if text == "and back again"),
+            60,
+        );
+        assert!(back.is_some(), "the called station could not reply over the link");
     }
 
     /// One station with a fake radio whose transmit output is `a_to_b`.
@@ -4500,6 +4570,7 @@ mod tests {
     }
 
     fn air_factory(rx: Pipe, tx: Vec<Pipe>) -> Factory {
+        let tx: Vec<Pipe> = tx.into_iter().map(paced).collect();
         Box::new(move || {
             Ok(Box::new(AirRadio {
                 rx: rx.clone(),
