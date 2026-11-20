@@ -128,6 +128,8 @@ const PREAMBLE_THRESHOLD: f64 = 0.5;
 /// How far past the first sample within tolerance the top of its peak is looked for. The
 /// preamble repeats every 128 samples, so this stays well under half of that.
 const PREAMBLE_REFINE: usize = 24;
+/// How long after a burst its playback may still come back to us (a virtual cable, a monitor).
+const ECHO_WINDOW: Duration = Duration::from_millis(1500);
 /// How far below the strongest correlation a repeat may be and still count as a peak.
 const PEAK_TOLERANCE: f64 = 0.05;
 const LEAD_SILENCE: usize = RATE as usize / 5; // lets PTT and VOX settle
@@ -1198,11 +1200,40 @@ fn burst(frames: &[Vec<u8>], m: Modulation) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+/// The normalised correlation of the preamble template with `x` at offset `t`.
+fn preamble_corr(x: &[f32], t: usize) -> f64 {
+    let tpl = &frame_template()[..PREAMBLE_LEN];
+    let Some(w) = x.get(t..t + PREAMBLE_LEN) else {
+        return 0.0;
+    };
+    let mut dot = 0f64;
+    let (mut e, mut tpl_e) = (0f64, 0f64);
+    for (a, b) in w.iter().zip(tpl) {
+        let (a, b) = (f64::from(*a), f64::from(*b));
+        dot += a * b;
+        e += a * a;
+        tpl_e += b * b;
+    }
+    dot / (tpl_e * e).sqrt().max(1e-30)
+}
+
+static DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What a scan of receive audio for a preamble found.
+enum Preamble {
+    /// Nothing that looks like a preamble.
+    None,
+    /// A preamble that is still arriving: it starts at about this offset.
+    Incomplete(usize),
+    /// The start of a complete preamble.
+    Found(usize),
+}
+
 /// Normalised correlation against the preamble. Returns the start of the first
 /// preamble above the threshold, refined to the strongest nearby offset.
-fn find_preamble(x: &[f32]) -> Option<usize> {
+fn scan_preamble(x: &[f32]) -> Preamble {
     if x.len() < PREAMBLE_LEN {
-        return None;
+        return Preamble::None;
     }
     let tpl = &frame_template()[..PREAMBLE_LEN];
     let tpl_e: f64 = tpl.iter().map(|&v| (v as f64) * (v as f64)).sum();
@@ -1218,7 +1249,14 @@ fn find_preamble(x: &[f32]) -> Option<usize> {
         }
         dot / (tpl_e * e).sqrt().max(1e-30)
     };
-    let t0 = (0..=last).find(|&t| corr(t) >= PREAMBLE_THRESHOLD)?;
+    let Some(t0) = (0..=last).find(|&t| corr(t) >= PREAMBLE_THRESHOLD) else {
+        return Preamble::None;
+    };
+    // The peak can only be judged once the whole span after the first hit has arrived. A
+    // buffer that ends inside it holds a preamble still arriving: wait for more, and keep it.
+    if t0 + PREAMBLE_LEN > last {
+        return Preamble::Incomplete(t0);
+    }
     // The preamble repeats every 128 samples, so the correlation is as high at each
     // repeat as at the true start. The true start is the first of them, and noise or a filter
     // can make a later one a hair higher. Take the strongest value over the span, then the
@@ -1226,7 +1264,10 @@ fn find_preamble(x: &[f32]) -> Option<usize> {
     let span_end = (t0 + PREAMBLE_LEN).min(last);
     let values: Vec<f64> = (t0..=span_end).map(corr).collect();
     let top = values.iter().copied().fold(f64::MIN, f64::max);
-    let first = values.iter().position(|&v| v >= top - PEAK_TOLERANCE)?;
+    let first = values
+        .iter()
+        .position(|&v| v >= top - PEAK_TOLERANCE)
+        .unwrap_or(0);
     // Refine to the top of that peak: it is only a few samples wide.
     let mut at = first;
     let reach = (first + PREAMBLE_REFINE).min(values.len() - 1);
@@ -1235,7 +1276,40 @@ fn find_preamble(x: &[f32]) -> Option<usize> {
             at = i;
         }
     }
-    Some(t0 + at)
+    Preamble::Found(t0 + at)
+}
+
+/// Where the preamble is, if the buffer holds all of it.
+fn find_preamble(x: &[f32]) -> Option<usize> {
+    match scan_preamble(x) {
+        Preamble::Found(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// The payloads of the frames inside a burst, found the way the receiver finds them.
+fn own_frames(samples: &[f32]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos + PREAMBLE_LEN < samples.len() {
+        let Some(rel) = find_preamble(&samples[pos..]) else {
+            break;
+        };
+        let start = pos + rel;
+        let mut used = frame_len();
+        for &m in &MODULATIONS {
+            let len = frame_len_for(m);
+            if start + len <= samples.len() {
+                if let Some(payload) = decode_at(&samples[start..start + len], m) {
+                    out.push(payload);
+                    used = len;
+                    break;
+                }
+            }
+        }
+        pos = start + used;
+    }
+    out
 }
 
 /// Decode exactly one frame that starts at the preamble, sent with modulation `m`.
@@ -1690,6 +1764,8 @@ struct Worker {
     sense: Sense,
     /// Half-duplex rules: no transmit over someone else, a quiet wait, a random backoff.
     watch: lbt::ChannelWatch,
+    /// The frames of our recent bursts, until when their playback may still come back.
+    echoes: VecDeque<(Instant, Vec<Vec<u8>>)>,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -1841,6 +1917,7 @@ impl Worker {
             freq_mhz,
             tuned_hz,
             sense: Sense::new(RATE as f32),
+            echoes: VecDeque::new(),
             watch: lbt::ChannelWatch::new(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1938,6 +2015,7 @@ impl Worker {
                 let Some(samples) = self.bursts.pop_front() else {
                     continue;
                 };
+                self.remember_own_frames(&samples);
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2748,14 +2826,11 @@ impl Worker {
         }
         let n = fresh.len();
         let now = Instant::now();
-        // What arrives just after our own burst is our own signal played back (a monitoring
-        // radio, or a virtual cable such as BlackHole). It is neither someone else's carrier nor
-        // a frame to decode: our own frames must never reach our own link layer.
-        let echo = self.watch.in_echo_guard(now);
+        // What arrives just after our own burst may be our own signal played back (a monitoring
+        // radio, or a virtual cable such as BlackHole). The channel watch does not take it for
+        // someone else's carrier, and `on_frame` does not take it for a frame from the peer.
         self.watch.push(&fresh, now);
-        if !echo {
-            self.rx_buf.extend_from_slice(&fresh);
-        }
+        self.rx_buf.extend_from_slice(&fresh);
 
         self.sense.push(&fresh);
         self.spec.push(&fresh);
@@ -2790,15 +2865,26 @@ impl Worker {
     fn decode_frames(&mut self) {
         let longest = MODULATIONS.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
         loop {
-            let Some(start) = find_preamble(&self.rx_buf) else {
-                let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
-                self.rx_buf.drain(..keep);
-                return;
+            let start = match scan_preamble(&self.rx_buf) {
+                Preamble::Found(s) => s,
+                Preamble::Incomplete(t0) => {
+                    // Keep what has arrived of it and wait for the rest.
+                    self.rx_buf.drain(..t0);
+                    return;
+                }
+                Preamble::None => {
+                    let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
+                    self.rx_buf.drain(..keep);
+                    return;
+                }
             };
             // Wait until the longest possible frame is in the buffer: the modulation is not known yet.
             if start + longest > self.rx_buf.len() {
                 self.rx_buf.drain(..start);
                 return;
+            }
+            if std::env::var("KAHF_RX_TRACE").is_ok() {
+                eprintln!("RX {}: preamble at {start} of {} buffered", self.callsign, self.rx_buf.len());
             }
             let mut found = None;
             for &m in &MODULATIONS {
@@ -2808,9 +2894,43 @@ impl Worker {
                     break;
                 }
             }
+            if found.is_none() && std::env::var("KAHF_RX_DUMP").is_ok() {
+                let n = DUMPS.fetch_add(1, Ordering::SeqCst);
+                let w = &self.rx_buf[start..(start + 4000).min(self.rx_buf.len())];
+                let bytes: Vec<u8> = w.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let _ = std::fs::write(format!("/tmp/kahf-fail-{}-{n}.f32", self.callsign), bytes);
+            }
             if found.is_none() {
+                // What looked like a preamble may be noise or the cut end of a burst. A real frame
+                // can follow it in the buffer: take that one rather than wait for copies of a
+                // frame that never comes (the wait below would swallow the real frame).
+                let after = start + PREAMBLE_LEN;
+                if after < self.rx_buf.len() {
+                    if let Preamble::Found(rel) = scan_preamble(&self.rx_buf[after..]) {
+                        let next = after + rel;
+                        let later = MODULATIONS.iter().find_map(|&m| {
+                            let len = frame_len_for(m);
+                            let window = self.rx_buf.get(next..next + len)?;
+                            decode_at(window, m).map(|p| (p, len))
+                        });
+                        if let Some((payload, len)) = later {
+                            self.rx_buf.drain(..next + len);
+                            self.on_frame(payload);
+                            continue;
+                        }
+                    }
+                }
                 // Weak mode: the copies may still be arriving. Wait for all of them, then combine.
                 let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
+                // A weak-mode burst repeats the frame at this spacing. If the buffer reaches the
+                // place of the second copy and there is no preamble there, this was no weak
+                // burst but noise or a cut-off frame: skip it instead of waiting for copies.
+                if start + stride + PREAMBLE_LEN <= self.rx_buf.len()
+                    && preamble_corr(&self.rx_buf, start + stride) < PREAMBLE_THRESHOLD
+                {
+                    self.rx_buf.drain(..start + PREAMBLE_LEN);
+                    continue;
+                }
                 let span = (WEAK_COPIES - 1) * stride + frame_len_for(Modulation::Qpsk);
                 if start + span > self.rx_buf.len() {
                     self.rx_buf.drain(..start);
@@ -2821,6 +2941,9 @@ impl Worker {
                     self.on_frame(payload);
                     continue;
                 }
+            }
+            if std::env::var("KAHF_RX_TRACE").is_ok() {
+                eprintln!("RX {}: decoded={} own_echo={:?}", self.callsign, found.is_some(), found.as_ref().map(|(p, _)| self.echoes.iter().any(|(_, f)| f.iter().any(|x| x == p))));
             }
             let (decoded, used) = match found {
                 Some((payload, len)) => (Some(payload), len),
@@ -2833,7 +2956,34 @@ impl Worker {
         }
     }
 
+    /// Notes the frames inside a burst we are about to send. If our sound path plays our own
+    /// signal back, these are the frames that come back and must be ignored.
+    fn remember_own_frames(&mut self, samples: &[f32]) {
+        let frames = own_frames(samples);
+        if frames.is_empty() {
+            return;
+        }
+        let until =
+            Instant::now() + Duration::from_secs_f64(samples.len() as f64 / RATE as f64) + ECHO_WINDOW;
+        self.echoes.push_back((until, frames));
+        while self.echoes.len() > 16 {
+            self.echoes.pop_front();
+        }
+    }
+
+    /// True when `payload` is one of our own frames played back to us.
+    fn is_own_echo(&mut self, payload: &[u8]) -> bool {
+        let now = Instant::now();
+        self.echoes.retain(|(until, _)| now < *until);
+        self.echoes
+            .iter()
+            .any(|(_, frames)| frames.iter().any(|f| f == payload))
+    }
+
     fn on_frame(&mut self, payload: Vec<u8>) {
+        if self.is_own_echo(&payload) {
+            return;
+        }
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
@@ -3082,6 +3232,14 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
+    /// The tests that run engines on real time (audio paced like a sound card, ARQ timers) take
+    /// this lock, so that only one runs at a time: several at once starve each other of CPU and
+    /// then time out for reasons that have nothing to do with the code under test.
+    fn realtime() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     type Pipe = Arc<Mutex<VecDeque<f32>>>;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -3249,7 +3407,15 @@ mod tests {
     fn wait_for(engine: &mut Engine, want: impl Fn(&Event) -> bool, secs: u64) -> Option<Event> {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
-            if let Some(ev) = engine.poll_events().into_iter().find(|e| want(e)) {
+            let events = engine.poll_events();
+            if std::env::var("KAHF_TEST_TRACE").is_ok() {
+                for e in &events {
+                    if !matches!(e, Event::Spectrum(_)) {
+                        eprintln!("{} {:?}", engine.config.callsign, e);
+                    }
+                }
+            }
+            if let Some(ev) = events.into_iter().find(|e| want(e)) {
                 return Some(ev);
             }
             thread::sleep(Duration::from_millis(20));
@@ -3307,11 +3473,13 @@ mod tests {
 
     #[test]
     fn rejects_empty_callsign() {
+        let _rt = realtime();
         assert!(Engine::new(config("", temp_dir("empty"))).is_err());
     }
 
     #[test]
     fn rejects_bad_sdr_setting() {
+        let _rt = realtime();
         let mut c = config("T1AA", temp_dir("sdr"));
         c.sdr = Some("nosuchradio".into());
         assert!(Engine::new(c).is_err());
@@ -3319,6 +3487,7 @@ mod tests {
 
     #[test]
     fn new_does_not_open_the_radio() {
+        let _rt = realtime();
         let opened = Arc::new(AtomicBool::new(false));
         let flag = opened.clone();
         let factory: Factory = Box::new(move || {
@@ -3333,6 +3502,7 @@ mod tests {
 
     #[test]
     fn engine_starts_with_no_sdr_and_with_hackrf_listed() {
+        let _rt = realtime();
         // Start-up never opens a radio: no SDR configured, or a HackRF named as the input.
         let mut none = config("AA1AAA", temp_dir("start-no-sdr"));
         none.sdr = None;
@@ -3404,6 +3574,7 @@ mod tests {
 
     #[test]
     fn poll_events_returns_quickly_during_transmit() {
+        let _rt = realtime();
         let written = Arc::new(AtomicU64::new(0));
         let w = written.clone();
         let factory: Factory =
@@ -3441,6 +3612,7 @@ mod tests {
 
     #[test]
     fn spectrum_arrives_at_least_20_times_a_second() {
+        let _rt = realtime();
         let factory: Factory = Box::new(|| {
             Ok(Box::new(ClockRadio {
                 start: Instant::now(),
@@ -3594,6 +3766,7 @@ mod tests {
     /// Two engines on crossed fake pipes: A talks to B and B talks to A, no echo.
     #[test]
     fn queued_while_offline_is_sent_after_link_up() {
+        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let mut a = Engine::spawn(
@@ -3639,6 +3812,7 @@ mod tests {
 
     #[test]
     fn outbox_survives_restart() {
+        let _rt = realtime();
         let dir = temp_dir("restart");
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
@@ -3668,6 +3842,7 @@ mod tests {
 
     #[test]
     fn logbook_line_written_on_disconnect() {
+        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let dir = temp_dir("logbook-a");
@@ -3709,6 +3884,7 @@ mod tests {
 
     #[test]
     fn loopback_message_reaches_other_engine() {
+        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let mut a = Engine::spawn(
@@ -3837,6 +4013,7 @@ mod tests {
     /// (what a real sound path such as BlackHole delivers) still connect.
     #[test]
     fn two_stations_connect_over_a_quiet_noisy_bus() {
+        let _rt = realtime();
         let (mut a, mut b) = shared_bus_noisy(["ZZ1ALPHA", "ZZ2BRAVO"], "noisy", 0.0063, 0.0002);
         a.listen().unwrap();
         b.listen().unwrap();
@@ -3846,6 +4023,13 @@ mod tests {
             |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
             60,
         );
+        if linked.is_none() && std::env::var("KAHF_TEST_TRACE").is_ok() {
+            for e in b.poll_events() {
+                if !matches!(e, Event::Spectrum(_)) {
+                    eprintln!("B-SIDE {e:?}");
+                }
+            }
+        }
         assert!(linked.is_some(), "no link over a quiet bus with a noise floor");
         a.send_message("ZZ2BRAVO", "through the noise").unwrap();
         assert!(wait_for(
@@ -3857,7 +4041,52 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn probe_noise_decode() {
+        let air = burst(&[vec![0x42; 36]], MODULATION).unwrap();
+        let rms = (air.iter().map(|v| v * v).sum::<f32>() / air.len() as f32).sqrt();
+        let sig = (air.iter().map(|v| v * v).sum::<f32>() / 2880.0).sqrt();
+        println!("rms {rms} burst-rms {sig}");
+        for snr_db in [40.0f32, 30.0, 24.0, 20.0, 15.0, 10.0] {
+            let amp = sig / 10f32.powf(snr_db / 20.0) * 3f32.sqrt();
+            let mut ok = 0;
+            let mut found_ok = 0;
+            for seed in 1..=100u64 {
+                let mut x = air.clone();
+                for (s, n) in x.iter_mut().zip(noise(air.len(), amp, seed * 7919)) {
+                    *s += n;
+                }
+                if let Some(start) = find_preamble(&x) {
+                    if start == LEAD_SILENCE {
+                        found_ok += 1;
+                    }
+                    let len = frame_len_for(MODULATION);
+                    if start + len <= x.len() && decode_at(&x[start..start + len], MODULATION).is_some() {
+                        ok += 1;
+                    }
+                }
+            }
+            println!("SNR {snr_db} dB: start right {found_ok}/100, decoded {ok}/100");
+        }
+    }
+
+    #[test]
+    fn our_own_frames_played_back_are_recognised_and_other_frames_are_not() {
+        let mut w = bare_worker("own-echo", "AA1AAA");
+        let mine = vec![0x10, 3, b'h', b'i'];
+        let air = burst(&[mine.clone()], MODULATION).unwrap();
+        assert_eq!(own_frames(&air), vec![mine.clone()]);
+        w.remember_own_frames(&air);
+        assert!(w.is_own_echo(&mine));
+        assert!(!w.is_own_echo(&[0x10, 3, b'h', b'o']));
+        // Once the playback window has passed, the same bytes are the peer's.
+        w.echoes[0].0 = Instant::now() - Duration::from_millis(1);
+        assert!(!w.is_own_echo(&mine));
+    }
+
+    #[test]
     fn two_stations_on_one_shared_audio_bus_connect_and_talk() {
+        let _rt = realtime();
         let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], "bus");
         a.listen().unwrap();
         b.listen().unwrap();
@@ -3900,6 +4129,7 @@ mod tests {
 
     #[test]
     fn listen_only_refuses_every_transmit_path() {
+        let _rt = realtime();
         let (mut a, a_to_b) = lone_station("listen-only");
         a.set_listen_only(true);
         let err = a.send_message("BB1BBB", "hi").unwrap_err();
@@ -3942,6 +4172,7 @@ mod tests {
 
     #[test]
     fn listen_only_never_keys_ptt() {
+        let _rt = realtime();
         let keyed = Arc::new(AtomicU64::new(0));
         let k = keyed.clone();
         let factory: Factory =
@@ -3965,6 +4196,7 @@ mod tests {
 
     #[test]
     fn required_update_lock_refuses_every_transmit_path() {
+        let _rt = realtime();
         let (mut a, a_to_b) = lone_station("update-lock");
         a.set_update_locked(true);
         assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), UPDATE_LOCK_TEXT);
@@ -3981,6 +4213,7 @@ mod tests {
 
     #[test]
     fn unreached_station_gets_plain_sentence_once_when_relay_is_off() {
+        let _rt = realtime();
         let (mut a, _) = lone_station("relay-off");
         a.set_relay_timeout_ms(200);
         // Internet relay is on by default now, so this test turns it off to test the plain sentence.
@@ -4001,6 +4234,7 @@ mod tests {
 
     #[test]
     fn internet_relay_and_third_party_settings_default_on() {
+        let _rt = realtime();
         let dir = temp_dir("owner-defaults");
         let e = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(
@@ -4015,6 +4249,7 @@ mod tests {
 
     #[test]
     fn default_internet_relay_sends_nothing_while_gateway_is_a_stub() {
+        let _rt = realtime();
         // Internet relay is on by default. The gateway stub refuses, so the message stays
         // queued and nothing goes over the internet.
         let (mut a, _) = lone_station("relay-default-on");
@@ -4031,6 +4266,7 @@ mod tests {
 
     #[test]
     fn unreached_station_goes_to_relay_when_relay_is_on() {
+        let _rt = realtime();
         let (mut a, _) = lone_station("relay-on");
         a.set_internet_relay(true);
         a.set_relay_timeout_ms(200);
@@ -4336,6 +4572,7 @@ mod tests {
 
     #[test]
     fn engine_creates_station_key_at_start_up() {
+        let _rt = realtime();
         let dir = temp_dir("key-start");
         let engine = Engine::new(config("AA1AAA", dir.clone())).unwrap();
         assert!(dir.join(auth::KEY_FILE).exists(), "station key not created");
@@ -4420,6 +4657,7 @@ mod tests {
 
     #[test]
     fn relay_start_needs_both_acknowledgements() {
+        let _rt = realtime();
         let dir = temp_dir("relay-ack");
         let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
         // No role yet: refused with a plain message.
@@ -4455,6 +4693,7 @@ mod tests {
 
     #[test]
     fn relay_start_is_per_run_and_not_saved() {
+        let _rt = realtime();
         let dir = temp_dir("relay-per-run");
         {
             let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
@@ -4547,6 +4786,7 @@ mod tests {
 
     #[test]
     fn listen_only_refuses_engine_send_in_relay_mode() {
+        let _rt = realtime();
         let dir = temp_dir("listen-relay-engine");
         let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
         e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
@@ -4632,6 +4872,7 @@ mod tests {
     /// calls B by itself in relay mode and keeps the message out of its own inbox.
     #[test]
     fn message_reaches_an_unheard_station_through_a_radio_relay() {
+        let _rt = realtime();
         let (to_a, to_r, to_b) = (pipe(), pipe(), pipe());
         let mut a = Engine::spawn(
             config("AA1AAA", temp_dir("relay3-a")),
@@ -4702,6 +4943,7 @@ mod tests {
     /// reach B, so after its relay timeout it hands the message to R2, which reaches B.
     #[test]
     fn message_crosses_two_radio_relays() {
+        let _rt = realtime();
         let (to_a, to_r1, to_r2, to_b) = (pipe(), pipe(), pipe(), pipe());
         let spawn = |call: &str, tag: &str, rx: &Pipe, tx: Vec<Pipe>| {
             Engine::spawn(config(call, temp_dir(tag)), air_factory(rx.clone(), tx)).unwrap()
@@ -4881,6 +5123,7 @@ mod tests {
 
     #[test]
     fn relay_paths_are_checked() {
+        let _rt = realtime();
         let e = Engine::new(config("AA1AAA", temp_dir("relay-paths"))).unwrap();
         assert!(e.set_relay_paths(&["not a call"]).is_err());
         assert!(e.set_relay_paths(&["AA1AAA"]).is_err(), "relay through itself");
@@ -4892,6 +5135,7 @@ mod tests {
 
     #[test]
     fn relay_paths_come_from_the_route_planner() {
+        let _rt = realtime();
         let e = Engine::new(config("OH2AAA", temp_dir("relay-plan"))).unwrap();
         // Helsinki to Tallinn is in the 17 m skip zone; Madrid bridges it by day.
         let me = route::Node::new("OH2AAA", (60.17, 24.94));

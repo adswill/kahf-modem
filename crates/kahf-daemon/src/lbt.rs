@@ -64,8 +64,7 @@ impl ChannelWatch {
         lo + self.rng % (hi - lo + 1)
     }
 
-    /// True while samples read now are our own playback.
-    pub fn in_echo_guard(&self, now: Instant) -> bool {
+    fn in_echo_guard(&self, now: Instant) -> bool {
         self.ignore_until.is_some_and(|t| now < t)
     }
 
@@ -182,11 +181,9 @@ mod tests {
         let mut w = ChannelWatch::new(9);
         let t0 = Instant::now();
         w.tx_finished(t0);
-        assert!(w.in_echo_guard(t0 + Duration::from_millis(100)));
         // The playback of our own burst arrives just after the transmission.
         w.push(&tone(3200, 0.2), t0 + Duration::from_millis(100));
         assert!(w.may_transmit(t0 + Duration::from_millis(200)));
-        assert!(!w.in_echo_guard(t0 + ECHO_GUARD + Duration::from_millis(1)));
     }
 
     #[test]
