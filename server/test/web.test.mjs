@@ -93,9 +93,18 @@ test("every border-radius is 3 px or less", () => {
   assert.doesNotMatch(CSS, /\brx\s*:/);
 });
 
-test("system fonts only, a serif display face and a mono face for data", () => {
-  assert.doesNotMatch(CSS, /@font-face|fonts\.googleapis|url\(/);
-  assert.match(CSS, /--serif: "Iowan Old Style"/);
+test("one self-hosted display face, system faces for text and data", async () => {
+  assert.equal((CSS.match(/@font-face/g) || []).length, 1);
+  assert.deepEqual([...CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1]), ["/fonts/display.woff2"]);
+  assert.doesNotMatch(CSS, /fonts\.googleapis|https?:/);
+  assert.match(CSS, /--display: "Big Shoulders Display"/);
+  const res = await handleRequest(new Request("https://kahf.test/fonts/display.woff2"), fakeStore(), Date.parse(NOW));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "font/woff2");
+  assert.equal(Buffer.from(await res.arrayBuffer()).subarray(0, 4).toString(), "wOF2");
+  assert.match(res.headers.get("content-security-policy"), /default-src 'none'/);
+  const home = (await handleRequest(new Request("https://kahf.test/"), fakeStore(), Date.parse(NOW))).headers.get("content-security-policy");
+  assert.match(home, /font-src 'self'/);
   assert.match(CSS, /--mono: ui-monospace/);
 });
 
@@ -239,7 +248,7 @@ test("the inner pages render, are linked from the nav, and follow the same rules
     const html = renderSite(path);
     assert.equal((html.match(/<h1\b/g) || []).length, 1, path);
     assert.match(html, new RegExp(`<a href="${path}" aria-current="page">`), path);
-    assert.doesNotMatch(html.replace(/<script>[\s\S]*?<\/script>/, ""), EXTERNAL, path);
+    assert.doesNotMatch(html.replace(/<script>[\s\S]*?<\/script>/, "").replace(/<style>[\s\S]*?<\/style>/, ""), EXTERNAL, path);
     assert.doesNotMatch(html, EMOJI, path);
     assert.doesNotMatch(html, /lorem|ipsum|TODO|TBD|coming soon/i, path);
     const res = await handleRequest(new Request("https://kahf.test" + path), fakeStore(), Date.parse(NOW));

@@ -1452,7 +1452,7 @@ const noExternal = (html, where) => {
   const noScript = html.replace(/<script>[\s\S]*?<\/script>/, "");
   check(!/<[a-z][^>]*\son[a-z]+\s*=/i.test(noScript), `${where}: inline event handler in a tag`);
   check(!/(?:href|src|action|xlink:href)\s*=\s*["']?\s*javascript:/i.test(noScript), `${where}: javascript: URL in an attribute`);
-  check(!/url\(\s*["']?(?!#)/i.test(html), `${where}: CSS url() other than a fragment`);
+  check(!/url\(\s*["']?(?!#|\/fonts\/display\.woff2)/i.test(html), `${where}: CSS url() other than a fragment`);
   check(!/@import/i.test(html), `${where}: @import`);
   for (const m of html.matchAll(/\bhref\s*=\s*"([^"]*)"/g)) check(m[1].startsWith("#") || m[1].startsWith("/"), `${where}: href leaves the site: ${m[1]}`);
 };
