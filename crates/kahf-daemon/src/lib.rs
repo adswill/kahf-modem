@@ -24,6 +24,7 @@ use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::ldpc;
 use kahf_core::link::{Action, Link, LinkState};
+use kahf_core::msg::heard::{Heard, HeardList, Observation, DEFAULT_CAP as HEARD_CAP};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::{self, Modulation};
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -206,6 +207,10 @@ struct Shared {
     hops: Mutex<HopLog>,
     /// Relays this station may send through when a station is not reached directly (plan 6.3).
     relay_paths: Mutex<Vec<String>>,
+    /// Stations heard on air (link peers and senders of messages), saved as `heard.txt`.
+    heard: Mutex<HeardList>,
+    /// Serialises reads and writes of `contacts.txt` between the worker and `note_beacon`.
+    contacts_io: Mutex<()>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -288,6 +293,12 @@ impl EventQueue {
             }
         }
         self.items.push_back(ev);
+    }
+}
+
+fn save_heard(dir: &Path, h: &HeardList) {
+    if fs::create_dir_all(dir).is_ok() {
+        let _ = fs::write(dir.join("heard.txt"), h.to_text());
     }
 }
 
@@ -599,6 +610,51 @@ impl Engine {
         lock(&self.shared.pending).clone()
     }
 
+    /// Stations heard on air, most recent first (at most `limit`). Survives restarts.
+    pub fn heard_stations(&self, limit: usize) -> Vec<Heard> {
+        lock(&self.shared.heard)
+            .recent(limit)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Feeds a location beacon payload (a position beacon or a grid beacon) heard on air.
+    /// Records the station's position and grid in the heard list and, when its contact has no
+    /// QTH yet, fills it with the grid so the relay route planner knows where it is. Returns
+    /// the (callsign, grid) learned, or None for any other payload or our own beacon.
+    pub fn note_beacon(&self, payload: &[u8]) -> Option<(String, String)> {
+        let (call, grid, pos) = kahf_core::msg::grid::learn(payload)?;
+        if call.eq_ignore_ascii_case(&self.config.callsign) || !valid_call(&call) {
+            return None;
+        }
+        {
+            let mut h = lock(&self.shared.heard);
+            if h.get(&call).is_none() {
+                let obs = Observation {
+                    snr_db: 0.0,
+                    channel_khz: 0.0,
+                    via: None,
+                };
+                h.hear(&call, now_unix_secs().max(0) as u64, obs, 0);
+            }
+            match pos {
+                Some((la, lo)) => h.set_position(&call, la, lo),
+                None => h.set_grid(&call, &grid),
+            }
+            save_heard(&self.config.data_dir, &h);
+        }
+        let _io = lock(&self.shared.contacts_io);
+        let path = self.config.data_dir.join("contacts.txt");
+        if let Ok(mut list) = contacts::load(&path) {
+            if contacts::fill_grid(&mut list, &call, &grid) {
+                let _ = fs::create_dir_all(&self.config.data_dir);
+                let _ = contacts::save(&path, &list);
+            }
+        }
+        Some((call, grid))
+    }
+
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
@@ -619,6 +675,13 @@ impl Engine {
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
             relay_paths: Mutex::new(Vec::new()),
+            heard: Mutex::new(
+                fs::read_to_string(config.data_dir.join("heard.txt"))
+                    .ok()
+                    .and_then(|t| HeardList::from_text(&t, HEARD_CAP))
+                    .unwrap_or_default(),
+            ),
+            contacts_io: Mutex::new(()),
         });
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
@@ -2426,6 +2489,7 @@ impl Worker {
     }
 
     fn start_qso(&mut self, peer: String) {
+        self.note_heard(&peer);
         let (date, time) = utc_stamp(now_unix_secs());
         self.note_contact(&peer, &date);
         self.qso = Some(OpenQso { peer, date, time });
@@ -2465,6 +2529,8 @@ impl Worker {
             self.log(format!("cannot create {}: {e}", self.data_dir.display()));
             return;
         }
+        let shared = self.shared.clone();
+        let _io = lock(&shared.contacts_io);
         let path = self.data_dir.join("contacts.txt");
         let mut list = match contacts::load(&path) {
             Ok(l) => l,
@@ -2970,7 +3036,23 @@ impl Worker {
         }
     }
 
+    /// Notes that `call` was heard, on the link or as the sender of a message.
+    fn note_heard(&mut self, call: &str) {
+        if !valid_call(call) || call.eq_ignore_ascii_case(&self.callsign) {
+            return;
+        }
+        let obs = Observation {
+            snr_db: 0.0,
+            channel_khz: self.freq_mhz.map_or(0.0, |f| (f * 1000.0) as f32),
+            via: None,
+        };
+        let mut h = lock(&self.shared.heard);
+        h.hear(call, now_unix_secs().max(0) as u64, obs, 0);
+        save_heard(&self.data_dir, &h);
+    }
+
     fn on_message(&mut self, msg: Message) {
+        self.note_heard(sender_of(&msg).to_string().as_str());
         match msg {
             Message::Chat { from, text, .. } => self.emit(Event::Message { from, text }),
             Message::Mail {
@@ -3642,6 +3724,80 @@ mod tests {
         assert!(got.is_some(), "message did not arrive");
     }
 
+    #[test]
+    fn beacon_fills_contact_grid_and_heard_list_persists() {
+        let dir = temp_dir("beacon");
+        let (e, _) = {
+            let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+            let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+            (
+                Engine::spawn(config("AA1AAA", dir.clone()), fake_factory(a.clone(), b.clone())).unwrap(),
+                a,
+            )
+        };
+        // Hand-typed QTH stays; an empty one is filled; a new station is added.
+        let path = dir.join("contacts.txt");
+        fs::create_dir_all(&dir).unwrap();
+        let mut list = Vec::new();
+        contacts::upsert(
+            &mut list,
+            Contact {
+                call: "CC3CCC".into(),
+                name: String::new(),
+                qth: "Home".into(),
+                notes: String::new(),
+                last_heard: None,
+            },
+        );
+        contacts::save(&path, &list).unwrap();
+
+        let gps = kahf_core::msg::grid::beacon_payload("BB1BBB", Some((51.5, -0.12)), None).unwrap();
+        assert_eq!(e.note_beacon(&gps), Some(("BB1BBB".into(), "IO91WM".into())));
+        let manual = kahf_core::msg::grid::beacon_payload("CC3CCC", None, Some("JN58")).unwrap();
+        assert_eq!(e.note_beacon(&manual), Some(("CC3CCC".into(), "JN58".into())));
+        assert_eq!(e.note_beacon(b"junk"), None);
+        let own = kahf_core::msg::grid::beacon_payload("AA1AAA", None, Some("IO91")).unwrap();
+        assert_eq!(e.note_beacon(&own), None);
+
+        let list = contacts::load(&path).unwrap();
+        assert_eq!(list.iter().find(|c| c.call == "BB1BBB").unwrap().qth, "IO91WM");
+        assert_eq!(list.iter().find(|c| c.call == "CC3CCC").unwrap().qth, "Home");
+        let heard = e.heard_stations(10);
+        assert_eq!(heard.len(), 2);
+        assert!(heard.iter().all(|h| h.position.is_some()));
+        drop(e);
+        // A new engine on the same folder still knows them.
+        let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let e2 = Engine::spawn(config("AA1AAA", dir), fake_factory(a, b)).unwrap();
+        assert_eq!(e2.heard_stations(10).len(), 2);
+    }
+
+    #[test]
+    fn loopback_records_heard_station() {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = Engine::spawn(
+            config("AA1AAA", temp_dir("heard-a")),
+            fake_factory(b_to_a.clone(), a_to_b.clone()),
+        )
+        .unwrap();
+        let mut b = Engine::spawn(
+            config("BB1BBB", temp_dir("heard-b")),
+            fake_factory(a_to_b.clone(), b_to_a.clone()),
+        )
+        .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            60
+        )
+        .is_some());
+        assert!(a.heard_stations(5).iter().any(|h| h.call == "BB1BBB"));
+    }
+
     /// One station with a fake radio whose transmit output is `a_to_b`.
     fn lone_station(tag: &str) -> (Engine, Pipe) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
@@ -3823,6 +3979,8 @@ mod tests {
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
             relay_paths: Mutex::new(Vec::new()),
+            heard: Mutex::new(HeardList::default()),
+            contacts_io: Mutex::new(()),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, dir);
