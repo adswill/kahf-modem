@@ -2214,15 +2214,30 @@ mod tests {
                 seg.name
             );
         }
+        // A start the daemon refuses (no callsign here) leaves the band as it was.
         let mut app = App::init();
         app.relay_licence = true;
         app.relay_terms = true;
         app.start_relay(Role::Relay);
+        assert!(!app.role.is_relay());
+        assert_eq!(app.band, spectrum::Band::M40);
+
+        let mut app = App::init();
+        app.callsign = "XX0AB".into();
+        app.data_dir = std::env::temp_dir().join(format!("kahf-ui-relay-{}", std::process::id()));
+        app.relay_licence = true;
+        app.relay_terms = true;
+        app.start_relay(Role::Relay);
+        assert!(app.role.is_relay(), "relay did not start: {:?}", app.events);
         assert_eq!(app.band, spectrum::Band::M17);
         assert!(spectrum::channels()
             .iter()
             .all(|(hz, _)| (18_111_000.0..=18_120_000.0).contains(hz)));
         assert!(!spectrum::channels().is_empty());
+        drop(app);
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("kahf-ui-relay-{}", std::process::id())),
+        );
     }
 
     #[test]
