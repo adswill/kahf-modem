@@ -2,12 +2,11 @@
 // the legal notes. Static HTML. Every claim here comes from the user guide, the
 // release notes or the modem source; where a feature is not built yet, the text says so.
 
-/** @type {Record<string, { title: string, description: string, nav: string, body: () => string }>} */
+/** @type {Record<string, { title: string, description: string, body: () => string }>} */
 export const SITE_PAGES = {
   "/network": {
     title: "KAHF relay network",
     description: "How KAHF relays pass messages between amateur stations that cannot hear each other, and what a relay operator agrees to.",
-    nav: "Network",
     body: () => `
 <div class="wrap">
 <div class="pagehead">
@@ -64,7 +63,6 @@ export const SITE_PAGES = {
   "/start": {
     title: "Get started with KAHF",
     description: "What you need, how to install KAHF and how to send a first message.",
-    nav: "Get started",
     body: () => `
 <div class="wrap">
 <div class="pagehead">
@@ -83,7 +81,7 @@ export const SITE_PAGES = {
 <section class="sec" aria-labelledby="s-steps">
 <h2 id="s-steps">First run</h2>
 <ol class="steps">
-<li><b>Install.</b>Download the build for your system. It is not signed with an Apple or Microsoft certificate yet, so your computer will warn you. On macOS, right-click and choose Open. On Windows, choose More info, then Run anyway.</li>
+<li><b>Install.</b>Download the build for your system. It is not signed with an Apple or Microsoft certificate yet, so your computer will warn you. On macOS, right-click and choose Open.</li>
 <li><b>Set up.</b>Enter your callsign, choose the audio device for your radio, and set the radio to a data mode. KAHF starts in listen only, so nothing is sent.</li>
 <li><b>Listen.</b>Tune a 17 m channel inside 18.068 to 18.168 MHz and watch the spectrum. Check the channel is clear before you connect.</li>
 <li><b>Send.</b>Connect to a station, write a message, and confirm. KAHF asks you before every transmission.</li>
@@ -105,7 +103,6 @@ export const SITE_PAGES = {
   "/protocol": {
     title: "KAHF modem details",
     description: "The KAHF modem in numbers: OFDM carriers, LDPC code, frame size, and what a message costs on air.",
-    nav: "Modem",
     body: () => `
 <div class="wrap">
 <div class="pagehead">
@@ -149,7 +146,6 @@ export const SITE_PAGES = {
   "/legal": {
     title: "KAHF licence, privacy and responsibility",
     description: "Licence, your responsibility as a licensed operator, map privacy and content rules for KAHF.",
-    nav: "Legal",
     body: () => `
 <div class="wrap">
 <div class="pagehead">

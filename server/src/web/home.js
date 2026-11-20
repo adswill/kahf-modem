@@ -50,7 +50,7 @@ export function bandStrip() {
   return `<figure class="band">
 <svg viewBox="0 0 ${W} 216" role="img" aria-labelledby="bs-t bs-d">
 <title id="bs-t">The 17 metre band, 18.068 to 18.168 megahertz</title>
-<desc id="bs-d">A frequency scale across the 100 kilohertz of the 17 metre amateur band with a waterfall of four signals, each about 2.4 kilohertz wide. An illustration, not a recording.</desc>
+<desc id="bs-d">A frequency scale across the 100 kilohertz of the 17 metre amateur band with a waterfall of five signals, each about 2.4 kilohertz wide. An illustration, not a recording.</desc>
 ${wf}
 <line class="edge" x1="0" y1="${scaleY}" x2="${W}" y2="${scaleY}"/>
 ${ticks}

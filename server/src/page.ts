@@ -270,6 +270,7 @@ ${head}
 <div class="wrap${wide ? " wide" : ""}">
 <a class="brand" href="/">KAHF</a>
 <nav aria-label="Main">
+<a href="/"${cur("home")}>Home</a>
 <a href="/network"${cur("network")}>Network</a>
 <a href="/map"${cur("map")}>Live map</a>
 <a href="/protocol"${cur("protocol")}>Modem</a>
@@ -285,9 +286,9 @@ ${body}
 <footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
 <div class="cols">
-<div><h3>KAHF</h3><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Copyright (c) 2026 adswill.</p></div>
-<div><h3>Site</h3><ul><li><a href="/">Home</a></li><li><a href="/network">Relay network</a></li><li><a href="/map">Live map</a></li></ul></div>
-<div><h3>Project</h3><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
+<div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Copyright (c) 2026 adswill.</p></div>
+<div><p class="label">Site</p><ul><li><a href="/">Home</a></li><li><a href="/network">Relay network</a></li><li><a href="/map">Live map</a></li></ul></div>
+<div><p class="label">Project</p><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
 </div>
 </div>
 </footer>

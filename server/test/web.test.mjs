@@ -234,7 +234,7 @@ test("pages stay small", () => {
 
 test("the inner pages render, are linked from the nav, and follow the same rules as the home page", async () => {
   const { SITE_PATHS, renderSite } = await import("../src/page.ts");
-  assert.deepEqual(SITE_PATHS.sort(), ["/legal", "/network", "/protocol", "/start"]);
+  assert.deepEqual([...SITE_PATHS].sort(), ["/legal", "/network", "/protocol", "/start"]);
   for (const path of SITE_PATHS) {
     const html = renderSite(path);
     assert.equal((html.match(/<h1\b/g) || []).length, 1, path);

@@ -140,7 +140,7 @@ figcaption { font: 12px/1.5 var(--mono); color: var(--muted); margin-top: 10px; 
 .foot { border-top: 1px solid var(--line); padding: 36px 0 44px; color: var(--muted); font-size: 14px; }
 .foot .cols { display: grid; gap: 24px; grid-template-columns: 1fr; }
 @media (min-width: 760px) { .foot .cols { grid-template-columns: 2fr 1fr 1fr; } }
-.foot h3 { margin-top: 0; }
+.foot .label { margin-bottom: 8px; }
 .foot ul { list-style: none; margin: 0; padding: 0; font: 13px/2 var(--mono); }
 .foot a { color: var(--muted); }
 .foot a:hover { color: var(--fg); }
