@@ -49,6 +49,56 @@ pub const SILENT_HELP: &str =
 Microphone and allow KAHF, then restart the app. Also check the microphone in Settings, under Radio, \
 and that it is not muted.";
 
+/// Sound devices that carry the radio's audio or are virtual cables, not a person's microphone or
+/// speakers. A voice note recorded from or played to one of these is never heard.
+fn is_virtual(name: &str) -> bool {
+    let n = name.to_lowercase();
+    [
+        "blackhole",
+        "loopback",
+        "soundflower",
+        "vb-cable",
+        "vb-audio",
+        "virtual",
+        "aggregate",
+        "multi-output",
+    ]
+    .iter()
+    .any(|v| n.contains(v))
+}
+
+/// Which device a voice note uses. The person's choice in Settings wins. Otherwise the system
+/// default, unless that is the radio's own device or a virtual cable (as when two copies of KAHF
+/// are tested over BlackHole), in which case the first real microphone or speaker. `None` means
+/// "use the system default". The second value says what was chosen, for the log.
+pub fn choose_device(
+    configured: Option<&str>,
+    default: Option<&str>,
+    all: &[String],
+    radio: Option<&str>,
+) -> (Option<String>, String) {
+    if let Some(c) = configured.map(str::trim).filter(|c| !c.is_empty()) {
+        return (Some(c.to_string()), format!("{c} (chosen in Settings)"));
+    }
+    let radio = radio.map(str::trim).filter(|r| !r.is_empty());
+    let bad = |n: &str| is_virtual(n) || radio.is_some_and(|r| r == n);
+    match default {
+        Some(d) if !bad(d) => (None, format!("{d} (system default)")),
+        _ => match all.iter().find(|n| !bad(n)) {
+            Some(n) => (
+                Some(n.clone()),
+                format!("{n} (the system default is a radio or virtual device)"),
+            ),
+            None => (
+                None,
+                default.map_or("the system default".into(), |d| {
+                    format!("{d} (system default, no other device found)")
+                }),
+            ),
+        },
+    }
+}
+
 fn to_i16(x: f32) -> i16 {
     (x.clamp(-1.0, 1.0) * 32767.0) as i16
 }
@@ -354,6 +404,49 @@ mod tests {
         let bytes = encode(&thirty_seconds).len();
         assert_eq!(bytes, 4 + 750 * 6);
         assert!(bytes <= 5000, "{bytes}");
+    }
+
+    #[test]
+    fn voice_notes_stay_off_the_radio_and_virtual_devices() {
+        let all: Vec<String> = ["BlackHole 2ch", "MacBook Pro Microphone", "USB Audio CODEC"]
+            .map(String::from)
+            .to_vec();
+        // The person's choice always wins.
+        assert_eq!(
+            choose_device(Some("USB Audio CODEC"), Some("BlackHole 2ch"), &all, None)
+                .0
+                .as_deref(),
+            Some("USB Audio CODEC")
+        );
+        // A normal default is used as it is.
+        assert_eq!(
+            choose_device(
+                None,
+                Some("MacBook Pro Microphone"),
+                &all,
+                Some("USB Audio CODEC")
+            )
+            .0,
+            None
+        );
+        // A virtual cable as default is skipped.
+        assert_eq!(
+            choose_device(None, Some("BlackHole 2ch"), &all, None)
+                .0
+                .as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+        // So is the radio's own device, even with a normal name.
+        assert_eq!(
+            choose_device(None, Some("USB Audio CODEC"), &all, Some("USB Audio CODEC"))
+                .0
+                .as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+        // Nothing better: fall back to the default rather than fail.
+        let only: Vec<String> = vec!["BlackHole 2ch".into()];
+        assert_eq!(choose_device(None, Some("BlackHole 2ch"), &only, None).0, None);
+        assert_eq!(choose_device(Some("  "), None, &[], None).0, None);
     }
 
     #[test]

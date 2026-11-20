@@ -490,13 +490,28 @@ fn open_path(path: String) -> Res<()> {
     r.map(|_| ()).map_err(|e| format!("Cannot open the folder: {e}"))
 }
 
+/// The device a voice note records from or plays to, with a log line saying which.
+fn voice_device(app: &AppHandle, state: &State<Shared>, input: bool) -> Option<String> {
+    let v = settings::load(&state.data_dir);
+    let own = v[if input { "micIn" } else { "speakerOut" }].as_str();
+    let radio = v[if input { "audioIn" } else { "audioOut" }].as_str();
+    let (device, label) = voice::choose_device(
+        own,
+        kahf_audio::default_device_name(input).as_deref(),
+        &kahf_audio::device_names(input),
+        radio,
+    );
+    let what = if input { "recording from" } else { "playing on" };
+    let _ = app.emit(
+        "engine",
+        json!({ "type": "log", "text": format!("Voice note: {what} {label}.") }),
+    );
+    device
+}
+
 #[tauri::command]
 fn voice_record(app: AppHandle, state: State<Shared>) -> Res<()> {
-    let mic = settings::load(&state.data_dir)["micIn"]
-        .as_str()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .map(String::from);
+    let mic = voice_device(&app, &state, true);
     state.voice.record(app, mic)
 }
 
@@ -511,12 +526,8 @@ fn voice_cancel(state: State<Shared>) {
 }
 
 #[tauri::command]
-fn voice_play(state: State<Shared>, path: String) -> Res<()> {
-    let speaker = settings::load(&state.data_dir)["speakerOut"]
-        .as_str()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .map(String::from);
+fn voice_play(app: AppHandle, state: State<Shared>, path: String) -> Res<()> {
+    let speaker = voice_device(&app, &state, false);
     state.voice.play(std::path::Path::new(&path), speaker)
 }
 
