@@ -57,7 +57,7 @@ const PEAK: f64 = 0.95;
 /// Channel model for the estimate: an impulse response of this many samples.
 /// Least-squares projection onto it averages noise over the carriers without
 /// the bias of a boxcar, so echoes up to this delay are followed exactly.
-const CIR_TAPS: usize = 24;
+const CIR_TAPS: usize = 40;
 /// Scale on the max-log LLRs. 1.0 is the exact max-log value (distance difference over
 /// the complex noise power). With the previous 0.4 the offset min-sum decoder gave
 /// about 10 percent frame errors on the two-path echo at 1 dB.
@@ -69,7 +69,7 @@ const DD_PASSES: usize = 2;
 /// frames in fade and clock-offset runs.
 const SEARCH_MARGIN: usize = 64 * SYM;
 /// Decay length (taps) of the exponential power-delay profile used as the channel prior.
-const PDP_DECAY: f64 = 8.0;
+const PDP_DECAY: f64 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct C {
@@ -431,6 +431,61 @@ fn smooth_channel(p: &Phy, est: &[C], wgt: &[f64]) -> Vec<C> {
         .collect()
 }
 
+/// Common-phase and slope tracker across symbols. The phase of symbol s is predicted from
+/// the earlier ones (constant drift, from residual CFO), so the pilot fit only sees a small
+/// residual and cannot wrap. Without it a long frame with a CFO error of a fraction of a
+/// hertz passes pi within a few seconds and the per-symbol fit breaks.
+#[derive(Clone, Copy, Default)]
+struct PhaseTrack {
+    a: f64,
+    b: f64,
+    d: f64,
+}
+
+impl PhaseTrack {
+    fn predict(&self) -> (f64, f64) {
+        (self.a + self.d, self.b)
+    }
+    /// Add the fitted residual `(ar, br)` to the prediction and learn the drift.
+    fn update(&mut self, ar: f64, br: f64) -> (f64, f64) {
+        let (ap, bp) = self.predict();
+        let (a, b) = (ap + ar, bp + br);
+        self.d = 0.9 * self.d + 0.1 * (a - self.a);
+        self.a = a;
+        self.b = b;
+        (a, b)
+    }
+}
+
+/// Weighted line fit of the pilot phases of `z` (already de-rotated by the prediction).
+fn pilot_phase_fit(p: &Phy, z: &[C], hw: &[f64]) -> (f64, f64) {
+    let (mut sw, mut sx, mut sxx, mut st, mut sxt) = (0f64, 0f64, 0f64, 0f64, 0f64);
+    for &i in &p.pilots {
+        let u = z[i] * pilot_value(i);
+        let th = u.im.atan2(u.re);
+        let (xi, wi) = (i as f64, hw[i]);
+        sw += wi;
+        sx += wi * xi;
+        sxx += wi * xi * xi;
+        st += wi * th;
+        sxt += wi * xi * th;
+    }
+    let den = sw * sxx - sx * sx;
+    if sw > 0.0 && den.abs() > 1e-12 {
+        let b = (sw * sxt - sx * st) / den;
+        ((st - b * sx) / sw, b)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+fn derotate(z: &mut [C], a: f64, b: f64) {
+    for (i, zi) in z.iter_mut().enumerate() {
+        let ang = a + b * i as f64;
+        *zi = *zi * C::new(ang.cos(), -ang.sin());
+    }
+}
+
 /// Output of one equalisation pass over the data symbols.
 struct Equalised {
     /// Equalised data carriers, symbol by symbol.
@@ -438,6 +493,8 @@ struct Equalised {
     /// Weighted pilot residual sum and pilot count (noise estimate).
     resid: f64,
     cnt: usize,
+    /// |channel|^2 at each equalised data carrier (weights the soft decisions).
+    gain: Vec<f64>,
 }
 
 /// Equalise `n_sym` data symbols with channel `h` (weights `hw` = |h|^2). Per symbol, a
@@ -449,36 +506,20 @@ fn equalise(p: &Phy, y: &[C], start: usize, n_sym: usize, h: &[C], hw: &[f64]) -
         zs: Vec::with_capacity(n_sym * p.data.len()),
         resid: 0.0,
         cnt: 0,
+        gain: Vec::new(),
     };
     let mut z = vec![C::ZERO; NACT];
+    let mut trk = PhaseTrack::default();
     for s in 0..n_sym {
         p.analyse(y, start + SYM * (2 + s), &mut fb, &mut yv);
         for i in 0..NACT {
             z[i] = yv[i].div(h[i]);
         }
-        let (mut sw, mut sx, mut sxx, mut st, mut sxt) = (0f64, 0f64, 0f64, 0f64, 0f64);
-        for &i in &p.pilots {
-            let u = z[i] * pilot_value(i);
-            let th = u.im.atan2(u.re);
-            let xi = i as f64;
-            let wi = hw[i];
-            sw += wi;
-            sx += wi * xi;
-            sxx += wi * xi * xi;
-            st += wi * th;
-            sxt += wi * xi * th;
-        }
-        let den = sw * sxx - sx * sx;
-        let (a, b) = if sw > 0.0 && den.abs() > 1e-12 {
-            let b = (sw * sxt - sx * st) / den;
-            ((st - b * sx) / sw, b)
-        } else {
-            (0.0, 0.0)
-        };
-        for (i, zi) in z.iter_mut().enumerate() {
-            let ang = a + b * i as f64;
-            *zi = *zi * C::new(ang.cos(), -ang.sin());
-        }
+        let (ap, bp) = trk.predict();
+        derotate(&mut z, ap, bp);
+        let (ar, br) = pilot_phase_fit(p, &z, hw);
+        derotate(&mut z, ar, br);
+        trk.update(ar, br);
         for &i in &p.pilots {
             let e = z[i] - C::new(pilot_value(i), 0.0);
             out.resid += e.norm2() * hw[i];
@@ -486,6 +527,61 @@ fn equalise(p: &Phy, y: &[C], start: usize, n_sym: usize, h: &[C], hw: &[f64]) -
         }
         for &i in &p.data {
             out.zs.push(z[i]);
+            out.gain.push(hw[i]);
+        }
+    }
+    out
+}
+
+/// Equalise with a time-varying channel: the estimate for symbol s uses only the pilots of
+/// symbols s-w..=s+w (all 38 pilots of each), fitted to the impulse-response model. Follows
+/// fading at Doppler spreads of about 1 Hz and above, where one estimate for the whole frame
+/// fails. Costs estimation noise (fewer observations), so the static estimate is better on
+/// a steady channel.
+fn equalise_tracked(p: &Phy, y: &[C], start: usize, n_sym: usize, w: usize) -> Equalised {
+    let mut fb = vec![C::ZERO; N];
+    let mut yv = vec![C::ZERO; NACT];
+    let mut obs: Vec<Vec<C>> = Vec::with_capacity(n_sym);
+    let mut raw_y: Vec<Vec<C>> = Vec::with_capacity(n_sym);
+    for s in 0..n_sym {
+        p.analyse(y, start + SYM * (2 + s), &mut fb, &mut yv);
+        let mut o = vec![C::ZERO; NACT];
+        for &i in &p.pilots {
+            o[i] = yv[i] * pilot_value(i);
+        }
+        obs.push(o);
+        raw_y.push(yv.clone());
+    }
+    let mut out = Equalised {
+        zs: Vec::with_capacity(n_sym * p.data.len()),
+        resid: 0.0,
+        cnt: 0,
+        gain: Vec::with_capacity(n_sym * p.data.len()),
+    };
+    for (s, ry) in raw_y.iter().enumerate() {
+        let (lo, hi) = (s.saturating_sub(w), (s + w).min(n_sym - 1));
+        let mut num = vec![C::ZERO; NACT];
+        let mut den = vec![0f64; NACT];
+        for o in &obs[lo..=hi] {
+            for &i in &p.pilots {
+                num[i] = num[i] + o[i];
+                den[i] += 1.0;
+            }
+        }
+        let raw: Vec<C> = num
+            .iter()
+            .zip(&den)
+            .map(|(&n, &d)| if d > 0.0 { n * (1.0 / d) } else { C::ZERO })
+            .collect();
+        let h = smooth_channel(p, &raw, &den);
+        for &i in &p.pilots {
+            let e = ry[i].div(h[i]) - C::new(pilot_value(i), 0.0);
+            out.resid += e.norm2() * h[i].norm2();
+            out.cnt += 1;
+        }
+        for &i in &p.data {
+            out.zs.push(ry[i].div(h[i]));
+            out.gain.push(h[i].norm2());
         }
     }
     out
@@ -648,6 +744,20 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
         }
     }
 
+    demod_aligned(p, &y, start, m, n_bits, false, None)
+}
+
+/// Channel estimate, equalisation and soft demapping for a frame whose symbol A starts at
+/// `start` in the CFO-corrected analytic signal `y`.
+fn demod_aligned(
+    p: &Phy,
+    y: &[C],
+    start: usize,
+    m: Modulation,
+    n_bits: usize,
+    weak: bool,
+    track: Option<usize>,
+) -> Option<Vec<f32>> {
     if n_bits == 0 {
         return Some(Vec::new());
     }
@@ -663,11 +773,11 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
     let mut yv = vec![C::ZERO; NACT];
 
     // 5. Channel estimate from symbol B (known BPSK on every active carrier).
-    p.analyse(&y, start + SYM, &mut fb, &mut yv);
+    p.analyse(y, start + SYM, &mut fb, &mut yv);
     let eb: Vec<C> = yv.iter().zip(&p.pre).map(|(v, &s)| *v * s).collect();
     // Sync A (pilots only, boosted by `boost`) adds an estimate on each pilot.
     // Its weight is boost^2 (each pilot has that much more SNR than a data carrier).
-    p.analyse(&y, start, &mut fb, &mut yv);
+    p.analyse(y, start, &mut fb, &mut yv);
     let boost = (NACT as f64 / p.pilots.len() as f64).sqrt();
     let wa = boost * boost;
     let mut num = eb.clone();
@@ -681,13 +791,46 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
     let raw: Vec<C> = num.iter().zip(&den).map(|(&n, &d)| n * (1.0 / d)).collect();
     let mut h = smooth_channel(p, &raw, &den);
     let mut hw: Vec<f64> = h.iter().map(|c| c.norm2()).collect();
-    let mut eq = equalise(p, &y, start, n_sym, &h, &hw);
+    let mut eq = equalise(p, y, start, n_sym, &h, &hw);
     // 6b. Decision-directed refinement: every data carrier of every data symbol adds an
     //     observation (its nearest constellation point from the previous pass), so the
     //     estimate averages over the whole frame. Repeated, each pass re-decides on the
     //     refined channel.
     let table = &p.cons[mod_idx(m)];
-    for _ in 0..DD_PASSES {
+    if weak {
+        // Below about 0 dB the decisions are mostly wrong, so decision-directed refinement
+        // would feed noise back. The pilots of every data symbol are known, so they refine
+        // the (static) channel without that risk. Each symbol is de-rotated by its fitted
+        // common phase and slope first, which absorbs residual CFO and clock drift.
+        for _ in 0..2 {
+            let mut num2 = num.clone();
+            let mut den2 = den.clone();
+            let mut fb2 = vec![C::ZERO; N];
+            let mut yv2 = vec![C::ZERO; NACT];
+            let mut trk = PhaseTrack::default();
+            let mut zt = vec![C::ZERO; NACT];
+            for s in 0..n_sym {
+                p.analyse(y, start + SYM * (2 + s), &mut fb2, &mut yv2);
+                for i in 0..NACT {
+                    zt[i] = yv2[i].div(h[i]);
+                }
+                let (ap, bp) = trk.predict();
+                derotate(&mut zt, ap, bp);
+                let (ar, br) = pilot_phase_fit(p, &zt, &hw);
+                let (a, b) = trk.update(ar, br);
+                for &i in &p.pilots {
+                    let ang = a + b * i as f64;
+                    num2[i] = num2[i] + yv2[i] * C::new(ang.cos(), -ang.sin()) * pilot_value(i);
+                    den2[i] += 1.0;
+                }
+            }
+            let raw2: Vec<C> = num2.iter().zip(&den2).map(|(&n, &d)| n * (1.0 / d)).collect();
+            h = smooth_channel(p, &raw2, &den2);
+            hw = h.iter().map(|c| c.norm2()).collect();
+        }
+        eq = equalise(p, y, start, n_sym, &h, &hw);
+    }
+    for _ in 0..if weak { 0 } else { DD_PASSES } {
         let mut num2 = num.clone();
         let mut den2 = den.clone();
         for (k, &zk) in eq.zs.iter().enumerate() {
@@ -703,16 +846,19 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
         let raw2: Vec<C> = num2.iter().zip(&den2).map(|(&n, &d)| n * (1.0 / d)).collect();
         h = smooth_channel(p, &raw2, &den2);
         hw = h.iter().map(|c| c.norm2()).collect();
-        eq = equalise(p, &y, start, n_sym, &h, &hw);
+        eq = equalise(p, y, start, n_sym, &h, &hw);
+    }
+    if let Some(w) = track {
+        eq = equalise_tracked(p, y, start, n_sym, w);
     }
     let zs = eq.zs;
+    let gains = eq.gain;
     let sigma2 = (eq.resid / eq.cnt as f64).max(1e-12);
 
     // 7. Max-log LLRs, scaled by channel gain over noise: s2_k = sigma2 / |H_k|^2.
     let mut llr: Vec<f32> = Vec::with_capacity(n_sym * per_sym);
     for (k, &zk) in zs.iter().enumerate() {
-        let i = p.data[k % nd];
-        let s2 = sigma2 / hw[i].max(1e-12);
+        let s2 = sigma2 / gains[k].max(1e-12);
         let mut d0 = [f64::INFINITY; MAX_BPS];
         let mut d1 = [f64::INFINITY; MAX_BPS];
         for &(v, pt) in table.iter() {
@@ -741,6 +887,186 @@ pub fn demodulate_frame(samples: &[f32], m: Modulation, n_bits: usize) -> Option
         }
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// Weak-signal acquisition. The ordinary frame is found by a Schmidl-Cox metric over one
+// OFDM symbol, which stops working near 0 dB. A weak frame is preceded by a long known
+// noise-like preamble instead. The receiver cross-correlates against it (FFT based) at a
+// grid of carrier offsets, which gives timing and CFO with about 33 dB of processing gain.
+// ---------------------------------------------------------------------------------------
+
+/// Length of the weak-signal preamble in samples (0.256 s).
+pub const WEAK_PRE_LEN: usize = 2048;
+/// Carrier-offset hypotheses: step (Hz) and half-range (Hz). The step keeps the
+/// coherence loss across the preamble under about 1 dB.
+const WEAK_CFO_STEP: f64 = 1.5;
+const WEAK_CFO_RANGE: f64 = 15.0;
+/// Detection threshold on rho * WEAK_PRE_LEN, where rho is the normalised correlation power.
+/// Noise alone gives an exponential with mean 1 (a maximum near 16 over a long search).
+const WEAK_THRESH: f64 = 24.0;
+/// Longest stretch searched (samples). Longer input is cut.
+const WEAK_MAX_SEARCH: usize = 1 << 18;
+/// The weak frame starts this many samples before the correlation peak says, so the
+/// channel impulse response stays causal for paths that arrive before the strongest one.
+const WEAK_EARLY: usize = 16;
+
+fn weak_preamble() -> &'static Vec<f64> {
+    static PRE: OnceLock<Vec<f64>> = OnceLock::new();
+    PRE.get_or_init(|| {
+        let l = WEAK_PRE_LEN;
+        let plan = Fft::new(l);
+        let mut buf = vec![C::ZERO; l];
+        // Same band as the OFDM carriers, 3.9 Hz bin spacing.
+        let (k0, k1) = (FIRST_BIN * l / N, LAST_BIN * l / N);
+        for k in k0..=k1 {
+            let v = C::new(pn_sign(10_000 + k as u64), 0.0);
+            buf[k] = v.conj();
+            buf[l - k] = v;
+        }
+        plan.forward(&mut buf);
+        let mut x: Vec<f64> = buf.iter().map(|c| c.re).collect();
+        let rms = (x.iter().map(|v| v * v).sum::<f64>() / l as f64).sqrt();
+        x.iter_mut().for_each(|v| *v /= rms);
+        x
+    })
+}
+
+/// Like [`modulate_frame`], preceded by the weak-signal preamble. Pair with [`demodulate_weak`].
+pub fn modulate_weak(coded: &[u8], m: Modulation) -> Vec<f32> {
+    let body = modulate_frame(coded, m);
+    let rms = (body.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / body.len().max(1) as f64).sqrt();
+    let mut out: Vec<f32> = weak_preamble().iter().map(|&v| (v * rms) as f32).collect();
+    out.extend_from_slice(&body);
+    let peak = out.iter().fold(0f32, |a, v| a.max(v.abs()));
+    if peak > PEAK as f32 {
+        let g = PEAK as f32 / peak;
+        out.iter_mut().for_each(|v| *v *= g);
+    }
+    out
+}
+
+/// Locate the weak-signal preamble. Returns the CFO-corrected analytic signal and the start
+/// of the OFDM frame in it.
+fn weak_sync(samples: &[f32]) -> Option<(Vec<C>, usize)> {
+    let l = WEAK_PRE_LEN;
+    let x: Vec<f64> = samples[..samples.len().min(WEAK_MAX_SEARCH)]
+        .iter()
+        .map(|&v| v as f64)
+        .collect();
+    if x.len() < l + 2 * SYM {
+        return None;
+    }
+    let z = analytic(&x);
+    let tpl = analytic(weak_preamble());
+    let tpl_e: f64 = tpl.iter().map(|c| c.norm2()).sum();
+    let size = (z.len() + l).next_power_of_two();
+    let plan = Fft::new(size);
+    let inverse = |buf: &mut Vec<C>| {
+        buf.iter_mut().for_each(|c| *c = c.conj());
+        plan.forward(buf);
+        let k = 1.0 / size as f64;
+        buf.iter_mut().for_each(|c| *c = c.conj() * k);
+    };
+    let mut tf = vec![C::ZERO; size];
+    tf[..l].copy_from_slice(&tpl);
+    plan.forward(&mut tf);
+
+    // Window energy for every start t (CFO does not change magnitudes).
+    let nt = z.len() - l;
+    let mut energy = Vec::with_capacity(nt + 1);
+    let mut e: f64 = z[..l].iter().map(|c| c.norm2()).sum();
+    for t in 0..=nt {
+        energy.push(e);
+        if t < nt {
+            e += z[t + l].norm2() - z[t].norm2();
+        }
+    }
+
+    let nh = (2.0 * WEAK_CFO_RANGE / WEAK_CFO_STEP).round() as i32;
+    let mut best = (0f64, 0usize, 0f64);
+    let mut buf = vec![C::ZERO; size];
+    for h in 0..=nh {
+        let f = -WEAK_CFO_RANGE + h as f64 * WEAK_CFO_STEP;
+        let w = -2.0 * PI * f / FS;
+        let step = C::new(w.cos(), w.sin());
+        let mut ph = C::new(1.0, 0.0);
+        buf.iter_mut().for_each(|c| *c = C::ZERO);
+        for (b, &v) in buf.iter_mut().zip(&z) {
+            *b = v * ph;
+            ph = ph * step;
+        }
+        plan.forward(&mut buf);
+        for (b, t) in buf.iter_mut().zip(&tf) {
+            *b = *b * t.conj();
+        }
+        inverse(&mut buf);
+        for t in 0..=nt {
+            let rho = buf[t].norm2() / (energy[t] * tpl_e).max(1e-30);
+            if rho * l as f64 > best.0 {
+                best = (rho * l as f64, t, f);
+            }
+        }
+    }
+    if best.0 < WEAK_THRESH {
+        return None;
+    }
+    let (_, t0, f0) = best;
+
+    // Fine CFO from the phase advance between the two halves of the preamble.
+    let w = -2.0 * PI * f0 / FS;
+    let (mut c1, mut c2) = (C::ZERO, C::ZERO);
+    for n in 0..l {
+        let ph = w * (t0 + n) as f64;
+        let v = z[t0 + n] * C::new(ph.cos(), ph.sin()) * tpl[n].conj();
+        if n < l / 2 {
+            c1 = c1 + v;
+        } else {
+            c2 = c2 + v;
+        }
+    }
+    let dphi = (c2 * c1.conj()).im.atan2((c2 * c1.conj()).re);
+    let cfo = f0 + dphi * FS / (2.0 * PI * (l / 2) as f64);
+
+    let w = -2.0 * PI * cfo / FS;
+    let step = C::new(w.cos(), w.sin());
+    let mut ph = C::new(1.0, 0.0);
+    let y: Vec<C> = z
+        .iter()
+        .map(|&v| {
+            let r = v * ph;
+            ph = ph * step;
+            r
+        })
+        .collect();
+    let start = (t0 + l).saturating_sub(WEAK_EARLY);
+    if start + SYM * 2 > y.len() {
+        return None;
+    }
+    Some((y, start))
+}
+
+/// Find a weak-signal frame by its preamble and return the coded-bit LLRs, or None. Works well
+/// below the SNR at which [`demodulate_frame`] can synchronise.
+pub fn demodulate_weak(samples: &[f32], m: Modulation, n_bits: usize) -> Option<Vec<f32>> {
+    demodulate_weak_variants(samples, m, n_bits, &[None]).map(|mut v| v.remove(0))
+}
+
+/// As [`demodulate_weak`], with one set of LLRs per entry of `windows`. `None` is the static
+/// channel estimate (best on a steady channel); `Some(w)` tracks the channel over a window of
+/// 2w+1 symbols (for fading). Sync is done once. The caller keeps whichever set decodes.
+pub fn demodulate_weak_variants(
+    samples: &[f32],
+    m: Modulation,
+    n_bits: usize,
+    windows: &[Option<usize>],
+) -> Option<Vec<Vec<f32>>> {
+    let p = phy();
+    let (y, start) = weak_sync(samples)?;
+    windows
+        .iter()
+        .map(|&w| demod_aligned(p, &y, start, m, n_bits, true, w))
+        .collect()
 }
 
 #[cfg(test)]
