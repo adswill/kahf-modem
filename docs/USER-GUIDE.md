@@ -202,6 +202,18 @@ When it is available, a relay station asks the operator to:
 
 Do not take on the relay role unless you can keep the station running as agreed.
 
+How radio relay works in the engine:
+
+- A message waits two minutes for its station. If the station is not reached and you have named
+  relays, the log says **Could not reach XX1XX on air. It goes by radio relay through ... once
+  connected.** Connect to one of those relays and the message goes to it.
+- A relay in relay mode, with **Relay other stations' messages** on, holds a message for another
+  station. In its next transmit slot it calls that station, passes the message on exactly as
+  heard (the signature and the private mark stay), and hangs up when the station has
+  acknowledged it. A relay does not show these messages in its own inbox.
+- Each message is passed on once. Copies heard again and messages that loop back are dropped.
+  A relay holds at most 64 messages for other stations.
+
 ## 10. Location sharing
 
 Location sharing decides how much of your position other stations and a map may learn. There are

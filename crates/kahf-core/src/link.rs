@@ -209,6 +209,12 @@ impl Link {
         out
     }
 
+    /// True when every data chunk handed to `send` has been acknowledged by the peer:
+    /// nothing is queued and nothing is in flight. A caller can hang up safely then.
+    pub fn is_flushed(&self) -> bool {
+        self.tx_queue.is_empty() && self.slots.iter().all(Option::is_none)
+    }
+
     /// Advance the clock to `now_ms`: retransmit handshake and DATA frames whose timers
     /// expired. Gives up (drops to Idle) after the retry limits are reached.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
@@ -702,6 +708,18 @@ mod tests {
             n.send_a(&chunk);
         }
         assert_eq!(session::decode(&n.b_rx), Some(msg));
+    }
+
+    #[test]
+    fn flushed_only_once_the_peer_has_acknowledged_everything() {
+        let mut n = connected_pair();
+        assert!(n.a.is_flushed());
+        // Held on the wire: the frames are in flight, not acknowledged.
+        let acts = n.a.send(&[7u8; 100]);
+        n.apply(true, acts);
+        assert!(!n.a.is_flushed());
+        n.run();
+        assert!(n.a.is_flushed());
     }
 
     #[test]

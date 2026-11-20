@@ -204,6 +204,33 @@ pub fn decode_signed(chunks: &[Vec<u8>]) -> Option<Signed> {
     })
 }
 
+/// As `decode_signed`, and also returns the chunks of that one message, one per index in
+/// order, exactly as they arrived. A relay sends these on unchanged, so the signature and
+/// the private bit survive the hop. Chunks of other messages and repeats are left out.
+pub fn decode_for_relay(chunks: &[Vec<u8>]) -> Option<(Signed, Vec<Vec<u8>>)> {
+    let d = decode_full(chunks)?;
+    let mut own: Vec<Option<Vec<u8>>> = Vec::new();
+    for c in chunks {
+        if let Some(p) = parse_chunk(c).filter(|p| p.id == d.id) {
+            own.resize(p.total, None);
+            own[p.index].get_or_insert_with(|| c.clone());
+        }
+    }
+    let own: Vec<Vec<u8>> = own.into_iter().collect::<Option<_>>()?;
+    let signer = d
+        .auth
+        .as_ref()
+        .and_then(|block| verify_signature(&d.message, block));
+    let signed = Signed {
+        verified: signer.is_some(),
+        signer,
+        has_signature: d.auth.is_some(),
+        message: d.message,
+        private: d.private,
+    };
+    Some((signed, own))
+}
+
 /// Check an `auth` block against a message's content. Returns the signer callsign only when
 /// the signature covers this exact message and the signer is the message's `from` station.
 /// Any change to the body, the sender or the signature returns None.
@@ -221,6 +248,8 @@ fn sender(msg: &Message) -> &str {
 
 /// A reassembled message before the signature check.
 struct Decoded {
+    /// Message id: the first byte of every chunk of this message.
+    id: u8,
     message: Message,
     auth: Option<Vec<u8>>,
     private: bool,
@@ -320,6 +349,7 @@ fn decode_group(id: u8, valid: &[Parsed<'_>]) -> Option<Decoded> {
     };
     let message = parse_body((meta >> 1) & 3, &body)?;
     Some(Decoded {
+        id,
         message,
         auth,
         private: meta & META_PRIVATE != 0,
@@ -733,6 +763,24 @@ mod tests {
             // Plain decode still returns the message for signed streams.
             assert_eq!(decode(&chunks), Some(msg));
         }
+    }
+
+    #[test]
+    fn relay_chunks_are_the_message_alone_and_keep_the_signature() {
+        let msg = mail();
+        let chunks = encode_signed(&msg, Some(&signing_key()), true);
+        // Noise around the message: a chunk of another message, repeats, reversed order.
+        let other = encode(&chat());
+        let mut heard: Vec<Vec<u8>> = vec![other[0].clone()];
+        heard.extend(chunks.iter().rev().cloned());
+        heard.push(chunks[0].clone());
+        let (signed, own) = decode_for_relay(&heard).unwrap();
+        assert_eq!(own, chunks, "relay chunks must be the original chunks, in order");
+        assert!(signed.verified && signed.private);
+        // Sent on as they are, the next station sees the same signed, private message.
+        let next = decode_signed(&own).unwrap();
+        assert_eq!(next.message, msg);
+        assert!(next.verified && next.private);
     }
 
     #[test]
