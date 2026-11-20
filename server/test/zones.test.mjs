@@ -5,25 +5,28 @@ import assert from "node:assert/strict";
 import { BAND_CHANNELS, BUSY_WINDOW_S, busyZones, makeSchedule, poolPlan } from "../src/core.js";
 
 const NOW = 1_800_000_000;
+// Last channel of the band; with 3 channels this is 2, and channels 0..LAST are all there are.
+const LAST = BAND_CHANNELS - 1;
 
 test("busy zones: reports older than 10 minutes are ignored", () => {
   const reports = [
-    { channel: 3, area: "AB12", time: NOW - BUSY_WINDOW_S - 1, level: 12 },
-    { channel: 4, area: "AB12", time: NOW - BUSY_WINDOW_S, level: 12 },
-    { channel: 5, area: "AB12", time: NOW - BUSY_WINDOW_S + 1, level: 12 },
-    { channel: 6, area: "AB12", time: NOW - 60 * 60, level: 12 },
+    // The band has only a few channels, so the stale reports reuse channel 0.
+    { channel: 0, area: "AB12", time: NOW - BUSY_WINDOW_S - 1, level: 12 },
+    { channel: 1, area: "AB12", time: NOW - BUSY_WINDOW_S, level: 12 },
+    { channel: LAST, area: "AB12", time: NOW - BUSY_WINDOW_S + 1, level: 12 },
+    { channel: 0, area: "AB12", time: NOW - 60 * 60, level: 12 },
   ];
-  assert.deepEqual(busyZones(reports, NOW), { AB12: [5] });
+  assert.deepEqual(busyZones(reports, NOW), { AB12: [LAST] });
 });
 
 test("busy zones: groups channels per area, sorted and unique", () => {
   const reports = [
-    { channel: 9, area: "XY", time: NOW, level: 1 },
-    { channel: 2, area: "XY", time: NOW - 10, level: 1 },
-    { channel: 2, area: "XY", time: NOW - 20, level: 1 },
-    { channel: 7, area: "ZZ", time: NOW, level: 1 },
+    { channel: LAST, area: "XY", time: NOW, level: 1 },
+    { channel: 0, area: "XY", time: NOW - 10, level: 1 },
+    { channel: 0, area: "XY", time: NOW - 20, level: 1 },
+    { channel: 1, area: "ZZ", time: NOW, level: 1 },
   ];
-  assert.deepEqual(busyZones(reports, NOW), { XY: [2, 9], ZZ: [7] });
+  assert.deepEqual(busyZones(reports, NOW), { XY: [0, LAST], ZZ: [1] });
 });
 
 test("busy zones: malformed and far-future reports are skipped", () => {
@@ -34,9 +37,9 @@ test("busy zones: malformed and far-future reports are skipped", () => {
     { channel: 1, area: "AB", time: NOW + 3600, level: 1 },
     { channel: 1, area: "AB", time: NOW, level: NaN },
     null,
-    { channel: 8, area: "AB", time: NOW, level: 1 },
+    { channel: LAST, area: "AB", time: NOW, level: 1 },
   ];
-  assert.deepEqual(busyZones(reports, NOW), { AB: [8] });
+  assert.deepEqual(busyZones(reports, NOW), { AB: [LAST] });
 });
 
 test("pools: lower third is online for listed areas, open pool for the rest", () => {
@@ -61,7 +64,7 @@ test("schedule: no two relays in one area share a channel and time", () => {
   const requests = [];
   for (const relay of relays) {
     for (let k = 0; k < 3; k++) {
-      requests.push({ relay: relay.id, channel: 4, duration: 60 + k * 30, direction: k % 2 ? "tx" : "rx", urgent: k === 2 });
+      requests.push({ relay: relay.id, channel: 0, duration: 60 + k * 30, direction: k % 2 ? "tx" : "rx", urgent: k === 2 });
     }
   }
   const schedule = makeSchedule(relays, requests, NOW);

@@ -527,7 +527,7 @@ export function validateSchedule(body) {
  * upper edge is not. Every channel count and channel number is derived from
  * this constant and CHANNEL_WIDTH_KHZ, so change the segment here only.
  */
-export const BAND_SEGMENT_KHZ = Object.freeze({ low: 14_000, high: 14_350 });
+export const BAND_SEGMENT_KHZ = Object.freeze({ low: 18_111, high: 18_120 });
 
 /** Width of one channel in kHz (plan section 2.2). */
 export const CHANNEL_WIDTH_KHZ = 2.7;
