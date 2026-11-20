@@ -1,6 +1,7 @@
 //! Wire formats shared with the server: canonical JSON, area keys and the
 //! channel grid.
 
+use kahf_core::bandplan::{KAHF_CHANNEL_WIDTH_HZ, RELAY_SEGMENT};
 use serde_json::Value;
 use std::fmt;
 
@@ -123,9 +124,9 @@ impl ChannelGrid {
     /// centred at 18112.35, 18115.05 and 18117.75 kHz. Must match
     /// `BAND_SEGMENT_KHZ` on the server.
     pub const RELAY_17M: ChannelGrid = ChannelGrid {
-        low_khz: 18_111.0,
-        width_khz: 2.7,
-        channels: 3,
+        low_khz: RELAY_SEGMENT.lower_hz as f64 / 1000.0,
+        width_khz: KAHF_CHANNEL_WIDTH_HZ as f64 / 1000.0,
+        channels: ((RELAY_SEGMENT.upper_hz - RELAY_SEGMENT.lower_hz) / KAHF_CHANNEL_WIDTH_HZ) as u32,
     };
 
     /// Centre frequency of a channel in kHz, or None when it is not on the grid.

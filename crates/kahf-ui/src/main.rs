@@ -1,5 +1,6 @@
 mod app;
 mod icons;
+mod live;
 mod panels;
 mod sample;
 mod screens;
@@ -7,6 +8,7 @@ mod spectrum;
 mod strings;
 mod tech;
 mod theme;
+mod update;
 mod view;
 
 use iced::{window, Size};

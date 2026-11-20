@@ -2781,9 +2781,11 @@ dependencies = [
  "kahf-core",
  "kahf-log",
  "kahf-net",
+ "kahf-prop",
  "kahf-radio",
  "kahf-sdr",
  "kahf-sim",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2847,7 +2849,10 @@ dependencies = [
  "kahf-audio",
  "kahf-core",
  "kahf-daemon",
+ "kahf-log",
  "kahf-sdr",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

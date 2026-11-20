@@ -98,7 +98,9 @@ calls are not checked against each other's earlier slots.
 All channel numbers come from one constant, `BAND_SEGMENT_KHZ` in
 `src/core.js` (lower edge included, upper edge excluded), and the channel width
 `CHANNEL_WIDTH_KHZ` (2.7 kHz). `BAND_CHANNELS` is derived from them. The segment
-values are a working choice and must be confirmed before deployment.
+is the 17 m relay segment, 18.111 to 18.120 MHz, which holds 3 channels
+(centres 18112.35, 18115.05 and 18117.75 kHz). The segment values are a working
+choice and must be confirmed before deployment.
 
 ### POST /report
 

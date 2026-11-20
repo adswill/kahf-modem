@@ -12,6 +12,7 @@ Early development. KAHF is not yet on air. The modem, frame, link and session la
 - Messages, mail and file transfer over the link and session layers.
 - A contact logbook with CSV storage and ADIF 3 export.
 - Server stress tests for the station server.
+- Radio relay on 17 m: store-and-forward over one or more relays, with a propagation-aware route planner. It is tested with simulated stations, not yet on air.
 
 ## Build and test
 

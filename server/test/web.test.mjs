@@ -45,9 +45,9 @@ const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u
 
 test("home page: no downloads block without a release, and the real modem numbers", () => {
   const html = renderHome();
-  for (const id of ["top-title", "what", "how", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
+  for (const id of ["top-title", "why17", "what", "relays", "how", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
-  assert.equal((html.match(/<section\b/g) || []).length, 3);
+  assert.equal((html.match(/<section\b/g) || []).length, 5);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds|id="download"/i);
   assert.match(html, /No religious or political content/);
   assert.match(html, /Source-available/);
@@ -212,17 +212,17 @@ test("motion is limited to a first-paint fade and one pulse, and stops when redu
 });
 
 test("theme follows the system and keeps a manual choice; focus rings and skip link exist", () => {
-  assert.match(CSS, /prefers-color-scheme: dark/);
-  assert.match(CSS, /:root\[data-theme="dark"\]/);
-  assert.match(CSS, /:root:not\(\[data-theme="light"\]\)/);
+  assert.match(CSS, /prefers-color-scheme: (dark|light)/);
+  assert.match(CSS, /:root\[data-theme="light"\]/);
+  assert.match(CSS, /:root:not\(\[data-theme="dark"\]\)/);
   assert.match(CSS, /:focus-visible/);
   assert.match(HOME_SCRIPT, /try \{[\s\S]*localStorage[\s\S]*\} catch/);
   assert.match(HOME_SCRIPT, /kahf-theme/);
   assert.match(renderHome(), /data-act="theme"/);
 });
 
-test("the colour tokens match the design: paper, ink, one green, one red", () => {
-  for (const c of ["#f4f2ec", "#1d1b15", "#5c5a52", "#d9d5cb", "#1f8a65", "#cf2d56", "#14130f"]) {
+test("the colour tokens match the design: night ground, bone text, amber, one green, one red, and the paper theme", () => {
+  for (const c of ["#0d0e0b", "#ebe8dc", "#9b978a", "#2b2c25", "#f2a93b", "#3dbe90", "#ff6b8b", "#f4f1e8", "#1b1a14", "#1f8a65", "#cf2d56"]) {
     assert.ok(CSS.includes(c), c);
   }
 });
@@ -230,4 +230,28 @@ test("the colour tokens match the design: paper, ink, one green, one red", () =>
 test("pages stay small", () => {
   assert.ok(renderHome().length < 60_000);
   assert.ok(renderMap([STATION], NOW, [RELAY]).length < 60_000);
+});
+
+test("the inner pages render, are linked from the nav, and follow the same rules as the home page", async () => {
+  const { SITE_PATHS, renderSite } = await import("../src/page.ts");
+  assert.deepEqual([...SITE_PATHS].sort(), ["/legal", "/network", "/protocol", "/start"]);
+  for (const path of SITE_PATHS) {
+    const html = renderSite(path);
+    assert.equal((html.match(/<h1\b/g) || []).length, 1, path);
+    assert.match(html, new RegExp(`<a href="${path}" aria-current="page">`), path);
+    assert.doesNotMatch(html.replace(/<script>[\s\S]*?<\/script>/, ""), EXTERNAL, path);
+    assert.doesNotMatch(html, EMOJI, path);
+    assert.doesNotMatch(html, /lorem|ipsum|TODO|TBD|coming soon/i, path);
+    const res = await handleRequest(new Request("https://kahf.test" + path), fakeStore(), Date.parse(NOW));
+    assert.equal(res.status, 200, path);
+    assert.match(res.headers.get("content-security-policy"), /default-src 'none'/);
+    assert.equal(await res.text(), html);
+  }
+  assert.equal(renderSite("/nope"), null);
+});
+
+test("the 17 m strip spans the real allocation and is the same on every render", async () => {
+  const { bandStrip } = await import("../src/web/home.js");
+  assert.equal(bandStrip(), bandStrip());
+  assert.match(bandStrip(), /18\.068 to 18\.168 megahertz/);
 });

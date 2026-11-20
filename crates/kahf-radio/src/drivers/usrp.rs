@@ -444,7 +444,6 @@ pub fn clamp_gain(value: f32, min: f32, max: f32) -> f32 {
 
 /// Converts interleaved fc32 samples (I, Q, I, Q, ...) into pairs. Values are held
 /// to -1..1, and NaN becomes 0. Returns how many pairs were written.
-#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn fc32_to_pairs(src: &[f32], dst: &mut [(f32, f32)]) -> usize {
     fn clean(v: f32) -> f32 {
         if v.is_nan() {
@@ -454,8 +453,8 @@ pub fn fc32_to_pairs(src: &[f32], dst: &mut [(f32, f32)]) -> usize {
         }
     }
     let n = (src.len() / 2).min(dst.len());
-    for (d, s) in dst[..n].iter_mut().zip(src.chunks_exact(2)) {
-        *d = (clean(s[0]), clean(s[1]));
+    for (d, [i, q]) in dst[..n].iter_mut().zip(src.as_chunks::<2>().0) {
+        *d = (clean(*i), clean(*q));
     }
     n
 }
