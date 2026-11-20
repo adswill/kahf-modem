@@ -1097,7 +1097,13 @@ impl App {
             return;
         }
         self.live_at = Some(now);
+        // The list is re-sorted on each read, so the selection follows the callsign, not the row.
+        let selected = self
+            .station_sel
+            .and_then(|i| self.live.stations.get(i))
+            .map(|c| c.call.clone());
         self.live.refresh(self.engine.as_ref(), &self.data_dir);
+        self.station_sel = selected.and_then(|call| self.live.stations.iter().position(|c| c.call == call));
     }
 
     fn export_log(&mut self) {
