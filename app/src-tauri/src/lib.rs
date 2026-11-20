@@ -36,6 +36,8 @@ struct Shared {
     voice: voice::Voice,
     /// The station this one is linked to, from the engine's link events.
     link: Mutex<Option<String>>,
+    /// Outbox ids this app queued (the last few hundred).
+    own_ids: Mutex<Vec<u64>>,
     /// Keeps this relay registered and scheduled on kahf.dev while relay mode runs.
     sync: Mutex<Option<ServerSync>>,
     /// Why the server sync is not running while relay mode is, if it is not.
@@ -108,7 +110,7 @@ fn stop_rig(state: &State<Shared>) {
 /// Starts radio control for the chosen radio and reads its frequency as a test.
 /// Returns the frequency in Hz.
 #[tauri::command]
-fn rig_connect(state: State<Shared>, model: u32, port: String, baud: u32) -> Res<u64> {
+async fn rig_connect(state: State<'_, Shared>, model: u32, port: String, baud: u32) -> Res<u64> {
     stop_rig(&state);
     let child = rig::start_rigctld(model, &port, baud)?;
     *state.rigctld.lock().map_err(|e| e.to_string())? = Some(child);
@@ -134,8 +136,13 @@ fn engine_modes() -> Value {
 
 /// Starts (or restarts) the engine with the person's settings.
 #[tauri::command]
-fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()> {
+async fn engine_start(app: AppHandle, state: State<'_, Shared>, settings: Value) -> Res<()> {
     let s = EngineSettings::from_json(&settings);
+    // The old engine goes first, so it lets go of the sound device, the radio port and the SDR
+    // before the new one opens them. Entries for its messages do not belong to the new one.
+    let old = state.engine.lock().map_err(|e| e.to_string())?.take();
+    drop(old);
+    state.pending.lock().map_err(|e| e.to_string())?.clear();
     // A radio chosen by name gets its own radio-control program. If that fails, KAHF still
     // starts with sound only, and says so.
     let mut rigctld = s.rigctld();
@@ -165,8 +172,13 @@ fn engine_start(app: AppHandle, state: State<Shared>, settings: Value) -> Res<()
         data_dir: state.data_dir.clone(),
     };
     stop_server_sync(&state);
-    let mut engine = Engine::new(cfg)?;
-    engine.listen()?;
+    let engine = match Engine::new(cfg).and_then(|mut e| e.listen().map(|()| e)) {
+        Ok(e) => e,
+        Err(why) => {
+            stop_rig(&state);
+            return Err(why);
+        }
+    };
     // Relays the person named, tried in order when a station cannot be reached directly.
     if let Some(hints) = settings["relayHints"].as_array() {
         let calls: Vec<String> = hints
@@ -223,12 +235,8 @@ fn engine_disconnect(state: State<Shared>) -> Res<()> {
     with_engine(&state, |e| e.disconnect())
 }
 
-fn outbox_ids(e: &Engine) -> Vec<u64> {
-    e.outbox_pending().iter().map(|p| p.0).collect()
-}
-
-/// Makes sure the link is up to `to` (the engine sends only over a link), then runs `send` and
-/// finds the outbox id it queued. None when the item has already left the outbox.
+/// Makes sure the link is up to `to` (the engine sends only over a link), then runs `send`.
+/// It gives back the outbox id when the engine reports one (mail and files do, chat does not).
 fn send_linked(
     state: &State<Shared>,
     to: &str,
@@ -246,9 +254,7 @@ fn send_linked(
             e.connect(to)?;
         }
         plan_paths(e, &data_dir, to);
-        let before = outbox_ids(e);
-        let id = send(e)?;
-        Ok(id.or_else(|| outbox_ids(e).into_iter().find(|i| !before.contains(i))))
+        send(e)
     })
 }
 
@@ -258,6 +264,10 @@ fn send_linked(
 fn plan_paths(e: &Engine, data_dir: &std::path::Path, to: &str) {
     use kahf_prop::route::{Conditions, Node};
     let v = settings::load(data_dir);
+    // Relays the person named win over the planner.
+    if v["relayHints"].as_array().is_some_and(|a| !a.is_empty()) {
+        return;
+    }
     let (Some(lat), Some(lon)) = (v["location"]["lat"].as_f64(), v["location"]["lon"].as_f64()) else {
         return;
     };
@@ -280,12 +290,8 @@ fn engine_send(state: State<Shared>, id: String, to: String, text: String, kind:
         match kind.as_str() {
             "private" => e.send_message_private(&to, &text)?,
             "urgent" if !text.starts_with("URGENT:") => e.send_message(&to, &format!("URGENT: {text}"))?,
-            "signed" => {
-                e.set_mail_signing(true);
-                let r = e.send_mail(&to, "Message", &text, &[]);
-                e.set_mail_signing(false);
-                return r.map(Some);
-            }
+            // Mail is signed by default (the engine's own setting), so this is a plain mail.
+            "signed" => return e.send_mail(&to, "Message", &text, &[]).map(Some),
             _ => e.send_message(&to, &text)?,
         }
         Ok(None)
@@ -395,16 +401,26 @@ fn track(state: &State<Shared>, id: &str, to: &str, engine_id: u64) -> Res<()> {
         ui_id: id.into(),
         to: to.into(),
         engine_id,
+        at: Instant::now(),
     });
+    if engine_id != 0 {
+        remember_own(state, engine_id);
+    }
     Ok(())
 }
 
-/// Like `track`, for an item that may already have left the outbox (then it counts as sent).
-fn track_opt(state: &State<Shared>, id: &str, to: &str, engine_id: Option<u64>) -> Res<()> {
-    match engine_id {
-        Some(n) => track(state, id, to, n),
-        None => Ok(()),
+fn remember_own(state: &State<Shared>, engine_id: u64) {
+    if let Ok(mut own) = state.own_ids.lock() {
+        own.push(engine_id);
+        let excess = own.len().saturating_sub(300);
+        own.drain(..excess);
     }
+}
+
+/// Like `track`. A chat message gets no id from the engine: it waits for the poll loop to find
+/// the outbox item that appeared (id 0 means not known yet).
+fn track_opt(state: &State<Shared>, id: &str, to: &str, engine_id: Option<u64>) -> Res<()> {
+    track(state, id, to, engine_id.unwrap_or(0))
 }
 
 #[tauri::command]
@@ -782,17 +798,19 @@ fn poll_loop(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(40));
         let shared = app.state::<Shared>();
-        let (events, outbox) = {
+        let (events, sent) = {
             let Ok(mut guard) = shared.engine.lock() else {
                 continue;
             };
-            match guard.as_mut() {
-                Some(e) => (
-                    e.poll_events(),
-                    e.outbox_pending().iter().map(|p| p.0).collect::<Vec<u64>>(),
-                ),
-                None => continue,
-            }
+            let Some(e) = guard.as_mut() else {
+                continue;
+            };
+            let events = e.poll_events();
+            let outbox: Vec<u64> = e.outbox_pending().iter().map(|p| p.0).collect();
+            // The outbox and the waiting list are read under the same lock a send holds, so a
+            // message queued a moment ago is never judged against an older outbox.
+            let sent = settle_pending(&shared, &outbox);
+            (events, sent)
         };
         let inbox = shared.data_dir.join("inbox");
         for ev in &events {
@@ -805,31 +823,61 @@ fn poll_loop(app: AppHandle) {
                 }
             }
             let pending = shared.pending.lock().map(|p| p.clone()).unwrap_or_default();
+            let own = shared.own_ids.lock().map(|o| o.clone()).unwrap_or_default();
             let peer = shared.link.lock().ok().and_then(|l| l.clone());
             let ctx = Ctx {
                 pending: &pending,
                 inbox: &inbox,
                 peer: peer.as_deref(),
+                own_ids: &own,
             };
             for out in event_json(ev, &ctx) {
                 let _ = app.emit("engine", out);
             }
         }
-        // A message that left the outbox has been sent over the air.
-        let mut sent: Vec<String> = Vec::new();
-        if let Ok(mut pending) = shared.pending.lock() {
-            pending.retain(|p| {
-                let gone = !outbox.contains(&p.engine_id);
-                if gone && !sent.contains(&p.ui_id) {
-                    sent.push(p.ui_id.clone());
-                }
-                !gone
-            });
-        }
         for id in sent {
             let _ = app.emit("engine", json!({ "type": "sent", "id": id }));
         }
     });
+}
+
+/// How long a chat message may wait for its outbox item to show up before it counts as gone.
+const ADOPT_WAIT: Duration = Duration::from_secs(3);
+
+/// Gives each chat message waiting for an id the first new outbox item, and returns the window
+/// ids of messages that have left the outbox (sent over the air).
+fn settle_pending(shared: &Shared, outbox: &[u64]) -> Vec<String> {
+    let (Ok(mut pending), Ok(mut own)) = (shared.pending.lock(), shared.own_ids.lock()) else {
+        return Vec::new();
+    };
+    let mut free: Vec<u64> = outbox
+        .iter()
+        .copied()
+        .filter(|id| !pending.iter().any(|p| p.engine_id == *id) && !own.contains(id))
+        .collect();
+    free.sort_unstable();
+    let mut free = free.into_iter();
+    for p in pending.iter_mut().filter(|p| p.engine_id == 0) {
+        if let Some(id) = free.next() {
+            p.engine_id = id;
+            own.push(id);
+        }
+    }
+    let excess = own.len().saturating_sub(300);
+    own.drain(..excess);
+    let mut sent: Vec<String> = Vec::new();
+    pending.retain(|p| {
+        let gone = if p.engine_id == 0 {
+            p.at.elapsed() > ADOPT_WAIT
+        } else {
+            !outbox.contains(&p.engine_id)
+        };
+        if gone && !sent.contains(&p.ui_id) {
+            sent.push(p.ui_id.clone());
+        }
+        !gone
+    });
+    sent
 }
 
 pub fn run() {
@@ -845,6 +893,7 @@ pub fn run() {
                 rigctld: Mutex::new(None),
                 voice: voice::Voice::default(),
                 link: Mutex::new(None),
+                own_ids: Mutex::new(Vec::new()),
                 sync: Mutex::new(None),
                 sync_note: Mutex::new(None),
             });
@@ -902,6 +951,77 @@ pub fn run() {
             open_url,
             app_info,
         ])
-        .run(tauri::generate_context!())
-        .expect("the KAHF window could not start");
+        .build(tauri::generate_context!())
+        .expect("the KAHF window could not start")
+        .run(|app, event| {
+            // The radio control program KAHF started must not outlive it: it would keep the
+            // serial port and its TCP port busy for the next start.
+            if let tauri::RunEvent::Exit = event {
+                if let Ok(mut g) = app.state::<Shared>().rigctld.lock() {
+                    if let Some(mut c) = g.take() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Shared {
+        Shared {
+            engine: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
+            data_dir: PathBuf::from("."),
+            rigctld: Mutex::new(None),
+            voice: voice::Voice::default(),
+            link: Mutex::new(None),
+            own_ids: Mutex::new(Vec::new()),
+            sync: Mutex::new(None),
+            sync_note: Mutex::new(None),
+        }
+    }
+
+    fn waiting(ui: &str, id: u64) -> Pending {
+        Pending {
+            ui_id: ui.into(),
+            to: "XX1AA".into(),
+            engine_id: id,
+            at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_chat_message_adopts_the_new_outbox_item_and_is_sent_when_it_leaves() {
+        let s = shared();
+        s.pending.lock().unwrap().push(waiting("a", 0));
+        assert!(settle_pending(&s, &[7]).is_empty());
+        assert_eq!(s.pending.lock().unwrap()[0].engine_id, 7);
+        assert!(settle_pending(&s, &[7]).is_empty());
+        assert_eq!(settle_pending(&s, &[]), vec!["a".to_string()]);
+        assert!(s.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_id_known_to_another_message_is_not_adopted() {
+        let s = shared();
+        s.pending.lock().unwrap().push(waiting("mail", 3));
+        s.pending.lock().unwrap().push(waiting("chat", 0));
+        s.own_ids.lock().unwrap().push(3);
+        settle_pending(&s, &[3, 4]);
+        let p = s.pending.lock().unwrap();
+        assert_eq!((p[0].engine_id, p[1].engine_id), (3, 4));
+    }
+
+    #[test]
+    fn a_chat_message_that_never_shows_up_counts_as_sent_after_a_while() {
+        let s = shared();
+        let mut p = waiting("a", 0);
+        p.at = Instant::now() - Duration::from_secs(10);
+        s.pending.lock().unwrap().push(p);
+        assert_eq!(settle_pending(&s, &[]), vec!["a".to_string()]);
+    }
 }

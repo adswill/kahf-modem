@@ -5,7 +5,6 @@
 //! typed in by hand. KAHF never depends on the server to work; it only helps find relays.
 
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -24,14 +23,13 @@ pub fn distance_km(a: (f64, f64), b: (f64, f64)) -> f64 {
 }
 
 fn get_text(url: &str) -> Result<String, String> {
-    let out = Command::new("curl")
-        .args(["-sS", "-m", "15", "-f", url])
-        .output()
-        .map_err(|e| format!("curl did not start ({e})"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    ureq::get(url)
+        .set("User-Agent", "kahf-app")
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())
 }
 
 fn parse_time_ms(s: &str) -> Option<u64> {

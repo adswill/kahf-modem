@@ -12,7 +12,10 @@ use serde_json::{json, Value};
 pub struct Pending {
     pub ui_id: String,
     pub to: String,
+    /// The outbox id. 0 while it is not known yet: a chat message gets no id back from the
+    /// engine, so the poll loop adopts the first new outbox item for it.
     pub engine_id: u64,
+    pub at: std::time::Instant,
 }
 
 fn now_ms() -> u64 {
@@ -37,6 +40,8 @@ pub struct Ctx<'a> {
     pub inbox: &'a Path,
     /// The station this one is linked to, if any.
     pub peer: Option<&'a str>,
+    /// Outbox ids this app queued, so their progress is never taken for an incoming file.
+    pub own_ids: &'a [u64],
 }
 
 /// The body of a received mail, from the file the engine saved. Empty when it cannot be read.
@@ -96,6 +101,8 @@ pub fn event_json(ev: &Event, ctx: &Ctx) -> Vec<Value> {
             Some(p) => vec![json!({
                 "type": "file", "id": p.ui_id, "name": name, "done": done, "total": total, "dir": "out"
             })],
+            // Something this app sent whose entry is already gone: not an incoming file.
+            None if ctx.own_ids.contains(id) => Vec::new(),
             // A file coming in: the engine reports it once, when it has been saved to the inbox.
             None if done >= total => {
                 let path = ctx.inbox.join(name);
@@ -154,6 +161,7 @@ mod tests {
             ui_id: id.into(),
             to: to.into(),
             engine_id: 1,
+            at: std::time::Instant::now(),
         }
     }
 
@@ -162,6 +170,7 @@ mod tests {
             pending,
             inbox,
             peer: Some("G4HAM"),
+            own_ids: &[],
         }
     }
 
@@ -237,6 +246,23 @@ mod tests {
         assert_eq!(out[0]["dir"], "in");
         assert_eq!(out[0]["from"], "G4HAM");
         assert!(out[0]["path"].is_null());
+    }
+
+    #[test]
+    fn progress_of_something_this_app_sent_is_never_an_incoming_file() {
+        let c = Ctx {
+            pending: &[],
+            inbox: Path::new("/x"),
+            peer: Some("G4HAM"),
+            own_ids: &[5],
+        };
+        let done = Event::FileProgress {
+            id: 5,
+            name: "x".into(),
+            done: 9,
+            total: 9,
+        };
+        assert!(event_json(&done, &c).is_empty());
     }
 
     #[test]
