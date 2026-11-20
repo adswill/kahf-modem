@@ -4,6 +4,7 @@
 // Routes:
 //   GET  /           home page (renderHome)
 //   GET  /map        live map (renderMap)
+//   GET  /network, /start, /protocol, /legal   inner pages (renderSite)
 //   GET  /operate.png  the screenshot on the home page
 //   GET  /stations   current station records as JSON
 //   GET  /zones      busy channels per area (busyZones) and channel pools
@@ -34,7 +35,7 @@ import {
   zoneReports,
 } from "./core.js";
 import { OPERATE_PNG_BASE64 } from "./web/operate-png.js";
-import { homeScriptSha256, mapScriptSha256, renderHome, renderMap } from "./page.ts";
+import { homeScriptSha256, mapScriptSha256, renderHome, renderMap, renderSite, SITE_PATHS } from "./page.ts";
 
 const HOME_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -155,6 +156,9 @@ async function currentStations(store, nowMs) {
 async function getHome() {
   return html(renderHome(), homeCsp(await homeScriptSha256()));
 }
+
+/** Inner pages (/network, /start, /protocol, /legal): static HTML under the home page policy. */
+const sitePage = (path) => async () => html(renderSite(path), homeCsp(await homeScriptSha256()));
 
 let operatePng = null;
 
@@ -366,6 +370,7 @@ async function postSchedule({ request, store, nowMs }) {
 const ROUTES = {
   "/": { GET: getHome, HEAD: getHome },
   "/map": { GET: getMap, HEAD: getMap },
+  ...Object.fromEntries(SITE_PATHS.map((p) => [p, { GET: sitePage(p), HEAD: sitePage(p) }])),
   "/operate.png": { GET: getOperatePng, HEAD: getOperatePng },
   "/map-data": { GET: getMapData },
   "/stations": { GET: getStations },

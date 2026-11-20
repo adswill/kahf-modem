@@ -34,10 +34,13 @@ const STATIONS = [
 
 const EXTERNAL = /https?:\/\/|\/\/[a-z0-9.-]+\.[a-z]{2,}|<script[^>]*\bsrc=|<link\b|@import/i;
 
-test("home page has the statement, what it does, how it travels and downloads", () => {
+test("home page has the statement, why 17 m, what it does, relays, how it travels and licence", () => {
   const html = renderHome();
-  assert.match(html, /<h1[^>]*>KAHF sends messages, mail and files between amateur radio stations over HF and VHF\.<\/h1>/);
+  assert.match(html, /<h1[^>]*>Messages, mail and files over <em>HF<\/em>, relayed when the path is not there\.<\/h1>/);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
+  assert.match(html, /id="why17"/);
+  assert.match(html, /18\.068 to 18\.168 MHz/);
+  assert.match(html, /id="relays"/);
   assert.match(html, /id="what"/);
   assert.match(html, /id="how"/);
   assert.match(html, /id="licences"/);
