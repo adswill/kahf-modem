@@ -130,7 +130,11 @@ pub fn level_db(samples: &[f32]) -> f32 {
 /// Name of the system's default input or output device, if there is one.
 pub fn default_device_name(input: bool) -> Option<String> {
     let host = cpal::default_host();
-    let dev = if input { host.default_input_device() } else { host.default_output_device() };
+    let dev = if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    };
     dev.and_then(|d| d.description().ok().map(|x| x.name().to_string()))
 }
 
@@ -142,7 +146,11 @@ pub fn device_names(input: bool) -> Vec<String> {
     };
     let mut names: Vec<String> = Vec::new();
     for dev in devices {
-        let ok = if input { dev.supports_input() } else { dev.supports_output() };
+        let ok = if input {
+            dev.supports_input()
+        } else {
+            dev.supports_output()
+        };
         if !ok {
             continue;
         }
