@@ -16,12 +16,13 @@
 
 | SNR (dB, 2500 Hz) | AWGN | Good | Moderate | Poor | Flutter |
 |---:|---|---|---|---|---|
-| -6 | .36 / 1 / 1 | .82 / 1 / 1 | .86 / 1 / 1 | .95 / 1 / 1 | 1 / 1 / 1 |
-| -3 | .13 / .54 / 1 | .18 / .94 / 1 | .44 / .97 / 1 | .61 / .97 / 1 | 1 / 1 / 1 |
-| 0 | .03 / .01 / .47 | .06 / .41 / .93 | .24 / .51 / .99 | .41 / .75 / 1 | .99 / 1 / 1 |
-| 6 | .01 / 0 / 0 | .01 / .16 / .40 | .16 / .34 / .52 | .30 / .50 / .72 | .99 / 1 / 1 |
-| 15 | 0 / 0 / 0 | .01 / .10 / .33 | .13 / .31 / .45 | .28 / .45 / .63 | .99 / 1 / 1 |
-| 30 | 0 / 0 / 0 | 0 / .09 / .32 | .14 / .32 / .47 | .28 / .44 / .63 | .98 / 1 / 1 |
+| 0 | .99 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 |
+| 3 | .20 / 1 / 1 | .47 / 1 / 1 | .58 / 1 / 1 | .78 / 1 / 1 | 1 / 1 / 1 |
+| 6 | .10 / .39 / 1 | .12 / .90 / 1 | .32 / .95 / 1 | .51 / .95 / 1 | 1 / 1 / 1 |
+| 9 | .02 / .03 / 1 | .01 / .37 / 1 | .21 / .48 / 1 | .38 / .75 / 1 | .99 / 1 / 1 |
+| 12 | .01 / 0 / .01 | .01 / .20 / .67 | .16 / .38 / .76 | .31 / .56 / .92 | .98 / 1 / 1 |
+| 15 | .01 / 0 / .01 | 0 / .14 / .42 | .15 / .33 / .55 | .29 / .50 / .77 | .98 / 1 / 1 |
+| 30 | 0 / 0 / 0 | 0 / .09 / .33 | .13 / .31 / .45 | .28 / .45 / .62 | .98 / 1 / 1 |
 
 Peak goodput: QPSK 800, 16QAM 1000, 64QAM 1333 bit/s (AWGN).
 
@@ -33,7 +34,7 @@ Peak goodput: QPSK 800, 16QAM 1000, 64QAM 1333 bit/s (AWGN).
 2. Flutter (10 Hz Doppler spread) fails completely. The channel estimate is static per frame, and
    the data symbols are not tracked.
 3. Peak speed is limited by overhead (two sync symbols per 36 byte frame) and a single rate-1/2 code.
-4. Weak-signal reach is -3 dB (AWGN, QPSK) against -21 dB for FT8. There is no robust low-rate mode.
+4. Weak-signal reach is about +4 dB (AWGN, QPSK, 10 percent FER) against -21 dB for FT8. Below about 0 dB the frame is not even found: the sync metric spans one OFDM symbol. There is no robust low-rate mode.
 
 ## Published reference points (vendor and project figures, not measured here)
 

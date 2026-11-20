@@ -43,13 +43,13 @@ fn main() {
                         let data: Vec<u8> = (0..36).map(|i| ((f * 37 + i * 11) % 251) as u8).collect();
                         let coded = ldpc::encode(&frame::build_payload(&data));
                         let tx = phy::modulate_frame(&coded, m);
-                        // Real streams have silence around a frame. Pad, and raise the nominal SNR so
+                        // Real streams have silence around a frame. Pad, and lower the nominal SNR so
                         // the in-frame SNR is the stated one (apply() measures over the whole buffer).
                         let mut padded = vec![0f32; PAD];
                         padded.extend_from_slice(&tx);
                         padded.extend(std::iter::repeat_n(0f32, PAD));
                         let comp = 10.0 * (padded.len() as f32 / tx.len() as f32).log10();
-                        let rx = apply(&padded, prof, sim_snr + comp, 9000 + f as u64);
+                        let rx = apply(&padded, prof, sim_snr - comp, 9000 + f as u64);
                         let ok = phy::demodulate_frame(&rx, m, ldpc::N)
                             .and_then(|l| ldpc::decode(&l, 50))
                             .and_then(|b| frame::parse_payload(&b))
