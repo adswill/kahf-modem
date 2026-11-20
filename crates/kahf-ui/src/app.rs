@@ -307,6 +307,25 @@ pub enum Message {
     Level(f32),
     CheckUpdates,
     UpdateChecked(Result<crate::update::Outcome, String>),
+    TestRig,
+    TestAudio(Probe),
+    ProbeDone(Probe, Result<String, String>),
+    OpenLogs,
+}
+
+/// What a connection test is checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    Rig,
+    AudioIn,
+    AudioOut,
+}
+
+/// State of one connection test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestState {
+    Running,
+    Done(Result<String, String>),
 }
 
 pub const PROFILES: &[&str] = &[s::PROFILE_AUTO, s::PROFILE_ROBUST, s::PROFILE_FAST];
@@ -325,6 +344,8 @@ pub struct App {
     pub sample: bool,
     /// Result of the last update check, shown in Settings.
     pub update_status: String,
+    /// Last result of each connection test, indexed by `Probe`.
+    pub tests: [Option<TestState>; 3],
     pub role: Role,
     pub callsign: String,
     pub palette: Option<Palette>,
@@ -492,6 +513,7 @@ impl App {
             role: Role::Station,
             callsign: String::new(),
             update_status: s::UPDATE_NOT_CHECKED.to_string(),
+            tests: [None, None, None],
             palette: None,
             confirm: None,
             modal_since: None,
@@ -883,6 +905,29 @@ impl App {
 
     fn audio_choice(name: &str) -> Option<String> {
         (!name.is_empty() && name != s::DEVICE_SYSTEM).then(|| name.to_string())
+    }
+
+    /// Starts one connection test on a worker thread.
+    fn run_probe(&mut self, p: Probe) -> Task<Message> {
+        if self.tests[p as usize] == Some(TestState::Running) {
+            return Task::none();
+        }
+        self.tests[p as usize] = Some(TestState::Running);
+        let addr = self.rig_addr.clone();
+        let input = Self::audio_choice(&self.audio_in);
+        let output = Self::audio_choice(&self.audio_out);
+        Task::perform(
+            async move {
+                std::thread::spawn(move || match p {
+                    Probe::Rig => crate::diag::test_rig(&addr),
+                    Probe::AudioIn => crate::diag::test_audio_in(input.as_deref()),
+                    Probe::AudioOut => crate::diag::test_audio_out(output.as_deref()),
+                })
+                .join()
+                .unwrap_or_else(|_| Err("The test stopped unexpectedly.".into()))
+            },
+            move |r| Message::ProbeDone(p, r),
+        )
     }
 
     fn ensure_engine(&mut self) -> Result<&mut Engine, String> {
@@ -1294,6 +1339,14 @@ impl App {
     }
 
     fn toast(&mut self, text: &str, kind: ToastKind) {
+        crate::applog::log(
+            if kind == ToastKind::Warning {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            text,
+        );
         self.events.push((crate::view::utc_clock(), text.to_string()));
         if self.events.len() > 8 {
             self.events.remove(0);
@@ -1577,6 +1630,7 @@ impl App {
             }
             Message::AttachPath(p) => self.attach_path = p,
             Message::RigAddr(a) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig_addr = a;
                 self.restart_engine();
                 self.save();
@@ -1799,6 +1853,7 @@ impl App {
                 }
             }
             Message::AudioIn(d) => {
+                self.tests[Probe::AudioIn as usize] = None;
                 self.audio_in = d;
                 self.restart_engine();
                 self.save();
@@ -1817,11 +1872,13 @@ impl App {
                 self.save();
             }
             Message::AudioOut(d) => {
+                self.tests[Probe::AudioOut as usize] = None;
                 self.audio_out = d;
                 self.restart_engine();
                 self.save();
             }
             Message::RigChosen(r) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig = r;
                 self.restart_engine();
                 self.save();
@@ -1855,6 +1912,23 @@ impl App {
                     );
                 }
             }
+            Message::TestRig => return self.run_probe(Probe::Rig),
+            Message::TestAudio(p) => return self.run_probe(p),
+            Message::ProbeDone(p, result) => {
+                let tag = if result.is_ok() { "INFO" } else { "WARN" };
+                crate::applog::log(
+                    tag,
+                    &format!("{p:?} test: {}", result.as_ref().unwrap_or_else(|e| e)),
+                );
+                self.tests[p as usize] = Some(TestState::Done(result));
+            }
+            Message::OpenLogs => {
+                let dir = log_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if open_in_browser(&dir.to_string_lossy()).is_err() {
+                    self.toast(s::LOGS_OPEN_FAIL, ToastKind::Warning);
+                }
+            }
             Message::UpdateChecked(result) => match result {
                 Ok(crate::update::Outcome::UpToDate) => {
                     self.update_status = s::UPDATE_CURRENT.to_string();
@@ -1878,7 +1952,7 @@ impl App {
 }
 
 /// The folder for KAHF's own files. `APPDATA` on Windows, `~/.config/kahf` elsewhere.
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     config_dir_from(
         std::env::var_os("APPDATA"),
         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
@@ -1896,6 +1970,13 @@ fn config_dir_from(
         (_, _, Some(h)) => Some(PathBuf::from(h).join(".config").join("kahf")),
         _ => None,
     }
+}
+
+/// Where the log files are kept, next to the other KAHF files.
+pub(crate) fn log_dir() -> PathBuf {
+    config_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(|| PathBuf::from("kahf-logs"))
 }
 
 /// Where the UI state is remembered between runs.
@@ -1966,6 +2047,19 @@ mod tests {
 
     fn char_key(c: &str, mods: Modifiers) -> Message {
         Message::Key(Key::Character(c.into()), mods)
+    }
+
+    #[test]
+    fn probe_result_is_kept_per_test() {
+        let mut app = ready();
+        let _ = app.update(Message::TestRig);
+        assert_eq!(app.tests[Probe::Rig as usize], Some(TestState::Running));
+        assert!(app.tests[Probe::AudioIn as usize].is_none());
+        let _ = app.update(Message::ProbeDone(Probe::Rig, Err("down".into())));
+        assert_eq!(
+            app.tests[Probe::Rig as usize],
+            Some(TestState::Done(Err("down".into())))
+        );
     }
 
     #[test]

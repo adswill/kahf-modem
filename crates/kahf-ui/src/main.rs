@@ -1,4 +1,6 @@
 mod app;
+mod applog;
+mod diag;
 mod icons;
 mod live;
 mod panels;
@@ -14,6 +16,7 @@ mod view;
 use iced::{window, Size};
 
 fn main() -> iced::Result {
+    applog::init(&app::log_dir());
     iced::application(app::App::new, app::App::update, app::App::view)
         .title(strings::APP_TITLE)
         .default_font(theme::UI_FONT)

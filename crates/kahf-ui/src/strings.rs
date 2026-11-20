@@ -542,3 +542,16 @@ pub const LINK_CONNECTING: &str = "Connecting";
 pub const INPUT_LEVEL_SHORT: &str = "Level";
 pub const MONITOR_HEADING: &str = "Receive and transmit";
 pub const SNR_HISTORY_HEADING: &str = "SNR, last 60 s";
+
+// Connection tests and logs
+pub const TEST_BUTTON: &str = "Test";
+pub const TEST_RUNNING: &str = "Testing...";
+pub const TIP_TEST_RIG: &str = "Ask rigctld for the radio's frequency. Nothing is sent to the radio.";
+pub const TIP_TEST_AUDIO_IN: &str = "Listen to the input for a moment and report its level.";
+pub const TIP_TEST_AUDIO_OUT: &str = "Open the output and play silence. Nothing is transmitted.";
+pub const SET_LOGS: &str = "Logs";
+pub const SET_LOGS_DESC: &str = "KAHF keeps a short log. Look it over before you attach it to a report: it can name callsigns and devices.";
+pub const SET_LOGS_FOLDER: &str = "Folder";
+pub const SET_LOGS_OPEN: &str = "Open log folder";
+pub const TIP_LOGS_OPEN: &str = "Show the log files in your file manager.";
+pub const LOGS_OPEN_FAIL: &str = "Could not open the log folder.";
