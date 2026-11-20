@@ -1,0 +1,13 @@
+[package]
+name = "kahf-winlink"
+version.workspace = true
+edition.workspace = true
+description = "Winlink bridge: B2F protocol, LZHUF, message format and kahf mail mapping"
+
+[dependencies]
+kahf-core = { path = "../kahf-core" }
+md-5 = "0.10"
+
+[[bin]]
+name = "kahf-winlink"
+path = "src/main.rs"
