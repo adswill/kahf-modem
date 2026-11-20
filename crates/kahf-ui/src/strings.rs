@@ -120,6 +120,7 @@ pub const STATIONS_TITLE: &str = "Stations";
 pub const STATIONS_FILTER: &str = "Filter by callsign or name";
 pub const COL_CALLSIGN: &str = "Callsign";
 pub const COL_NAME: &str = "Name";
+pub const COL_QTH: &str = "Location";
 pub const COL_LAST_HEARD: &str = "Last heard";
 pub const COL_TIMES: &str = "Times heard";
 pub const COL_LAST_MESSAGE: &str = "Last message";
@@ -189,8 +190,14 @@ pub const COL_TIME: &str = "Time (UTC)";
 pub const COL_DURATION: &str = "Duration";
 pub const COL_DIR: &str = "Direction";
 pub const COL_FROM_TO: &str = "From and to";
-pub const RELAY_EMPTY_TITLE: &str = "No relay schedule yet";
-pub const RELAY_EMPTY_HINT: &str = "A schedule from the server appears here for you to accept.";
+pub const RELAY_OUTBOX: &str = "Waiting to send";
+pub const RELAY_NO_SLOTS: &str = "No slots yet. Relay sends only inside an accepted slot.";
+pub const RELAY_NO_HOPS: &str = "No messages forwarded yet.";
+pub const RELAY_OUTBOX_EMPTY: &str = "Nothing is waiting.";
+pub const COL_RELAY: &str = "Relay";
+pub const COL_ITEM: &str = "Item";
+pub const DIR_RECEIVE: &str = "Listen";
+pub const DIR_TRANSMIT: &str = "Send";
 
 // Logbook
 pub const LOG_TITLE: &str = "Logbook";
@@ -204,7 +211,9 @@ pub const COL_NOTE: &str = "Note";
 pub const LOG_EMPTY_TITLE: &str = "No contacts logged";
 pub const LOG_EMPTY_HINT: &str = "Each completed link is added here.";
 pub const LOG_NO_MATCH: &str = "No contact matches the search.";
-pub const LOG_EXPORT_DONE: &str = "Export is not connected to the engine yet. Nothing was written.";
+pub const LOG_EXPORT_DONE: &str = "Logbook exported to logbook.adi in the data folder.";
+pub const LOG_EXPORT_EMPTY: &str = "The logbook is empty. Nothing was written.";
+pub const LOG_EXPORT_FAIL: &str = "The logbook could not be exported.";
 
 // Map
 pub const MAP_TITLE: &str = "Map";

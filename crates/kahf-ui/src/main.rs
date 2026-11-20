@@ -1,5 +1,6 @@
 mod app;
 mod icons;
+mod live;
 mod panels;
 mod sample;
 mod screens;

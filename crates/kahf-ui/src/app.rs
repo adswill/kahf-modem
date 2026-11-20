@@ -12,6 +12,7 @@ use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
 use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, TxState};
 
+use crate::live::{self, Live};
 use crate::sample::{self, Kind};
 use crate::spectrum::{self, Sim, Waterfall};
 use crate::strings as s;
@@ -22,6 +23,8 @@ const TOAST_SECONDS: u64 = 4;
 const MODAL_FADE_MS: u64 = 150;
 const PULSE_SECONDS: f32 = 1.8;
 pub const SNR_SECONDS: usize = 60;
+/// How often the live snapshot (relay state, contacts, logbook) is reread.
+const LIVE_REFRESH: Duration = Duration::from_secs(1);
 
 /// What the radio is busy with, for the pulsing status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +364,9 @@ pub struct App {
     pub relay_licence: bool,
     pub relay_terms: bool,
     live_spectrum: Option<Instant>,
+    /// Engine and data-folder snapshot shown when sample data is off.
+    pub live: Live,
+    live_at: Option<Instant>,
     pub setup_open: bool,
     pub setup_done: bool,
     pub setup_focus: Option<usize>,
@@ -517,6 +523,8 @@ impl App {
             relay_licence: false,
             relay_terms: false,
             live_spectrum: None,
+            live: Live::default(),
+            live_at: None,
             setup_open: false,
             setup_done: false,
             setup_focus: None,
@@ -844,6 +852,7 @@ impl App {
 
     fn load_sample(&mut self, on: bool) {
         self.sample = on;
+        self.live_at = None;
         if on {
             let me = if self.my_call().is_empty() {
                 "You"
@@ -1079,6 +1088,43 @@ impl App {
             .is_some_and(|t| t.since.elapsed() > limit)
         {
             self.connect_failed();
+        }
+    }
+
+    /// Rereads the live snapshot about once a second. Skipped while sample data is shown.
+    fn refresh_live(&mut self, now: Instant) {
+        if self.sample || self.live_at.is_some_and(|t| now.duration_since(t) < LIVE_REFRESH) {
+            return;
+        }
+        self.live_at = Some(now);
+        // The list is re-sorted on each read, so the selection follows the callsign, not the row.
+        let selected = self
+            .station_sel
+            .and_then(|i| self.live.stations.get(i))
+            .map(|c| c.call.clone());
+        self.live.refresh(self.engine.as_ref(), &self.data_dir);
+        self.station_sel = selected.and_then(|call| self.live.stations.iter().position(|c| c.call == call));
+    }
+
+    fn export_log(&mut self) {
+        if self.sample || self.live.qsos.is_empty() {
+            return self.toast(s::LOG_EXPORT_EMPTY, ToastKind::Warning);
+        }
+        match live::export_adif(&self.live.qsos, &self.data_dir) {
+            Ok(_) => self.toast(s::LOG_EXPORT_DONE, ToastKind::Info),
+            Err(e) => {
+                self.engine_note = e;
+                self.toast(s::LOG_EXPORT_FAIL, ToastKind::Warning);
+            }
+        }
+    }
+
+    /// Number of stations heard, for the status bar and the map summary.
+    pub fn stations_heard(&self) -> usize {
+        if self.sample {
+            sample::STATIONS.len()
+        } else {
+            self.live.stations.len()
         }
     }
 
@@ -1473,6 +1519,7 @@ impl App {
                 self.clock = now;
                 self.ticks += 1;
                 self.poll_engine(now);
+                self.refresh_live(now);
                 let live = self
                     .live_spectrum
                     .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
@@ -1610,8 +1657,13 @@ impl App {
             Message::StationFilter(f) => self.station_filter = f,
             Message::SelectStation(i) => {
                 self.station_sel = Some(i);
-                if let Some(st) = sample::STATIONS.get(i) {
-                    self.target = st.call.to_string();
+                let call = if self.sample {
+                    sample::STATIONS.get(i).map(|st| st.call.to_string())
+                } else {
+                    self.live.stations.get(i).map(|c| c.call.clone())
+                };
+                if let Some(call) = call {
+                    self.target = call;
                 }
             }
             Message::SelectConversation(i) => {
@@ -1697,7 +1749,7 @@ impl App {
             Message::RelayAccept => self.toast(s::TOAST_SCHEDULE_ACCEPTED, ToastKind::Info),
             Message::RelayDecline => self.toast(s::TOAST_SCHEDULE_DECLINED, ToastKind::Info),
             Message::LogSearch(q) => self.log_search = q,
-            Message::LogExport => self.toast(s::LOG_EXPORT_DONE, ToastKind::Warning),
+            Message::LogExport => self.export_log(),
             Message::OpenMap => {
                 if open_in_browser(s::MAP_URL).is_err() {
                     self.toast(s::TOAST_MAP_FAIL, ToastKind::Warning);

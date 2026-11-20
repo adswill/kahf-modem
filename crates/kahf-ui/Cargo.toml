@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 kahf-daemon = { path = "../kahf-daemon" }
 kahf-core = { path = "../kahf-core" }
+kahf-log = { path = "../kahf-log" }
 kahf-audio = { path = "../kahf-audio" }
 kahf-sdr = { path = "../kahf-sdr" }
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
