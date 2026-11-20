@@ -9,7 +9,6 @@ use iced::widget::{
 use iced::{Color, Element, Fill, Font, Length};
 
 use crate::app::{App, Busy, Confirm, Message, Section, Step, ToastKind, TxAction, PALETTE_INPUT};
-use crate::sample;
 use crate::spectrum;
 use crate::strings as s;
 use crate::theme::{self, Kind};
@@ -819,7 +818,7 @@ impl App {
                     tooltip::Position::Top
                 ),
                 space().width(Fill),
-                cell(s::STATUS_STATIONS, sample::STATIONS.len().to_string()),
+                cell(s::STATUS_STATIONS, self.stations_heard().to_string()),
                 cell(s::STATUS_MESSAGES, self.thread.len().to_string()),
                 tip_at(
                     row![
