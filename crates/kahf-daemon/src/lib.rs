@@ -33,6 +33,7 @@ use kahf_core::session::{self, Message};
 use kahf_core::spectrum::Analyser;
 use kahf_log::contacts::{self, Contact};
 use kahf_log::{valid_call, Qso};
+use kahf_prop::route;
 use kahf_radio::{GainSetting, RadioSpec, RxRadio};
 use kahf_sdr::hackrf::HackrfTx;
 use sha2::{Digest, Sha256};
@@ -423,6 +424,22 @@ impl Engine {
         }
         *lock(&self.shared.relay_paths) = paths;
         Ok(())
+    }
+
+    /// Sets the relay paths from the 17 m route planner: for each of the next 24 hours, the
+    /// first relay of the best predicted route from `me` to `to` (kahf_prop::route). Returns
+    /// the paths set, best first; empty when no route is predicted at any hour.
+    pub fn plan_relay_paths(
+        &self,
+        me: &route::Node,
+        to: &route::Node,
+        relays: &[route::Node],
+        conditions: &route::Conditions,
+    ) -> Result<Vec<String>, String> {
+        let paths = route::first_relays(me, to, relays, conditions);
+        let calls: Vec<&str> = paths.iter().map(String::as_str).collect();
+        self.set_relay_paths(&calls)?;
+        Ok(self.relay_paths())
     }
 
     /// The relays set with `set_relay_paths`.
@@ -4482,6 +4499,22 @@ mod tests {
         assert_eq!(e.relay_paths(), vec!["RR1RRR".to_string(), "QQ1QQQ".to_string()]);
         e.set_relay_paths(&[]).unwrap();
         assert!(e.relay_paths().is_empty());
+    }
+
+    #[test]
+    fn relay_paths_come_from_the_route_planner() {
+        let e = Engine::new(config("OH2AAA", temp_dir("relay-plan"))).unwrap();
+        // Helsinki to Tallinn is in the 17 m skip zone; Madrid bridges it by day.
+        let me = route::Node::new("OH2AAA", (60.17, 24.94));
+        let to = route::Node::new("ES1BBB", (59.44, 24.75));
+        let relays = [route::Node::new("EA4DDD", (40.42, -3.70))];
+        let day = route::Conditions {
+            solar_flux: 150.0,
+            ..route::Conditions::band_17m(12, 6)
+        };
+        let paths = e.plan_relay_paths(&me, &to, &relays, &day).unwrap();
+        assert_eq!(paths, vec!["EA4DDD".to_string()]);
+        assert_eq!(e.relay_paths(), paths);
     }
 
     /// Connected to B, an item for C at the head of the queue must not hold back B's.

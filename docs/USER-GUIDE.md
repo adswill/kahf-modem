@@ -213,6 +213,16 @@ How radio relay works in the engine:
   acknowledged it. A relay does not show these messages in its own inbox.
 - Each message is passed on once. Copies heard again and messages that loop back are dropped.
   A relay holds at most 64 messages for other stations.
+- A relay that cannot reach the station either passes the message to its own relays, so a
+  message can cross several relays (up to four hops are planned).
+- Relays work on 17 m by default, 18.111 to 18.120 MHz, in three 2.7 kHz channels. IARU Region 1
+  marks this part of 17 m for digital modes and automatically controlled data stations. It sits
+  above the 18.110 MHz beacon and clear of FT8 and FT4. Check your own country's rules.
+- Which relays to name can come from the route planner, which estimates when 17 m is open
+  between each pair of stations: ground wave up to about 30 km, sky wave from the MUF and LUF.
+  Between those two there is a skip zone, where two nearby stations cannot hear each other on
+  17 m and need a distant relay. The planner is an estimate and has not been checked against
+  real contacts yet.
 
 ## 10. Location sharing
 
