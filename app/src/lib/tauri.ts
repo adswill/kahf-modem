@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { defaultSettings } from "./defaults";
 import type {
-  AppInfo, Engine, Logbook, ServerCheck, UpdateCheck, EngineEvent, MessageKind, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, Occupancy, VoiceClip,
+  AppInfo, DirectRig, Engine, ExportServices, LevelCheck, Logbook, ServerCheck, UpdateCheck, EngineEvent, MessageKind, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, Occupancy, VoiceClip,
 } from "./types";
 
 export class TauriEngine implements Engine {
@@ -123,6 +123,18 @@ export class TauriEngine implements Engine {
   }
   rigStop() {
     return invoke<void>("rig_stop");
+  }
+  rigDirectModels() {
+    return invoke<DirectRig[]>("rig_direct_models");
+  }
+  testRigSpec(spec: string) {
+    return invoke<string>("rig_test_spec", { spec });
+  }
+  audioLevelCheck(device: string) {
+    return invoke<LevelCheck>("audio_level_check", { device });
+  }
+  uploadLogbook(service: "qrz" | "clublog" | "lotw" | "n1mm", cfg: ExportServices) {
+    return invoke<string>("upload_logbook", { service, cfg });
   }
   logbook() {
     return invoke<Logbook>("logbook");

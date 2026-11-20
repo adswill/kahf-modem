@@ -14,6 +14,12 @@
 
   let devices = $state<string[]>([]);
   let sdrs = $state<string[]>([]);
+  // Listens for three seconds with nothing sent and says whether the radio's volume is right.
+  async function checkLevel(): Promise<string> {
+    const r = await app.engine.audioLevelCheck(audioIn);
+    return `${r.advice} (${r.levelDb} dB)`;
+  }
+
   onMount(async () => {
     devices = await app.engine.listAudioDevices();
     sdrs = await app.engine.detectSdr();
@@ -43,8 +49,9 @@
       </label>
       <TestButton label="Test input" run={() => app.engine.testAudioIn(audioIn)} />
       <TestButton label="Test output" run={() => app.engine.testAudioOut(audioOut)} />
+      <TestButton label="Check the level (3 s)" run={checkLevel} />
     </div>
-    <p class="faint small">The input test listens for a moment. The output test plays silence. Neither one transmits.</p>
+    <p class="faint small">The input test listens for a moment. The output test plays silence. The level check listens for three seconds with the band open. None of them transmits.</p>
   {/if}
 
   <button class="pick" class:on={kind === "sdr"} onclick={() => (kind = "sdr")}>

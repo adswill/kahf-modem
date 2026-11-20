@@ -4,7 +4,7 @@
 
 import { defaultSettings, MODE_TABLE } from "./defaults";
 import type {
-  AppInfo, Engine, EngineEvent, Logbook, MessageKind, Metrics, ServerCheck, UpdateCheck, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, Occupancy, VoiceClip,
+  AppInfo, DirectRig, Engine, ExportServices, LevelCheck, EngineEvent, Logbook, MessageKind, Metrics, ServerCheck, UpdateCheck, ModeInfo, PickedFile, RelayInfo, RelayStatus, RigModel, Settings, TxGate, Occupancy, VoiceClip,
 } from "./types";
 
 const STORE = "kahf.settings";
@@ -353,6 +353,27 @@ export class MockEngine implements Engine {
   }
   async occupancy(): Promise<Occupancy | null> {
     return null;
+  }
+  async rigDirectModels(): Promise<DirectRig[]> {
+    return [
+      { id: "ic7300", label: "Icom IC-7300", baud: 115200 },
+      { id: "ft991a", label: "Yaesu FT-991A", baud: 38400 },
+      { id: "ts590", label: "Kenwood TS-590S/SG", baud: 115200 },
+      { id: "qmx", label: "QRP Labs QMX", baud: 115200 },
+    ];
+  }
+  async testRigSpec(spec: string): Promise<string> {
+    await new Promise((r) => setTimeout(r, 500));
+    if (!spec.includes(":")) throw new Error("Choose the serial port first.");
+    return "Icom IC-7300 answered. Dial at 18112.350 kHz.";
+  }
+  async audioLevelCheck(_device: string): Promise<LevelCheck> {
+    await new Promise((r) => setTimeout(r, 800));
+    return { verdict: "good", advice: "The level is good.", levelDb: -28.4 };
+  }
+  async uploadLogbook(service: "qrz" | "clublog" | "lotw" | "n1mm", _cfg: ExportServices): Promise<string> {
+    await new Promise((r) => setTimeout(r, 600));
+    return `Demo: 2 contacts would be sent to ${service}.`;
   }
   async logbook(): Promise<Logbook> {
     return {

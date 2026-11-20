@@ -17,11 +17,12 @@
   let sdr = $state(app.settings.sdr);
   let rig = $state({ ...app.settings.rig });
   let rigctld = $state(app.settings.rigctld);
+  let rigSpec = $state(app.settings.rigSpec);
   let applying = $state(false);
 
   const dirty = $derived(
     audioIn !== app.settings.audioIn || audioOut !== app.settings.audioOut || sdr !== app.settings.sdr ||
-      rigctld.trim() !== app.settings.rigctld ||
+      rigctld.trim() !== app.settings.rigctld || rigSpec !== app.settings.rigSpec ||
       rig.model !== app.settings.rig.model || rig.port !== app.settings.rig.port || rig.baud !== app.settings.rig.baud,
   );
 
@@ -33,6 +34,7 @@
       sdr: kind === "sdr" ? sdr : "",
       rig: { ...rig },
       rigctld: rigctld.trim(),
+      rigSpec,
     };
     await app.saveSettings(patch);
     const ok = await app.startEngine();
@@ -81,7 +83,7 @@
 
     <section>
       <h2>Radio control <Tip text="Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card." /></h2>
-      <div style="margin-top: 8px"><RigPicker bind:value={rig} bind:address={rigctld} /></div>
+      <div style="margin-top: 8px"><RigPicker bind:value={rig} bind:address={rigctld} bind:spec={rigSpec} /></div>
     </section>
 
     {#if dirty}

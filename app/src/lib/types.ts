@@ -227,12 +227,38 @@ export interface Location {
   radiusKm: number;
 }
 
+export interface ExportServices {
+  qrzKey: string;
+  clublogEmail: string;
+  clublogPassword: string;
+  clublogAppKey: string;
+  tqslPath: string;
+  lotwLocation: string;
+  n1mmAddr: string;
+}
+
+export interface DirectRig {
+  id: string;
+  label: string;
+  baud: number;
+}
+
+export interface LevelCheck {
+  verdict: "silent" | "low" | "good" | "high";
+  advice: string;
+  levelDb: number;
+}
+
 export interface Settings {
   callsign: string;
   audioIn: string;
   audioOut: string;
   sdr: string;
   rigctld: string;
+  /** A radio controlled directly by name, such as `ic7300:/dev/cu.usbserial-1:115200:cat`. */
+  rigSpec: string;
+  /** Fields for sending the logbook to other services. Kept on this computer only. */
+  exportServices: ExportServices;
   location: Location;
   /** Connect by itself to send queued messages, and hang up afterwards. */
   autoLink: boolean;
@@ -339,6 +365,14 @@ export interface Engine {
   /** Starts radio control and returns the radio's frequency in Hz. */
   rigConnect(model: number, port: string, baud: number): Promise<number>;
   rigStop(): Promise<void>;
+  /** Radios that can be controlled directly, without Hamlib. */
+  rigDirectModels(): Promise<DirectRig[]>;
+  /** Opens a radio by its spec and reads its frequency. Never transmits. */
+  testRigSpec(spec: string): Promise<string>;
+  /** Listens to an input for three seconds and judges the level. */
+  audioLevelCheck(device: string): Promise<LevelCheck>;
+  /** Sends the logbook to another service. Only when the person asks. */
+  uploadLogbook(service: "qrz" | "clublog" | "lotw" | "n1mm", cfg: ExportServices): Promise<string>;
   /** The address book and the logbook, read from the data folder. */
   logbook(): Promise<Logbook>;
   /** Writes the logbook as ADIF next to it and returns where. */

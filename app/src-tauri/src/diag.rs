@@ -102,6 +102,42 @@ pub fn test_audio_out(device: Option<&str>) -> Result<String, String> {
     Ok("The output opened. Nothing was sent to the radio.".into())
 }
 
+/// How the received level looks, in plain words, and what to do about it.
+pub fn judge_level(rms_db: f32, peak: f32) -> (&'static str, &'static str) {
+    if rms_db <= -80.0 {
+        ("silent", "No audio at all. Check that this is the radio's sound card, that the radio is on, and that its USB audio output is enabled.")
+    } else if peak >= 0.98 || rms_db > -10.0 {
+        ("high", "The level is too high and may clip. Lower the radio's USB audio output level or the computer's input volume.")
+    } else if rms_db < -45.0 {
+        (
+            "low",
+            "The level is low. Raise the radio's USB audio output level, or the computer's input volume.",
+        )
+    } else {
+        ("good", "The level is good.")
+    }
+}
+
+/// Listens for three seconds and judges the level. Never transmits.
+pub fn check_audio_level(device: Option<&str>) -> Result<(String, String, f32), String> {
+    let mut input = kahf_audio::AudioIn::open(device).map_err(|e| format!("Cannot open the input: {e}"))?;
+    let mut all: Vec<f32> = Vec::new();
+    let mut buf = vec![0.0f32; 8000];
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < Duration::from_secs(3) {
+        let n = input.read(&mut buf);
+        all.extend_from_slice(&buf[..n]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Some(e) = input.error() {
+        return Err(format!("The input stopped: {e}"));
+    }
+    let db = kahf_audio::level_db(&all);
+    let peak = all.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let (verdict, advice) = judge_level(db, peak);
+    Ok((verdict.to_string(), advice.to_string(), db))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +154,14 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[test]
+    fn level_advice() {
+        assert_eq!(judge_level(-120.0, 0.0).0, "silent");
+        assert_eq!(judge_level(-60.0, 0.01).0, "low");
+        assert_eq!(judge_level(-25.0, 0.3).0, "good");
+        assert_eq!(judge_level(-6.0, 0.99).0, "high");
     }
 
     #[test]

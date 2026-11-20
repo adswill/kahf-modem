@@ -47,6 +47,8 @@ pub struct EngineSettings {
     audio_in: String,
     audio_out: String,
     rig: String,
+    /// A radio controlled directly, such as `ic7300:/dev/cu.usbserial-1:115200:cat`.
+    rig_spec: String,
     sdr: String,
     pub listen_only: bool,
     /// The radio chosen by name: Hamlib model number, serial port, speed.
@@ -62,6 +64,7 @@ impl EngineSettings {
             audio_in: text("audioIn"),
             audio_out: text("audioOut"),
             rig: text("rigctld"),
+            rig_spec: text("rigSpec"),
             sdr: text("sdr"),
             listen_only: flag("listenOnly", false),
             rig_choice: {
@@ -101,7 +104,12 @@ impl EngineSettings {
         (!self.audio_out.is_empty()).then(|| self.audio_out.clone())
     }
 
+    /// What the engine opens for radio control: a direct radio spec if one was chosen, else the
+    /// rigctld address.
     pub fn rigctld(&self) -> Option<String> {
+        if !self.rig_spec.is_empty() {
+            return Some(self.rig_spec.clone());
+        }
         (!self.rig.is_empty()).then(|| self.rig.clone())
     }
 
@@ -129,6 +137,16 @@ mod tests {
         assert_eq!(s.audio_out(), None);
         assert_eq!(s.sdr_spec().as_deref(), Some("hackrf"));
         assert!(s.listen_only);
+    }
+
+    #[test]
+    fn a_direct_radio_wins_over_a_rigctld_address() {
+        let s = EngineSettings::from_json(
+            &json!({ "rigctld": "127.0.0.1:4532", "rigSpec": "ic7300:/dev/x:115200:cat" }),
+        );
+        assert_eq!(s.rigctld().as_deref(), Some("ic7300:/dev/x:115200:cat"));
+        let s = EngineSettings::from_json(&json!({ "rigctld": "127.0.0.1:4532" }));
+        assert_eq!(s.rigctld().as_deref(), Some("127.0.0.1:4532"));
     }
 
     #[test]

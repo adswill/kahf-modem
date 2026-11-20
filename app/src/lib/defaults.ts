@@ -6,6 +6,8 @@ export const defaultSettings = (): Settings => ({
   audioOut: "",
   sdr: "",
   rigctld: "",
+  rigSpec: "",
+  exportServices: { qrzKey: "", clublogEmail: "", clublogPassword: "", clublogAppKey: "", tqslPath: "", lotwLocation: "", n1mmAddr: "127.0.0.1:12060" },
   // Privacy first: nothing is shared until the person chooses to.
   location: { mode: "off", lat: null, lon: null, radiusKm: 50 },
   autoLink: true,

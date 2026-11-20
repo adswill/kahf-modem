@@ -22,6 +22,8 @@ kahf-sdr = { path = "../../crates/kahf-sdr" }
 codec2 = "0.3.1"
 kahf-log = { path = "../../crates/kahf-log" }
 kahf-prop = { path = "../../crates/kahf-prop" }
+kahf-rig = { path = "../../crates/kahf-rig" }
+kahf-export = { path = "../../crates/kahf-export" }
 ureq = "2"
 tauri-plugin-dialog = "2"
 

@@ -698,6 +698,134 @@ async fn test_audio_out(device: String) -> Res<String> {
         .unwrap_or_else(|_| Err("The test stopped unexpectedly.".into()))
 }
 
+/// The radios KAHF can control directly (model name, label, default speed).
+#[tauri::command]
+fn rig_direct_models() -> Vec<Value> {
+    kahf_rig::MODELS
+        .iter()
+        .filter(|(name, _, _)| *name != "flrig" && *name != "rigctld")
+        .map(|(name, label, baud)| json!({ "id": name, "label": label, "baud": baud }))
+        .collect()
+}
+
+/// Opens the radio the way the engine would and reads its frequency. Never keys the
+/// transmitter.
+#[tauri::command]
+async fn rig_test_spec(spec: String) -> Res<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut rig = kahf_rig::open(spec.trim())?;
+        let hz = rig.freq_hz()?;
+        Ok(format!(
+            "{} answered. Dial at {:.3} kHz.",
+            rig.name(),
+            hz as f64 / 1000.0
+        ))
+    })
+    .await
+    .unwrap_or_else(|_| Err("The test stopped unexpectedly.".into()))
+}
+
+/// Listens to a sound input for three seconds and says whether the level is right.
+#[tauri::command]
+async fn audio_level_check(device: String) -> Res<Value> {
+    let dev = (!device.is_empty()).then_some(device);
+    tauri::async_runtime::spawn_blocking(move || {
+        diag::check_audio_level(dev.as_deref()).map(|(verdict, advice, db)| {
+            json!({ "verdict": verdict, "advice": advice, "levelDb": (db * 10.0).round() / 10.0 })
+        })
+    })
+    .await
+    .unwrap_or_else(|_| Err("The check stopped unexpectedly.".into()))
+}
+
+/// Sends the logbook to another service, only when the person presses the button.
+/// `service` is "qrz", "clublog", "lotw" or "n1mm"; `cfg` holds that service's fields.
+#[tauri::command]
+async fn upload_logbook(state: State<'_, Shared>, service: String, cfg: Value) -> Res<String> {
+    let dir = state.data_dir.clone();
+    let settings = settings::load(&dir);
+    let call = EngineSettings::from_json(&settings).callsign();
+    let grid = match (
+        settings["location"]["lat"].as_f64(),
+        settings["location"]["lon"].as_f64(),
+    ) {
+        (Some(la), Some(lo)) => live::grid_of(la, lo),
+        _ => String::new(),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, qsos) = live::read_qsos(&dir)?;
+        if qsos.is_empty() {
+            return Err("The logbook is empty, so there is nothing to send.".to_string());
+        }
+        let text = |k: &str| cfg[k].as_str().unwrap_or("").trim().to_string();
+        let (mut sent, mut dup) = (0, 0);
+        let mut count = |r: Result<kahf_export::Upload, String>| -> Res<()> {
+            match r? {
+                kahf_export::Upload::Accepted => sent += 1,
+                kahf_export::Upload::Duplicate => dup += 1,
+            }
+            Ok(())
+        };
+        match service.as_str() {
+            "qrz" => {
+                let key = text("qrzKey");
+                if key.is_empty() {
+                    return Err("Enter your QRZ logbook API key first.".into());
+                }
+                for q in &qsos {
+                    count(kahf_export::upload_qrz(
+                        kahf_export::QRZ_URL,
+                        &key,
+                        &kahf_export::adif_record(q, &call, &grid),
+                    ))?;
+                }
+            }
+            "clublog" => {
+                let (email, pass, app) = (
+                    text("clublogEmail"),
+                    text("clublogPassword"),
+                    text("clublogAppKey"),
+                );
+                if email.is_empty() || pass.is_empty() || app.is_empty() {
+                    return Err("Enter your Club Log email, password and application key first.".into());
+                }
+                for q in &qsos {
+                    count(kahf_export::upload_clublog(
+                        kahf_export::CLUBLOG_URL,
+                        &email,
+                        &pass,
+                        &call,
+                        &app,
+                        &kahf_export::adif_record(q, &call, &grid),
+                    ))?;
+                }
+            }
+            "lotw" => {
+                let (tqsl, loc) = (text("tqslPath"), text("lotwLocation"));
+                if tqsl.is_empty() || loc.is_empty() {
+                    return Err("Enter the path of TQSL and the name of your station location first.".into());
+                }
+                let path = live::export_adif(&qsos, &dir)?;
+                count(kahf_export::upload_lotw(&tqsl, &path.display().to_string(), &loc))?;
+            }
+            "n1mm" => {
+                let addr = text("n1mmAddr");
+                if addr.is_empty() {
+                    return Err("Enter the address of N1MM, for example 127.0.0.1:12060.".into());
+                }
+                for q in &qsos {
+                    kahf_export::send_n1mm(&addr, q, &call, &grid)?;
+                    sent += 1;
+                }
+            }
+            _ => return Err("Unknown service.".into()),
+        }
+        Ok(format!("{sent} sent, {dup} already there."))
+    })
+    .await
+    .unwrap_or_else(|_| Err("The upload stopped unexpectedly.".into()))
+}
+
 /// Asks GitHub for the newest release. Only when the person presses the button.
 #[tauri::command]
 async fn check_update() -> Res<Value> {
@@ -955,6 +1083,10 @@ pub fn run() {
             test_rig,
             test_audio_in,
             test_audio_out,
+            rig_direct_models,
+            rig_test_spec,
+            audio_level_check,
+            upload_logbook,
             check_update,
             server_status,
             open_logs,

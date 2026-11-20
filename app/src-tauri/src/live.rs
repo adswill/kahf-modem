@@ -210,6 +210,23 @@ pub fn locator_position(loc: &str) -> Option<(f64, f64)> {
     Some((lat + w_lat / 2.0, lon + w_lon / 2.0))
 }
 
+/// The six-character Maidenhead locator of a position, such as "KP20le".
+pub fn grid_of(lat: f64, lon: f64) -> String {
+    let lon = (lon + 180.0).clamp(0.0, 359.999_999);
+    let lat = (lat + 90.0).clamp(0.0, 179.999_999);
+    let field = |v: f64, step: f64, base: u8| (base + (v / step) as u8) as char;
+    let (lo, la) = (lon, lat);
+    format!(
+        "{}{}{}{}{}{}",
+        field(lo, 20.0, b'A'),
+        field(la, 10.0, b'A'),
+        (((lo % 20.0) / 2.0) as u8),
+        (((la % 10.0) / 1.0) as u8),
+        field(lo % 2.0, 2.0 / 24.0, b'a'),
+        field(la % 1.0, 1.0 / 24.0, b'a'),
+    )
+}
+
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -257,6 +274,12 @@ mod tests {
         assert_eq!(date("soon"), "soon");
         assert_eq!(time("140530"), "14:05");
         assert_eq!(utc_hour_month(1_763_643_600), (13, 11));
+    }
+
+    #[test]
+    fn positions_give_their_locator() {
+        assert_eq!(grid_of(60.19, 24.95), "KP20le");
+        assert_eq!(grid_of(51.5, 1.0), "JO01mm");
     }
 
     #[test]

@@ -3,6 +3,22 @@
   import Tip from "../components/Tip.svelte";
 
   let query = $state("");
+  let ex = $state({ ...app.settings.exportServices });
+  let busy = $state("");
+  let answer = $state<{ service: string; ok: boolean; text: string } | null>(null);
+
+  // Sends the logbook to one service, only when its button is pressed.
+  async function send(service: "qrz" | "clublog" | "lotw" | "n1mm") {
+    busy = service;
+    answer = null;
+    try {
+      await app.saveSettings({ exportServices: { ...ex } });
+      answer = { service, ok: true, text: await app.engine.uploadLogbook(service, { ...ex }) };
+    } catch (e) {
+      answer = { service, ok: false, text: String(e).replace(/^Error: /, "") };
+    }
+    busy = "";
+  }
   const q = $derived(query.trim().toLowerCase());
   const rows = $derived(
     app.book.qsos.filter((r) => !q || [r.call, r.name, r.comment, r.band, r.date].some((v) => v.toLowerCase().includes(q))),
@@ -50,9 +66,46 @@
       </tbody>
     </table>
   {/if}
+
+  <details class="send">
+    <summary>Send the logbook to other services</summary>
+    <p class="faint small">Nothing is sent until you press a button. The keys and passwords below are kept on this computer, in the settings file, as plain text.</p>
+    <div class="svc">
+      <h3>QRZ Logbook</h3>
+      <label class="field"><span class="t">Logbook API key</span><input type="password" bind:value={ex.qrzKey} autocomplete="off" /></label>
+      <button class="btn sm" disabled={busy !== "" || !ex.qrzKey || app.book.qsos.length === 0} onclick={() => send("qrz")}>{busy === "qrz" ? "Sending…" : "Send to QRZ"}</button>
+    </div>
+    <div class="svc">
+      <h3>Club Log</h3>
+      <div class="grid3">
+        <label class="field"><span class="t">Email</span><input type="text" bind:value={ex.clublogEmail} autocomplete="off" /></label>
+        <label class="field"><span class="t">Password</span><input type="password" bind:value={ex.clublogPassword} autocomplete="off" /></label>
+        <label class="field"><span class="t">Application key</span><input type="password" bind:value={ex.clublogAppKey} autocomplete="off" /></label>
+      </div>
+      <button class="btn sm" disabled={busy !== "" || !ex.clublogEmail || !ex.clublogPassword || !ex.clublogAppKey || app.book.qsos.length === 0} onclick={() => send("clublog")}>{busy === "clublog" ? "Sending…" : "Send to Club Log"}</button>
+    </div>
+    <div class="svc">
+      <h3>Logbook of the World (needs ARRL TQSL)</h3>
+      <div class="grid3">
+        <label class="field"><span class="t">Path of TQSL</span><input type="text" bind:value={ex.tqslPath} placeholder="/Applications/TQSL.app/Contents/MacOS/tqsl" /></label>
+        <label class="field"><span class="t">Station location name</span><input type="text" bind:value={ex.lotwLocation} /></label>
+      </div>
+      <button class="btn sm" disabled={busy !== "" || !ex.tqslPath || !ex.lotwLocation || app.book.qsos.length === 0} onclick={() => send("lotw")}>{busy === "lotw" ? "Sending…" : "Send with TQSL"}</button>
+    </div>
+    <div class="svc">
+      <h3>N1MM Logger+ (on this network)</h3>
+      <label class="field"><span class="t">Address</span><input type="text" bind:value={ex.n1mmAddr} placeholder="127.0.0.1:12060" /></label>
+      <button class="btn sm" disabled={busy !== "" || !ex.n1mmAddr || app.book.qsos.length === 0} onclick={() => send("n1mm")}>{busy === "n1mm" ? "Sending…" : "Send to N1MM"}</button>
+    </div>
+    {#if answer}<p class={answer.ok ? "ok" : "err"} role="status">{answer.text}</p>{/if}
+  </details>
 </div>
 
 <style>
+  .send { border-top: 1px solid var(--line); padding-top: 12px; }
+  .send summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+  .svc { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--line); max-width: 760px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; width: 100%; }
   .view {
     height: 100%;
     overflow: auto;
