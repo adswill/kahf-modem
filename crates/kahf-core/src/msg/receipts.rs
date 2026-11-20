@@ -5,6 +5,35 @@
 use super::short_id;
 use crate::extras::Receipt;
 
+/// On-air receipt frame: the 3-byte receipt followed by the callsign of the station sending it
+/// (A-Z, 0-9, '/'), so the original sender knows who acknowledged. At most 18 bytes.
+pub fn receipt_frame(receipt: &Receipt, from_call: &str) -> Option<Vec<u8>> {
+    let call = from_call.to_ascii_uppercase();
+    let ok = !call.is_empty()
+        && call.len() <= 15
+        && call
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'/');
+    ok.then(|| {
+        let mut v = crate::extras::encode_receipt(receipt);
+        v.extend_from_slice(call.as_bytes());
+        v
+    })
+}
+
+/// Parses a receipt frame into the receipt and the callsign that sent it.
+pub fn parse_receipt_frame(bytes: &[u8]) -> Option<(Receipt, String)> {
+    if bytes.len() < 4 || bytes.len() > 18 {
+        return None;
+    }
+    let r = crate::extras::decode_receipt(&bytes[..3])?;
+    let call = std::str::from_utf8(&bytes[3..]).ok()?;
+    let ok = call
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'/');
+    ok.then(|| (r, call.to_string()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Status {
     Queued,
@@ -161,6 +190,16 @@ mod tests {
 
     fn call(s: &str) -> Vec<String> {
         vec![s.to_string()]
+    }
+
+    #[test]
+    fn receipt_frames() {
+        let r = Receipt::Delivered { message_id: 0xBEEF };
+        let f = receipt_frame(&r, "g4abc").unwrap();
+        assert_eq!(parse_receipt_frame(&f), Some((r, "G4ABC".to_string())));
+        assert!(receipt_frame(&r, "bad call").is_none());
+        assert!(parse_receipt_frame(&f[..3]).is_none());
+        assert!(parse_receipt_frame(b"\x09\x00\x01ABC").is_none());
     }
 
     #[test]
