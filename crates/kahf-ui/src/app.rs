@@ -1288,6 +1288,7 @@ impl App {
             return;
         }
         // The relay network works on 17 m, so relay mode always starts there.
+        let earlier_band = self.band;
         self.set_band(spectrum::Band::M17);
         let channels: Vec<f32> = spectrum::channels()
             .iter()
@@ -1315,8 +1316,9 @@ impl App {
                 self.start_server_sync();
             }
             Err(why) => {
-                // Relay stays off.
+                // Relay stays off, on the band the operator had.
                 self.role = Role::Station;
+                self.set_band(earlier_band);
                 self.toast(&why, ToastKind::Warning);
             }
         }
@@ -1359,6 +1361,7 @@ impl App {
 
     fn set_band(&mut self, b: spectrum::Band) {
         self.band = b;
+        self.tune = 0.5;
         spectrum::set_centre_hz(b.centre_hz());
     }
 
@@ -1884,7 +1887,6 @@ impl App {
             }
             Message::BandChosen(b) => {
                 self.set_band(b);
-                self.tune = 0.5;
             }
             Message::VolIn(v) => {
                 self.vol_in = v;
