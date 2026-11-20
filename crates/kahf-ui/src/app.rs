@@ -2200,11 +2200,8 @@ mod smoke {
         for section in Section::ALL {
             let mut app = App::init();
             app.section = section;
-            let mut sim = iced_test::Simulator::with_size(
-                settings.clone(),
-                iced::Size::new(1280.0, 800.0),
-                app.view(),
-            );
+            let mut sim =
+                iced_test::Simulator::with_size(settings.clone(), iced::Size::new(1280.0, 800.0), app.view());
             assert!(
                 sim.find(section.label()).is_ok(),
                 "{section:?} screen did not render its label"
