@@ -194,6 +194,50 @@ fn direct(run: &mut Run, dev: &str, cycles: u32) {
     }
 }
 
+/// One session, files both ways again and again: the second file of a session is the one that
+/// used to stall.
+fn files(run: &mut Run, dev: &str, pairs: u32) {
+    run.say(&format!(
+        "== files: {pairs} pairs (A to B, then B to A) in one session"
+    ));
+    let mut a = station("A", "ZZ1ALPHA", dev);
+    let mut b = station("B", "ZZ2BRAVO", dev);
+    std::thread::sleep(Duration::from_secs(1));
+    a.e.connect("ZZ2BRAVO").unwrap();
+    let r = wait(&mut [&mut a, &mut b], 60, &|s| {
+        s[0].linked.is_some() && s[1].linked.is_some()
+    });
+    run.step("connect", r.is_some(), r.unwrap_or_default());
+    for i in 1..=pairs {
+        let name = format!("pair-{i}-a-to-b.bin");
+        let data: Vec<u8> = (0..1200u32).map(|k| (k * 7 + i) as u8).collect();
+        std::fs::write(a.dir.join(&name), &data).unwrap();
+        a.e.send_file("ZZ2BRAVO", &a.dir.join(&name)).unwrap();
+        let r = wait(&mut [&mut a, &mut b], 240, &|s| s[1].files.contains(&name));
+        let same = std::fs::read(b.dir.join("inbox").join(&name))
+            .map(|d| d == data)
+            .unwrap_or(false);
+        run.step(
+            &format!("pair {i}: 1.2 kB file A to B"),
+            r.is_some() && same,
+            r.unwrap_or_default(),
+        );
+        let name = format!("pair-{i}-b-to-a.bin");
+        let data: Vec<u8> = (0..900u32).map(|k| (k * 13 + i) as u8).collect();
+        std::fs::write(b.dir.join(&name), &data).unwrap();
+        b.e.send_file("ZZ1ALPHA", &b.dir.join(&name)).unwrap();
+        let r = wait(&mut [&mut a, &mut b], 240, &|s| s[0].files.contains(&name));
+        let same = std::fs::read(a.dir.join("inbox").join(&name))
+            .map(|d| d == data)
+            .unwrap_or(false);
+        run.step(
+            &format!("pair {i}: 0.9 kB file B to A"),
+            r.is_some() && same,
+            r.unwrap_or_default(),
+        );
+    }
+}
+
 fn relays(run: &mut Run, dev: &str, hops: usize) {
     run.say(&format!(
         "== relays: {hops} relay(s) in a row, messages A to D, plus a bystander"
@@ -257,6 +301,16 @@ fn main() {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3),
+        );
+    }
+    if what == "files" {
+        files(
+            &mut run,
+            &dev,
+            std::env::var("KAHF_MATRIX_PAIRS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
         );
     }
     if what == "relays" || what == "all" {

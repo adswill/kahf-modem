@@ -106,6 +106,13 @@ impl ChannelWatch {
         ECHO_GUARD.max(self.latency + Duration::from_millis(300))
     }
 
+    /// True while someone else's signal is on the channel right now (heard within the last
+    /// quarter second).
+    pub fn busy_now(&self, now: Instant) -> bool {
+        self.last_energy
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(250))
+    }
+
     /// How long the channel must have been quiet before a transmission may start: longer than the
     /// delay of the sound path, or a signal we cannot see yet would be talked over.
     fn quiet_needed(&self) -> Duration {

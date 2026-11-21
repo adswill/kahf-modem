@@ -56,12 +56,37 @@ Two relays in a row were not truly exercised on BlackHole: every station hears e
 R1 delivers to D directly and never needs R2. The multi-hop path with stations that cannot hear
 each other is covered by the simulated air in `message_crosses_two_radio_relays`.
 
+## Third pass: turn-taking
+
+Cause of the file stall: no rule said whose turn it was. Both stations sent data at each other,
+the acknowledgements collided with data, loss reports pushed both down the ladder to slow, long
+bursts, and the loop fed itself. The link also mistook late echoes of its own frames for the
+peer's, which made the first version of the rule stall.
+
+What changed in the daemon:
+- A station that hears the peer's DATA gives the peer the turn for 2.5 s and does not start its
+  own data meanwhile (acknowledgements always go).
+- The link's retransmit clock runs only on an idle channel: not while we transmit, not while the
+  peer's signal is on the air, not while the peer has the turn.
+- Our own frames are remembered for 8 s (was 1.5 s) so their late playback is never read as the
+  peer's.
+
+| Test over BlackHole | Before | After |
+|---|---|---|
+| one session, 10 pairs: 1.2 kB A to B then 0.9 kB B to A, byte for byte | B to A failed about half the time | 20 of 20 pass, 91 to 131 s each |
+| `two_stations_*` bus tests | 1 pass in 6 | 12 of 12 pass, now un-ignored |
+| `cargo test -p kahf-daemon` | 87 pass, 2 ignored | 93 pass, none ignored, three runs in a row |
+
+Files are reliable but slow, about 10 bytes a second, because every frame is its own burst with a
+channel check, a preamble and an acknowledgement. Packing several frames into one burst was
+tried and made transfers fail, so it was reverted; it needs work in the burst and link code.
+
 ## Known limits
 
 - The mesh time is long because five engines and two app windows each scan every burst on one
   Mac (about 0.2 s of CPU per scan), and because a relay waits for the hang-up before it calls
   the next station. Not measured on separate machines.
-- Two stations that choose to send in the same second can still start together. The
+- Two stations that choose to send in the same second can still start together (the link then recovers). The
   backoff only applies after the channel was busy. Over BlackHole the other station's sound
   arrives 0.4 s late, so carrier sense cannot see it in time; on a radio it can.
 - Not tested: voice notes (the microphone permission prompt needs a click) and a run longer than
