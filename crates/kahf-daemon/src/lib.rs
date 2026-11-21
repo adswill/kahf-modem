@@ -11,7 +11,7 @@ use std::f64::consts::PI;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -264,6 +264,8 @@ struct Flags {
     /// Send and listen for ladder bursts (kahf_core::burst): long-preamble sync, adaptive
     /// speed from -9 dB to 5 kbit/s. Off sends the older single-frame bursts only.
     hf_burst: AtomicBool,
+    /// Ladder rung every link burst is pinned to (index in the ladder), or `NO_PIN`. For tests and probes.
+    hf_pin: AtomicUsize,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
     /// Relay other stations' messages (setting B). On by default; used only in relay mode.
@@ -280,6 +282,7 @@ impl Flags {
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
             hf_burst: AtomicBool::new(true),
+            hf_pin: AtomicUsize::new(NO_PIN),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
@@ -429,6 +432,19 @@ impl Engine {
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
     pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Pins every link burst to one ladder rung (`Some("R4")`), switching the adaptive choice off;
+    /// `None` gives it back. For tests and probes of one rung. Unknown names are ignored.
+    pub fn pin_hf_rung(&self, name: Option<&str>) {
+        let v = match name {
+            None => NO_PIN,
+            Some(n) => match burst::LADDER.iter().position(|m| m.name == n) {
+                Some(i) => i,
+                None => return,
+            },
+        };
+        self.shared.flags.hf_pin.store(v, Ordering::SeqCst);
     }
 
     /// Ladder bursts on or off (default on). Off, the station sends and hears single frames only.
@@ -1439,6 +1455,8 @@ const HF_SCAN_IDLE: Duration = Duration::from_secs(4);
 /// How long after the last ladder burst (heard or sent) the fast scan period stays.
 const HF_HOT_FOR: Duration = Duration::from_secs(40);
 /// Lowest ladder rung a connected link uses: slower bursts outlast the 2.5 s link timeouts.
+/// `hf_pin` value for no pin.
+const NO_PIN: usize = usize::MAX;
 const HF_LINK_FLOOR: &str = "R4";
 /// Rung a link starts at, and the one beacons and no-reply (weak mode) sends use.
 const HF_LINK_START: &str = "Q12";
@@ -3070,6 +3088,10 @@ impl Worker {
                 _ => {}
             }
             self.hf_level = self.hf_level.max(floor);
+            let pin = self.shared.flags.hf_pin.load(Ordering::SeqCst);
+            if pin != NO_PIN {
+                self.hf_level = pin;
+            }
         }
         let built = if hf && weak {
             Ok(hf_bursts(frames, rung(HF_WEAK_RUNG), burst::FrameKind::Link))
@@ -4836,6 +4858,53 @@ mod tests {
             60,
         );
         assert!(back.is_some(), "the called station could not reply over the link");
+    }
+
+    /// One station per rung, a link, and a message each way on a shared bus.
+    fn talk_on_rungs(rung_a: &str, rung_b: &str, tag: &str) {
+        let _rt = realtime();
+        let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], tag);
+        a.pin_hf_rung(Some(rung_a));
+        b.pin_hf_rung(Some(rung_b));
+        a.listen().unwrap();
+        b.listen().unwrap();
+        a.connect("ZZ2BRAVO").unwrap();
+        let linked = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+            90,
+        );
+        assert!(linked.is_some(), "no link with A on {rung_a} and B on {rung_b}");
+        a.send_message("ZZ2BRAVO", "there").unwrap();
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text, .. } if text == "there"),
+            90,
+        );
+        assert!(
+            got.is_some(),
+            "message A to B lost with A on {rung_a} and B on {rung_b}"
+        );
+        b.send_message("ZZ1ALPHA", "and back").unwrap();
+        let back = wait_for(
+            &mut a,
+            |e| matches!(e, Event::Message { text, .. } if text == "and back"),
+            90,
+        );
+        assert!(
+            back.is_some(),
+            "message B to A lost with A on {rung_a} and B on {rung_b}"
+        );
+    }
+
+    #[test]
+    fn both_stations_on_r4_talk_over_a_shared_bus() {
+        talk_on_rungs("R4", "R4", "bus-r4");
+    }
+
+    #[test]
+    fn stations_on_different_rungs_still_hear_each_other() {
+        talk_on_rungs("R4", "T12", "bus-mixed");
     }
 
     #[test]

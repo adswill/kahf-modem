@@ -59,6 +59,21 @@ pass their CRC and carry the matching id. It scans the last 16 s of audio every 
 and every 4 s otherwise, about 0.2 s of CPU per scan. The ladder is on top of the old receiver, which still
 runs: old single frames are still heard.
 
+## Receive cost and the R4 floor
+
+`burst::scan` tries every (rung, size) guess the audio allows. A wrong guess used to cost a full
+demodulation with tracked channel estimates and a failed 50-iteration decode, so a scan took 0.9 to
+1.8 s whenever the sender sat on another rung than the receiver expected (`scan_cost` example). The
+receiver scans every second while a link is live, so it fell behind and dropped audio. Now every
+guess is tried first with the static estimate and 10 decoder iterations, and only when none decodes
+does the thorough pass run: average 0.12 s, worst 0.3 s, same decodes. R4 bursts are also 1.26 s
+long, so they collide more often and wait longer for acknowledgements than Q12; that is link
+behaviour, not modem loss.
+
+Probe for real audio: `cargo run --release -p kahf-daemon --example r4_probe -- "BlackHole 2ch" R4 R4 5`
+(rung of each station as arguments, also mixed such as `R4 Q12`). Simulated two-engine tests:
+`both_stations_on_r4_talk_over_a_shared_bus`, `stations_on_different_rungs_still_hear_each_other`.
+
 ## Not yet done
 
 - Reach is -9 dB (about 40 bit/s), not FT8's -21 dB. A lower-rate mother code is needed for that.
