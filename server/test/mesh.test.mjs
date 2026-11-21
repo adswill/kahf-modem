@@ -241,3 +241,25 @@ test("a relay reported off plan three times in ten minutes is suspended and gets
   mesh.onFrame("AA1AAA", { t: "clash", lane: 0, slot: 0, other: "AA1AAA" }, 5000);
   assert.equal(mesh.strikes.has("AA1AAA"), false);
 });
+
+test("one relay alone cannot get another relay suspended", async () => {
+  const { mesh } = await setup();
+  const [a, c] = [sock(), sock()];
+  mesh.connect("AA1AAA", a, 0);
+  mesh.connect("CC1CCC", c, 0);
+  for (let i = 0; i < 6; i++) mesh.onFrame("AA1AAA", { t: "clash", lane: 2, slot: i, other: "CC1CCC" }, 1000 + i * 1000);
+  assert.equal(c.sent.find((m) => m.t === "suspended"), undefined, "six reports from one relay did nothing");
+});
+
+test("a receipt id that is not a short string or number is ignored, and old receipts are dropped", async () => {
+  const { mesh } = await setup();
+  const a = sock();
+  mesh.connect("AA1AAA", a, 0);
+  assert.equal(mesh.onFrame("AA1AAA", { t: "submit", id: { big: "x".repeat(1000) }, dest: 5, size: 10 }, 1000), null);
+  assert.equal(mesh.onFrame("AA1AAA", { t: "submit", id: "x".repeat(41), dest: 5, size: 10 }, 1000), null);
+  assert.equal(mesh.origin.size, 0);
+  mesh.onFrame("AA1AAA", { t: "submit", id: "m1", dest: 5, size: 10 }, 1000);
+  assert.equal(mesh.origin.size, 1);
+  mesh.tick(1000 + 31 * 60_000);
+  assert.equal(mesh.origin.size, 0, "a receipt nobody answered was kept forever");
+});

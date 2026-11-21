@@ -226,3 +226,15 @@ in the app enables one lane for 24 h, not all relay lanes; relay slots/server sy
 Alloy UI layout issue (found 2026-11-21, not fixed here, it belongs in the Alloy library): a wrapped paragraph does not
 add its extra lines to the layout height, so the next widget draws over it (seen on the Relay intro text). Without
 `fill_w()` the text does not wrap and runs off the right edge of the 420 px side panel instead. Pictures: docs/screens.
+
+## WP12 (part): security review of the mesh server (2026-11-21, session F)
+
+Read `routes.js` (meshAuth), `mesh.js`, `mesh-object.js`. Fixed, each with a test: (1) one relay could suspend any other
+relay with three false clash reports; now three reports from at least two different relays are needed; (2) the table of
+receipts waiting for an answer grew without bound; now entries expire after 30 minutes and at most 5000 are kept;
+(3) a message id of any JSON type and size was stored and echoed; now a string or number of at most 40 characters;
+(4) no size limit on a WebSocket frame; now 16 KB. Known and accepted: a signed connect URL can be replayed within its ten
+minute window (it needs a captured TLS request, and only kicks the relay's own earlier socket); relays are trusted for
+the sizes and hashes they report (a registered relay can lie about what it heard, which the learner tolerates because it
+only counts). Not done: an outside review, a longer soak with real engines in a cell, the daemon's parsing of server
+frames under fuzzing.

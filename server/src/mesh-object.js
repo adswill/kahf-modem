@@ -7,6 +7,8 @@ import { signText } from "./sign.js";
 import { Learner } from "./propagation.js";
 
 const TICK_MS = 3000;
+/** Largest frame a relay may send over the socket (frames carry ids and sizes; a blob is at most 12,000 characters). */
+const MAX_FRAME_CHARS = 16_384;
 export const FRAMES_PER_MINUTE = 600;
 
 /** The planner's seed: the UTC day, so every relay can compute the same local plan if the server is silent. */
@@ -76,7 +78,9 @@ export class MeshObject {
         const now = Date.now();
         if (!this.allow(call, now)) return socket.send({ t: "slow" });
         let msg;
-        try { msg = JSON.parse(String(ev.data)); } catch { return; }
+        const raw = String(ev.data);
+        if (raw.length > MAX_FRAME_CHARS) return socket.send({ t: "error", why: "frame too large" });
+        try { msg = JSON.parse(raw); } catch { return; }
         try {
           const reply = this.mesh.onFrame(call, msg, now);
           if (reply) socket.send(reply);

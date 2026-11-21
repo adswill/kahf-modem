@@ -13,6 +13,9 @@ export const LOOKAHEAD_EPOCHS = 4;
 export const HTTP_ONLINE_MS = 30e3;
 /** Longest message blob (base64 characters) that may pass through: a chat or a short mail. */
 export const MAX_BLOB_CHARS = 12_000;
+/** Receipts wait for this long, and no more than this many are kept in RAM (oldest dropped first). */
+const ORIGIN_KEEP_MS = 30 * 60_000;
+const MAX_ORIGINS = 5000;
 
 /**
  * The text that is signed and sent: "P1|epoch|seed|relay:lane:slot,...|relay:slot:first:count,...|from>to:lane:slot,...".
@@ -93,11 +96,13 @@ export class Mesh {
         return { t: "found", dest: msg.dest | 0, via: r.relay };
       }
       case "submit": {
+        if (!["string", "number"].includes(typeof msg.id) || String(msg.id).length > 40) return null;
         // A relay took a message from an operator; find who delivers it.
         if (!this.router.firstSight(msg.id, now)) return { t: "dup", id: msg.id };
         // The blob (the message, as the relay took it off the air) only passes through RAM to the delivering relay.
         const blob = typeof msg.blob === "string" && msg.blob.length <= MAX_BLOB_CHARS ? msg.blob : undefined;
-        this.origin.set(msg.id, { call, dest: msg.dest | 0 });
+        if (this.origin.size >= MAX_ORIGINS) this.origin.delete(this.origin.keys().next().value);
+        this.origin.set(msg.id, { call, dest: msg.dest | 0, at: now });
         const r = this.router.route(msg.dest | 0, now);
         if (r.state === "unknown") {
           this.router.page(msg.dest | 0, now);
@@ -121,10 +126,11 @@ export class Mesh {
         // transmitting off plan (or its clock is wrong): three reports in ten minutes suspend it for an hour.
         const other = typeof msg.other === "string" ? msg.other.toUpperCase().slice(0, 13) : "";
         if (!other || other === call) return null;
-        const list = (this.strikes.get(other) ?? []).filter((t) => now - t < 10 * 60e3);
-        list.push(now);
+        const list = (this.strikes.get(other) ?? []).filter((x) => now - x.at < 10 * 60e3);
+        list.push({ at: now, by: call });
         this.strikes.set(other, list);
-        if (list.length >= 3) {
+        // Three reports from at least two different relays: one relay alone cannot silence another.
+        if (list.length >= 3 && new Set(list.map((x) => x.by)).size >= 2) {
           this.suspended.set(other, now + 3600e3);
           this.hub.push(other, { t: "suspended", until: now + 3600e3, why: "off plan" }, now);
           this.queues.delete(other);
@@ -203,6 +209,7 @@ export class Mesh {
 
   /** Housekeeping: dead sockets, expired holds, finished pages. Call every few seconds. */
   tick(now) {
+    for (const [id, o] of [...this.origin]) if (now - o.at > ORIGIN_KEEP_MS) this.origin.delete(id);
     this.hub.tick(now);
     this.router.tick(now);
     for (const [call, at] of [...this.http]) {
