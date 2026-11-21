@@ -82,17 +82,17 @@ pub fn spectrum(bins: Vec<f32>, history: Vec<Vec<f32>>, height: f32) -> V {
                 .collect();
             f.stroke(&Path::polyline(pts), 1.5, pal.accent);
         }
-        // Waterfall: the newest row on top.
-        let rows = history.len().max(1);
-        let row_h = (wf_h / 90.0).max(1.0);
-        let _ = rows;
+        // Waterfall: the newest row on top. Every row is a quad per column, so it is kept coarse:
+        // at most 100 columns and every second row. That is plenty to see a signal, and a
+        // tenth of the drawing the full grid would cost on every frame.
+        let row_h = (wf_h / 45.0).max(2.0);
         f.rect(rect(0.0, plot_h, w, wf_h), rgb(0x060a28));
-        for (r, row) in history.iter().enumerate() {
+        for (r, row) in history.iter().step_by(2).enumerate() {
             let y = plot_h + r as f32 * row_h;
             if y >= plot_h + wf_h || row.is_empty() {
                 break;
             }
-            let cols = row.len().min(w as usize).max(1);
+            let cols = row.len().clamp(1, 100);
             let cw = w / cols as f32;
             for c in 0..cols {
                 let v = row[(c * row.len() / cols).min(row.len() - 1)];

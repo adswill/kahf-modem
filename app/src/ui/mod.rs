@@ -313,3 +313,50 @@ mod tests {
         h.expect_no("Three places");
     }
 }
+#[cfg(test)]
+mod controls {
+    use super::*;
+    use alloy_ui::testing::Harness;
+
+    fn radio() -> Harness<impl alloy_ui::App> {
+        let dir = std::env::temp_dir().join(format!("kahf-controls-{}", std::process::id()));
+        let mut k = Kahf::for_tests(dir);
+        k.m.settings.setup_done = true;
+        k.m.page = Page::Radio;
+        k.ui.devices = vec!["BlackHole 2ch".into(), "MacBook Microphone".into()];
+        Harness::new(sketch(k, |k: &Kahf| view(k)), 1360.0, 800.0)
+    }
+
+    #[test]
+    fn a_device_can_be_picked_from_the_dropdown() {
+        let mut h = radio();
+        h.click("Computer default   ▾");
+        h.expect("BlackHole 2ch").expect("MacBook Microphone");
+        h.click("BlackHole 2ch");
+        h.expect_no("MacBook Microphone");
+        assert!(
+            h.has_text("BlackHole 2ch   ▾"),
+            "the choice is shown: {:?}",
+            h.texts()
+        );
+    }
+
+    #[test]
+    fn only_one_dropdown_is_open_at_a_time() {
+        let mut h = radio();
+        h.click("Computer default   ▾");
+        h.expect("MacBook Microphone");
+        // Opening the other one closes this one.
+        h.click("Computer default   ▾");
+        assert_eq!(h.count("MacBook Microphone"), 1, "{:?}", h.texts());
+    }
+
+    #[test]
+    fn the_test_buttons_do_not_crash() {
+        let mut h = radio();
+        for name in ["Test input", "Test output", "Check the level (3 s)"] {
+            h.click(name);
+            h.advance(300);
+        }
+    }
+}

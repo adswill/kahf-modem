@@ -221,12 +221,13 @@ fn sending(k: &Kahf) -> V {
         ),
         lab_hint(
             "Microphone for voice notes",
-            device_pick(&k.ui.devices, &s.mic_in, |k, d| k.set(|s| s.mic_in = d)),
+            device_pick(k, "mic", &k.ui.devices, &s.mic_in, |k, d| k.set(|s| s.mic_in = d)),
             "Pick your headset or computer microphone, not the radio interface."
         ),
         lab_hint(
             "Speakers for voice notes",
-            device_pick(&k.ui.devices, &s.speaker_out, |k, d| k.set(|s| s.speaker_out = d)),
+            device_pick(k, "speaker", &k.ui.devices, &s.speaker_out, |k, d| k
+                .set(|s| s.speaker_out = d)),
             "Voice notes play here. Not the radio interface, or you will send the sound back out on the air."
         ),
     ]

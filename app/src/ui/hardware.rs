@@ -51,12 +51,15 @@ pub fn audio_picker(k: &Kahf, w: Where) -> V {
             row![
                 lab(
                     "From the radio",
-                    device_pick(&k.ui.devices, &ain, move |k, d| hw_mut(k, w).audio_in = d)
+                    device_pick(k, "audio_in", &k.ui.devices, &ain, move |k, d| hw_mut(k, w)
+                        .audio_in = d)
                 )
                 .fill_w(),
                 lab(
                     "To the radio",
-                    device_pick(&k.ui.devices, &aout, move |k, d| hw_mut(k, w).audio_out = d)
+                    device_pick(k, "audio_out", &k.ui.devices, &aout, move |k, d| hw_mut(k, w)
+                        .audio_out =
+                        d)
                 )
                 .fill_w(),
             ]
@@ -98,8 +101,9 @@ pub fn audio_picker(k: &Kahf, w: Where) -> V {
             let items = k.ui.sdrs.clone();
             c = c.push(lab(
                 "Receiver",
-                pick(k.ui.sdrs.clone(), sel)
-                    .act(move |k: &mut Kahf, i: usize| hw_mut(k, w).sdr = items[i].clone()),
+                dropdown(k, "sdr", k.ui.sdrs.clone(), sel, move |k: &mut Kahf, i: usize| {
+                    hw_mut(k, w).sdr = items[i].clone()
+                }),
             ));
         }
     }
@@ -142,13 +146,13 @@ pub fn rig_picker(k: &Kahf, w: Where) -> V {
             .map(|i| i + 1)
     };
     let rigs = k.ui.direct_rigs.clone();
-    let ports = port_pick(k, &h.d_port, move |k, p| hw_mut(k, w).d_port = p);
+    let ports = port_pick(k, "d_port", &h.d_port, move |k, p| hw_mut(k, w).d_port = p);
     let ptt_sel = PTTS.iter().position(|(id, _)| *id == h.d_ptt);
     c = c.push(
         row![
             lab(
                 "Radio",
-                pick(models, sel).act(move |k: &mut Kahf, i: usize| {
+                dropdown(k, "rig_model", models, sel, move |k: &mut Kahf, i: usize| {
                     let h = hw_mut(k, w);
                     if i == 0 {
                         h.d_model.clear();
@@ -175,11 +179,13 @@ pub fn rig_picker(k: &Kahf, w: Where) -> V {
             .fill_w(),
             lab(
                 "Keying (PTT)",
-                pick(
+                dropdown(
+                    k,
+                    "ptt",
                     PTTS.iter().map(|(_, l)| l.to_string()).collect::<Vec<_>>(),
-                    ptt_sel
-                )
-                .act(move |k: &mut Kahf, i: usize| hw_mut(k, w).d_ptt = PTTS[i].0.to_string()),
+                    ptt_sel,
+                    move |k: &mut Kahf, i: usize| hw_mut(k, w).d_ptt = PTTS[i].0.to_string()
+                ),
             )
             .fill_w(),
         ]
@@ -212,7 +218,12 @@ pub fn rig_picker(k: &Kahf, w: Where) -> V {
     c.into()
 }
 
-fn port_pick(k: &Kahf, current: &str, set: impl Fn(&mut Kahf, String) + Send + Sync + 'static) -> V {
+fn port_pick(
+    k: &Kahf,
+    key: &'static str,
+    current: &str,
+    set: impl Fn(&mut Kahf, String) + Send + Sync + 'static,
+) -> V {
     let mut names = vec!["Choose…".to_string()];
     names.extend(k.ui.rig_ports.iter().cloned());
     let sel = if current.is_empty() {
@@ -221,18 +232,16 @@ fn port_pick(k: &Kahf, current: &str, set: impl Fn(&mut Kahf, String) + Send + S
         k.ui.rig_ports.iter().position(|p| p == current).map(|i| i + 1)
     };
     let ports = k.ui.rig_ports.clone();
-    pick(names, sel)
-        .act(move |k: &mut Kahf, i: usize| {
-            set(
-                k,
-                if i == 0 {
-                    String::new()
-                } else {
-                    ports[i - 1].clone()
-                },
-            )
-        })
-        .into()
+    dropdown(k, key, names, sel, move |k: &mut Kahf, i: usize| {
+        set(
+            k,
+            if i == 0 {
+                String::new()
+            } else {
+                ports[i - 1].clone()
+            },
+        )
+    })
 }
 
 fn hamlib_choice(k: &Kahf, w: Where) -> V {
@@ -306,13 +315,18 @@ fn hamlib_choice(k: &Kahf, w: Where) -> V {
                 row![
                     lab_hint(
                         "Serial port",
-                        port_pick(k, &h.rig.port, move |k, p| hw_mut(k, w).rig.port = p),
+                        port_pick(k, "rig_port", &h.rig.port, move |k, p| hw_mut(k, w).rig.port = p),
                         "The USB cable from the radio to the computer."
                     )
                     .fill_w(),
                     lab_hint(
                         "Speed (baud)",
-                        pick(bauds, sel).act(move |k: &mut Kahf, i: usize| hw_mut(k, w).rig.baud = BAUDS[i]),
+                        dropdown(k, "baud", bauds, sel, move |k: &mut Kahf, i: usize| hw_mut(
+                            k, w
+                        )
+                        .rig
+                        .baud =
+                            BAUDS[i]),
                         "Must match the radio's menu setting."
                     )
                     .fill_w(),
