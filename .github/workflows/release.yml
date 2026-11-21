@@ -78,9 +78,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.os }}
+          workspaces: |
+            .
+            app
 
       - name: Build the release binaries
-        run: cargo build --release -p kahf-ui -p kahf-cli
+        run: |
+          cargo build --release -p kahf-cli
+          cargo build --release --manifest-path app/Cargo.toml
 
       - name: Package (macOS)
         if: matrix.os == 'macos'
@@ -89,7 +94,7 @@ jobs:
           set -euo pipefail
           APP=dist/KAHF.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp target/release/kahf-ui "$APP/Contents/MacOS/KAHF"
+          cp app/target/release/kahf-app "$APP/Contents/MacOS/KAHF"
           cp target/release/kahf-cli "$APP/Contents/MacOS/kahf-cli"
           cp LICENSE RELEASE-NOTES.md "$APP/Contents/Resources/"
           cat > "$APP/Contents/Info.plist" <<PLIST
@@ -118,7 +123,7 @@ jobs:
           set -euo pipefail
           D=dist/KAHF-${{ inputs.version }}-linux-x64
           mkdir -p "$D"
-          cp target/release/kahf-ui "$D/kahf"
+          cp app/target/release/kahf-app "$D/kahf"
           cp target/release/kahf-cli "$D/kahf-cli"
           cp LICENSE RELEASE-NOTES.md "$D/"
           tar -C dist -czf "dist/${{ matrix.archive }}" "$(basename "$D")"
@@ -129,7 +134,7 @@ jobs:
         run: |
           $d = "dist/KAHF-${{ inputs.version }}-windows-x64"
           New-Item -ItemType Directory -Force -Path $d | Out-Null
-          Copy-Item target/release/kahf-ui.exe "$d/KAHF.exe"
+          Copy-Item app/target/release/kahf-app.exe "$d/KAHF.exe"
           Copy-Item target/release/kahf-cli.exe "$d/kahf-cli.exe"
           Copy-Item LICENSE, RELEASE-NOTES.md $d
           Compress-Archive -Path $d -DestinationPath "dist/${{ matrix.archive }}"
