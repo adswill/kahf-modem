@@ -24,7 +24,11 @@ pub fn channels() -> Vec<Channel> {
     let mut centre = BAND_LOW_HZ + SPACING_HZ / 2;
     while centre + SPACING_HZ / 2 <= BAND_HIGH_HZ {
         let index = out.len();
-        out.push(Channel { index, name: NAMES[index], khz: f64::from(centre) / 1000.0 });
+        out.push(Channel {
+            index,
+            name: NAMES[index],
+            khz: f64::from(centre) / 1000.0,
+        });
         centre += SPACING_HZ;
     }
     out

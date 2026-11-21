@@ -10,11 +10,35 @@ use crate::util::fmt::{self, channel_khz, clock, duration, relative, time_ago, u
 
 pub fn view(k: &Kahf) -> V {
     let running = k.m.relay.running;
-    let tab = if running && k.ui.relay_tab == RelayTab::Use && false { RelayTab::Run } else { k.ui.relay_tab };
-    let tabs_row = tabs(["Use relays", if running { "Run a relay  ●" } else { "Run a relay" }], if tab == RelayTab::Use { 0 } else { 1 })
-        .act(|k: &mut Kahf, i: usize| k.ui.relay_tab = if i == 0 { RelayTab::Use } else { RelayTab::Run });
-    let body = if tab == RelayTab::Use { use_relays(k) } else { run_relay(k) };
-    scroll(col![row![heading("Relay"), tabs_row].gap(14.0).align_center(), body].gap(14.0).pad(16.0)).fill().into()
+    let tab = if running && k.ui.relay_tab == RelayTab::Use && false {
+        RelayTab::Run
+    } else {
+        k.ui.relay_tab
+    };
+    let tabs_row = tabs(
+        [
+            "Use relays",
+            if running {
+                "Run a relay  ●"
+            } else {
+                "Run a relay"
+            },
+        ],
+        if tab == RelayTab::Use { 0 } else { 1 },
+    )
+    .act(|k: &mut Kahf, i: usize| k.ui.relay_tab = if i == 0 { RelayTab::Use } else { RelayTab::Run });
+    let body = if tab == RelayTab::Use {
+        use_relays(k)
+    } else {
+        run_relay(k)
+    };
+    scroll(
+        col![row![heading("Relay"), tabs_row].gap(14.0).align_center(), body]
+            .gap(14.0)
+            .pad(16.0),
+    )
+    .fill()
+    .into()
 }
 
 fn use_relays(k: &Kahf) -> V {
@@ -36,7 +60,10 @@ fn use_relays(k: &Kahf) -> V {
     ]
     .gap(10.0);
     if k.m.relays.is_empty() && hints.is_empty() {
-        c = c.push(note("No relays known yet. Update from kahf.dev when you are online, or add one by callsign below.", false));
+        c = c.push(note(
+            "No relays known yet. Update from kahf.dev when you are online, or add one by callsign below.",
+            false,
+        ));
     }
     for r in &k.m.relays {
         let call = r.call.clone();
@@ -45,7 +72,11 @@ fn use_relays(k: &Kahf) -> V {
         c = c.push(
             row![
                 text(r.call.clone()).label().w(110.0),
-                text(r.km.map(|d| format!("{} km", d.round())).unwrap_or_else(|| "-".into())).w(90.0),
+                text(
+                    r.km.map(|d| format!("{} km", d.round()))
+                        .unwrap_or_else(|| "-".into())
+                )
+                .w(90.0),
                 caption(match r.source.as_str() {
                     "server" => "kahf.dev",
                     "heard" => "heard",
@@ -53,7 +84,13 @@ fn use_relays(k: &Kahf) -> V {
                 })
                 .dim()
                 .w(80.0),
-                caption(r.last_seen.map(|t| time_ago(t, now_ms())).unwrap_or_else(|| "-".into())).dim().fill_w(),
+                caption(
+                    r.last_seen
+                        .map(|t| time_ago(t, now_ms()))
+                        .unwrap_or_else(|| "-".into())
+                )
+                .dim()
+                .fill_w(),
                 check("Use it", used).act(move |k: &mut Kahf, _| toggle(k, &h, &call)),
             ]
             .gap(10.0)
@@ -66,7 +103,9 @@ fn use_relays(k: &Kahf) -> V {
             row![
                 text(h.clone()).label().w(110.0),
                 caption("added").dim().fill_w(),
-                button("Remove").ghost().act(move |k: &mut Kahf| toggle(k, &all, &call)),
+                button("Remove")
+                    .ghost()
+                    .act(move |k: &mut Kahf| toggle(k, &all, &call)),
             ]
             .gap(10.0)
             .align_center(),
@@ -76,16 +115,22 @@ fn use_relays(k: &Kahf) -> V {
     let hints2 = hints.clone();
     c = c.push(
         row![
-            edit(&k.ui.manual_relay, "Add a relay by callsign", |k, v| k.ui.manual_relay = v.to_uppercase()).w(260.0),
-            button("Add").enabled(!k.ui.manual_relay.is_empty() && problem.is_none()).act(move |k: &mut Kahf| {
-                let c = callsign::normalise(&k.ui.manual_relay);
-                if !c.is_empty() && !hints2.contains(&c) {
-                    let mut next = hints2.clone();
-                    next.push(c);
-                    k.set_relay_hints(next);
-                }
-                k.ui.manual_relay.clear();
-            }),
+            edit(&k.ui.manual_relay, "Add a relay by callsign", |k, v| k
+                .ui
+                .manual_relay =
+                v.to_uppercase())
+            .w(260.0),
+            button("Add")
+                .enabled(!k.ui.manual_relay.is_empty() && problem.is_none())
+                .act(move |k: &mut Kahf| {
+                    let c = callsign::normalise(&k.ui.manual_relay);
+                    if !c.is_empty() && !hints2.contains(&c) {
+                        let mut next = hints2.clone();
+                        next.push(c);
+                        k.set_relay_hints(next);
+                    }
+                    k.ui.manual_relay.clear();
+                }),
         ]
         .gap(10.0)
         .align_center(),
@@ -94,8 +139,12 @@ fn use_relays(k: &Kahf) -> V {
         c = c.push(text(p).caption().danger());
     }
     c = c.push(
-        caption(if hints.is_empty() { "No relay is chosen, so messages go directly or not at all.".to_string() } else { format!("Order of use: {}.", hints.join(", ")) })
-            .dim(),
+        caption(if hints.is_empty() {
+            "No relay is chosen, so messages go directly or not at all.".to_string()
+        } else {
+            format!("Order of use: {}.", hints.join(", "))
+        })
+        .dim(),
     );
     c.into()
 }
@@ -123,8 +172,12 @@ fn run_relay(k: &Kahf) -> V {
             button("Stop relay mode").act(|k: &mut Kahf| k.set_relay(false)),
         ]
         .align_center(),
-        row![stat_box(r.forwarded_today.to_string(), "Sent today"), stat_box(r.forwarded_total.to_string(), "Sent in total"), stat_box(r.outbox.len().to_string(), "Waiting to go out")]
-            .gap(14.0),
+        row![
+            stat_box(r.forwarded_today.to_string(), "Sent today"),
+            stat_box(r.forwarded_total.to_string(), "Sent in total"),
+            stat_box(r.outbox.len().to_string(), "Waiting to go out")
+        ]
+        .gap(14.0),
         heading("kahf.dev").sub(),
     ]
     .gap(10.0);
@@ -141,11 +194,20 @@ fn run_relay(k: &Kahf) -> V {
         c = c.push(kv(
             "Schedule",
             match s.last_schedule_unix {
-                Some(t) => text(format!("{} slot{}, received at {} UTC", s.slots, if s.slots == 1 { "" } else { "s" }, utc_hm(t))).into(),
+                Some(t) => text(format!(
+                    "{} slot{}, received at {} UTC",
+                    s.slots,
+                    if s.slots == 1 { "" } else { "s" },
+                    utc_hm(t)
+                ))
+                .into(),
                 None => text("None received yet").dim().into(),
             },
         ));
-        c = c.push(kv("Next ask", text(format!("{} UTC", utc_hm(s.next_attempt_unix))).into()));
+        c = c.push(kv(
+            "Next ask",
+            text(format!("{} UTC", utc_hm(s.next_attempt_unix))).into(),
+        ));
         if let Some(e) = &s.last_error {
             c = c.push(kv("Last problem", text(e.clone()).danger().fill_w().into()));
         }
@@ -156,14 +218,25 @@ fn run_relay(k: &Kahf) -> V {
         "On the map",
         match &r.area {
             Some(a) => text(a.clone()).into(),
-            None => text("- Not listed: share a location in Settings to appear on the map.").dim().into(),
+            None => text("- Not listed: share a location in Settings to appear on the map.")
+                .dim()
+                .into(),
         },
     ));
     let mut reach = row![].gap(10.0).align_center();
     if let Some(s) = &k.ui.server {
-        reach = reach.push(if s.reachable { text("Yes").success() } else { text("No").danger() });
+        reach = reach.push(if s.reachable {
+            text("Yes").success()
+        } else {
+            text("No").danger()
+        });
         reach = reach.push(
-            caption(if s.reachable { format!("{} ms, {} stations listed", s.millis, s.stations_listed) } else { s.error.clone().unwrap_or_default() }).dim(),
+            caption(if s.reachable {
+                format!("{} ms, {} stations listed", s.millis, s.stations_listed)
+            } else {
+                s.error.clone().unwrap_or_default()
+            })
+            .dim(),
         );
     }
     reach = reach.push(button("Check kahf.dev").act(|k: &mut Kahf| k.check_server()));
@@ -181,7 +254,11 @@ fn run_relay(k: &Kahf) -> V {
                     caption(relative(s.start_unix, now)).dim().w(120.0),
                     text(channel_khz(s.channel_khz)).w(150.0),
                     text(duration(s.duration_s)).w(90.0),
-                    text(if s.direction == "transmit" { "Sends" } else { "Listens" }),
+                    text(if s.direction == "transmit" {
+                        "Sends"
+                    } else {
+                        "Listens"
+                    }),
                 ]
                 .gap(10.0),
             );
@@ -199,11 +276,14 @@ fn run_relay(k: &Kahf) -> V {
         let mut hours = row![].gap(8.0);
         for (h, n) in &r.per_hour {
             let frac = (*n as f32 / max as f32).max(0.06);
-            hours = hours.push(col![
-                alloy_ui::progress::<A>(0.0..=1.0, frac).w(28.0),
-                text(n.to_string()).caption(),
-                caption(utc_hm(*h)).dim(),
-            ].gap(2.0));
+            hours = hours.push(
+                col![
+                    alloy_ui::progress::<A>(0.0..=1.0, frac).w(28.0),
+                    text(n.to_string()).caption(),
+                    caption(utc_hm(*h)).dim(),
+                ]
+                .gap(2.0),
+            );
         }
         c = c.push(hours);
     }
@@ -228,7 +308,13 @@ fn run_relay(k: &Kahf) -> V {
 }
 
 fn stat_box(n: String, label: &str) -> V {
-    col![text(n).heading(), caption(label).dim()].gap(0.0).pad(12.0).round(8.0).outline().w(170.0).into()
+    col![text(n).heading(), caption(label).dim()]
+        .gap(0.0)
+        .pad(12.0)
+        .round(8.0)
+        .outline()
+        .w(170.0)
+        .into()
 }
 
 fn start_panel(k: &Kahf) -> V {
@@ -248,7 +334,11 @@ fn start_panel(k: &Kahf) -> V {
     ]
     .gap(8.0);
     if k.m.settings.listen_only {
-        c = c.push(text("Listen-only is on, so a relay cannot transmit.").caption().danger());
+        c = c.push(
+            text("Listen-only is on, so a relay cannot transmit.")
+                .caption()
+                .danger(),
+        );
     }
     c.into()
 }

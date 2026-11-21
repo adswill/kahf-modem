@@ -22,12 +22,23 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
 
 /// A blue-to-yellow colour ramp for the waterfall, 0 to 1.
 pub fn ramp(t: f32) -> Color {
-    const STOPS: [[f32; 3]; 5] = [[6.0, 10.0, 40.0], [20.0, 60.0, 140.0], [20.0, 150.0, 150.0], [90.0, 200.0, 110.0], [250.0, 220.0, 70.0]];
+    const STOPS: [[f32; 3]; 5] = [
+        [6.0, 10.0, 40.0],
+        [20.0, 60.0, 140.0],
+        [20.0, 150.0, 150.0],
+        [90.0, 200.0, 110.0],
+        [250.0, 220.0, 70.0],
+    ];
     let p = t.clamp(0.0, 1.0) * (STOPS.len() - 1) as f32;
     let k = (p.floor() as usize).min(STOPS.len() - 2);
     let f = p - k as f32;
     let c = |i: usize| (STOPS[k][i] + (STOPS[k + 1][i] - STOPS[k][i]) * f) / 255.0;
-    Color { r: c(0), g: c(1), b: c(2), a: 1.0 }
+    Color {
+        r: c(0),
+        g: c(1),
+        b: c(2),
+        a: 1.0,
+    }
 }
 
 fn level(db: f32) -> f32 {
@@ -44,8 +55,16 @@ pub fn spectrum(bins: Vec<f32>, history: Vec<Vec<f32>>, height: f32) -> V {
         let wf_h = h - AXIS - plot_h;
         f.rect(rect(0.0, 0.0, w, h), pal.surface);
         let x = |hz: f32| hz / AUDIO_HZ * w;
-        f.rect(rect(x(SIGNAL_LO), 0.0, x(SIGNAL_HI) - x(SIGNAL_LO), plot_h + wf_h), pal.accent.with_alpha(0.10));
-        f.stroke_rect(rect(x(SIGNAL_LO), 0.0, x(SIGNAL_HI) - x(SIGNAL_LO), plot_h + wf_h), 0.0, 1.0, pal.accent.with_alpha(0.6));
+        f.rect(
+            rect(x(SIGNAL_LO), 0.0, x(SIGNAL_HI) - x(SIGNAL_LO), plot_h + wf_h),
+            pal.accent.with_alpha(0.10),
+        );
+        f.stroke_rect(
+            rect(x(SIGNAL_LO), 0.0, x(SIGNAL_HI) - x(SIGNAL_LO), plot_h + wf_h),
+            0.0,
+            1.0,
+            pal.accent.with_alpha(0.6),
+        );
         for db in (-100..=-50).step_by(10) {
             let y = plot_h - level(db as f32) * plot_h;
             f.line(pt(0.0, y), pt(w, y), 1.0, pal.border);
@@ -54,7 +73,12 @@ pub fn spectrum(bins: Vec<f32>, history: Vec<Vec<f32>>, height: f32) -> V {
             let pts: Vec<_> = bins
                 .iter()
                 .enumerate()
-                .map(|(i, v)| pt(i as f32 / (bins.len() - 1) as f32 * w, plot_h - level(*v) * plot_h))
+                .map(|(i, v)| {
+                    pt(
+                        i as f32 / (bins.len() - 1) as f32 * w,
+                        plot_h - level(*v) * plot_h,
+                    )
+                })
                 .collect();
             f.stroke(&Path::polyline(pts), 1.5, pal.accent);
         }
@@ -79,9 +103,19 @@ pub fn spectrum(bins: Vec<f32>, history: Vec<Vec<f32>>, height: f32) -> V {
         let step = if w < 560.0 { 1000 } else { 500 };
         for hz in (0..=4000).step_by(step) {
             let px = x(hz as f32);
-            let label = if hz == 0 { "0".to_string() } else { format!("{:.1} kHz", hz as f32 / 1000.0) };
+            let label = if hz == 0 {
+                "0".to_string()
+            } else {
+                format!("{:.1} kHz", hz as f32 / 1000.0)
+            };
             let tw = f.text_width(&label, 11.0);
-            let tx = if hz == 0 { px } else if hz == 4000 { px - tw } else { px - tw / 2.0 };
+            let tx = if hz == 0 {
+                px
+            } else if hz == 4000 {
+                px - tw
+            } else {
+                px - tw / 2.0
+            };
             f.text(pt(tx, plot_h + wf_h + 6.0), label, 11.0, pal.text_secondary);
         }
         f.text(pt(x(SIGNAL_LO) + 6.0, 6.0), "KAHF signal", 11.0, pal.accent);
@@ -117,7 +151,11 @@ pub fn level_bar(level: f32, width: f32) -> V {
         let pal = f.palette();
         let w = f.size().width;
         f.round_rect(rect(0.0, 0.0, w, 8.0), 4.0, pal.border);
-        f.round_rect(rect(0.0, 0.0, (w * level.clamp(0.0, 1.0)).max(0.0), 8.0), 4.0, pal.accent);
+        f.round_rect(
+            rect(0.0, 0.0, (w * level.clamp(0.0, 1.0)).max(0.0), 8.0),
+            4.0,
+            pal.accent,
+        );
     })
     .into()
 }
@@ -140,7 +178,11 @@ pub fn wave(seed: &str, progress: f32, bars: usize) -> V {
         for (i, v) in heights.iter().enumerate() {
             let played = (i as f32 / bars as f32) < progress;
             let bh = v * 26.0;
-            f.round_rect(rect(i as f32 * 5.0, (26.0 - bh) / 2.0, 3.0, bh), 1.5, if played { pal.accent } else { pal.border_strong });
+            f.round_rect(
+                rect(i as f32 * 5.0, (26.0 - bh) / 2.0, 3.0, bh),
+                1.5,
+                if played { pal.accent } else { pal.border_strong },
+            );
         }
     })
     .into()

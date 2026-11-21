@@ -23,7 +23,9 @@ impl Page {
     pub fn group(self) -> Option<&'static [Page]> {
         match self {
             Page::Chats | Page::Mail => Some(&[Page::Chats, Page::Mail]),
-            Page::Stations | Page::Relay | Page::Logbook => Some(&[Page::Stations, Page::Relay, Page::Logbook]),
+            Page::Stations | Page::Relay | Page::Logbook => {
+                Some(&[Page::Stations, Page::Relay, Page::Logbook])
+            }
             _ => None,
         }
     }
@@ -110,6 +112,31 @@ pub struct Saved {
     pub messages: Vec<Msg>,
     pub mail: Vec<MailItem>,
     pub heard: Vec<Heard>,
+    pub support: Support,
+}
+
+/// When to ask, gently, if the person would like to support KAHF.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Support {
+    /// Unix milliseconds of the first start, 0 before it is known.
+    pub first: i64,
+    /// Unix milliseconds of the last time the note was shown and closed.
+    pub last: i64,
+    /// The person said not to ask again.
+    pub off: bool,
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+impl Support {
+    /// Not in the first week, then at most once a month, and never after "don't ask again".
+    pub fn due(&self, now_ms: i64) -> bool {
+        !self.off
+            && self.first > 0
+            && now_ms - self.first >= 7 * DAY_MS
+            && (self.last == 0 || now_ms - self.last >= 30 * DAY_MS)
+    }
 }
 
 const KEEP_MESSAGES: usize = 500;
@@ -123,7 +150,8 @@ pub fn explain_start_error(raw: &str) -> String {
     if t.contains("audio") || t.contains("device") || t.contains("sound") {
         "KAHF could not open the sound device. Check that your radio interface is plugged in and not used by another program, then choose it again on the Radio page.".into()
     } else if t.contains("sdr") || t.contains("hackrf") || t.contains("rtl") {
-        "KAHF could not find the SDR receiver. Plug it in, make sure its driver is installed, and try again.".into()
+        "KAHF could not find the SDR receiver. Plug it in, make sure its driver is installed, and try again."
+            .into()
     } else if t.contains("rig") || t.contains("rigctld") || t.contains("4532") {
         "KAHF could not reach the radio control program. Check the radio on the Radio page, or leave radio control off.".into()
     } else {
@@ -161,6 +189,7 @@ pub struct Model {
     /// How strong the signal in the KAHF channel is, 0 to 1, smoothed. Drives the meter.
     pub signal: f32,
     pub pending_files: Option<PendingFiles>,
+    pub support: Support,
     pub ready: bool,
     last_signal_ms: i64,
     next_id: u64,
@@ -195,6 +224,7 @@ impl Default for Model {
             info: AppInfo::default(),
             signal: 0.0,
             pending_files: None,
+            support: Support::default(),
             ready: false,
             last_signal_ms: 0,
             next_id: 0,
@@ -210,7 +240,10 @@ impl Model {
     }
 
     pub fn unread_chats(&self) -> usize {
-        self.messages.iter().filter(|m| m.dir == Dir::In && !m.read).count()
+        self.messages
+            .iter()
+            .filter(|m| m.dir == Dir::In && !m.read)
+            .count()
     }
 
     pub fn unread_mail(&self) -> usize {
@@ -220,26 +253,43 @@ impl Model {
     pub fn steps(&self) -> Vec<Step> {
         let s = &self.settings;
         vec![
-            Step { id: "call", title: "Your callsign is set", why: "It is your name on the air.", done: self.has_call() },
+            Step {
+                id: "call",
+                title: "Your callsign is set",
+                why: "It is your name on the air.",
+                done: self.has_call(),
+            },
             Step {
                 id: "radio",
                 title: "KAHF can hear your radio",
                 why: "A sound card or receiver is chosen.",
                 done: s.setup_done && (!s.audio_in.is_empty() || !s.sdr.is_empty()),
             },
-            Step { id: "listen", title: "You have heard a station", why: "Leave KAHF running. Stations appear on their own.", done: !self.heard.is_empty() },
+            Step {
+                id: "listen",
+                title: "You have heard a station",
+                why: "Leave KAHF running. Stations appear on their own.",
+                done: !self.heard.is_empty(),
+            },
             Step {
                 id: "send",
                 title: "You have sent a message",
                 why: "Pick a station, write a line, press Send.",
-                done: self.messages.iter().any(|m| m.dir == Dir::Out && m.state == Some(OutState::Sent)),
+                done: self
+                    .messages
+                    .iter()
+                    .any(|m| m.dir == Dir::Out && m.state == Some(OutState::Sent)),
             },
         ]
     }
 
     /// What the radio is doing, in one short line: shown in the strip on every screen.
     pub fn status(&self) -> Status {
-        let s = |tone, title: &str, detail: &str| Status { tone, title: title.into(), detail: detail.into() };
+        let s = |tone, title: &str, detail: &str| Status {
+            tone,
+            title: title.into(),
+            detail: detail.into(),
+        };
         if !self.has_call() && !self.settings.listen_only {
             return s(Tone::Warn, "Not set up", "Enter your callsign to start.");
         }
@@ -254,11 +304,23 @@ impl Model {
         }
         match &self.link {
             LinkState::Calling { peer, attempt, of } => {
-                let detail = if *of > 0 { format!("Try {attempt} of {of}") } else { "KAHF keeps trying by itself".into() };
-                return Status { tone: Tone::Busy, title: format!("Reaching {peer}"), detail };
+                let detail = if *of > 0 {
+                    format!("Try {attempt} of {of}")
+                } else {
+                    "KAHF keeps trying by itself".into()
+                };
+                return Status {
+                    tone: Tone::Busy,
+                    title: format!("Reaching {peer}"),
+                    detail,
+                };
             }
             LinkState::Linked { peer } => {
-                return Status { tone: Tone::Good, title: format!("Linked to {peer}"), detail: "Messages go straight to them.".into() };
+                return Status {
+                    tone: Tone::Good,
+                    title: format!("Linked to {peer}"),
+                    detail: "Messages go straight to them.".into(),
+                };
             }
             LinkState::Idle => {}
         }
@@ -269,13 +331,21 @@ impl Model {
         Status {
             tone: Tone::Idle,
             title: "Listening".into(),
-            detail: if n == 0 { "Nobody heard yet.".into() } else { format!("{n} heard") },
+            detail: if n == 0 {
+                "Nobody heard yet.".into()
+            } else {
+                format!("{n} heard")
+            },
         }
     }
 
     /// The speed to base estimates on: the live link when there is one, else the starting speed.
     pub fn estimate_bps(&self) -> f64 {
-        self.metrics.as_ref().map(|m| m.net_bps).filter(|b| *b > 0.0).unwrap_or(284.0)
+        self.metrics
+            .as_ref()
+            .map(|m| m.net_bps)
+            .filter(|b| *b > 0.0)
+            .unwrap_or(284.0)
     }
 
     /// The people you have written to or heard from in conversations, most recent first.
@@ -300,7 +370,7 @@ impl Model {
                 }),
             }
         }
-        out.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+        out.sort_by_key(|c| std::cmp::Reverse(c.last_at));
         out
     }
 
@@ -312,24 +382,6 @@ impl Model {
     pub fn on_the_air(&self) -> Vec<&Heard> {
         let talked: Vec<String> = self.conversations().into_iter().map(|c| c.peer).collect();
         self.heard.iter().filter(|h| !talked.contains(&h.call)).collect()
-    }
-
-    /// Files that arrived, newest last.
-    pub fn inbox_files(&self) -> Vec<InboxFile> {
-        self.messages
-            .iter()
-            .filter(|m| m.dir == Dir::In)
-            .filter_map(|m| {
-                let a = m.attachment.as_ref()?;
-                (a.kind == AttachmentKind::File).then(|| InboxFile {
-                    name: a.name.clone(),
-                    size: a.size,
-                    path: a.path.clone(),
-                    from: m.peer.clone(),
-                    at: m.at,
-                })
-            })
-            .collect()
     }
 
     // ---- state changes ---------------------------------------------------------------------
@@ -355,7 +407,10 @@ impl Model {
 
     /// Queues a toast; the window shows it and takes it off the queue.
     pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind, _now_ms: i64) {
-        self.toasts.push(Toast { text: text.into(), kind });
+        self.toasts.push(Toast {
+            text: text.into(),
+            kind,
+        });
     }
 
     pub fn add_out(&mut self, m: Msg) {
@@ -407,13 +462,19 @@ impl Model {
     }
 
     pub fn saved(&self) -> Saved {
-        Saved { messages: self.messages.clone(), mail: self.mail.clone(), heard: self.heard.clone() }
+        Saved {
+            messages: self.messages.clone(),
+            mail: self.mail.clone(),
+            heard: self.heard.clone(),
+            support: self.support.clone(),
+        }
     }
 
     pub fn restore(&mut self, saved: Saved) {
         self.messages = saved.messages;
         self.mail = saved.mail;
         self.heard = saved.heard;
+        self.support = saved.support;
         self.trim();
     }
 
@@ -456,7 +517,13 @@ impl Model {
                     self.toast(format!("New message from {from}"), ToastKind::Info, now_ms);
                 }
             }
-            EngineEvent::Mail { from, subject, body, at, files } => {
+            EngineEvent::Mail {
+                from,
+                subject,
+                body,
+                at,
+                files,
+            } => {
                 let read = self.page == Page::Mail;
                 let id = format!("in-{at}-{}", self.mail.len());
                 self.mail.push(MailItem {
@@ -473,10 +540,22 @@ impl Model {
                 });
                 self.trim();
                 if !read {
-                    self.toast(format!("New mail from {from}: {subject}"), ToastKind::Info, now_ms);
+                    self.toast(
+                        format!("New mail from {from}: {subject}"),
+                        ToastKind::Info,
+                        now_ms,
+                    );
                 }
             }
-            EngineEvent::File { name, done, total, dir, id, from, path } => match dir {
+            EngineEvent::File {
+                name,
+                done,
+                total,
+                dir,
+                id,
+                from,
+                path,
+            } => match dir {
                 Dir::Out => self.update_msg(&id, |m| {
                     if let Some(a) = m.attachment.as_mut() {
                         a.done = Some(done);
@@ -484,10 +563,13 @@ impl Model {
                 }),
                 // A file or voice note that arrived: shown in the conversation with the sender.
                 Dir::In => {
-                    let Some(from) = from.filter(|_| done >= total) else { return };
+                    let Some(from) = from.filter(|_| done >= total) else {
+                        return;
+                    };
                     let voice = name.to_lowercase().ends_with(".kvm");
                     let read = self.page == Page::Chats;
-                    let seconds = voice.then(|| ((((total as f64 - 4.0) / 150.0) * 10.0).round() / 10.0).max(1.0));
+                    let seconds =
+                        voice.then(|| ((((total as f64 - 4.0) / 150.0) * 10.0).round() / 10.0).max(1.0));
                     self.messages.push(Msg {
                         id: format!("in-file-{now_ms}-{}", self.messages.len()),
                         peer: from.clone(),
@@ -497,7 +579,11 @@ impl Model {
                         kind: MessageKind::Chat,
                         state: None,
                         attachment: Some(Attachment {
-                            kind: if voice { AttachmentKind::Voice } else { AttachmentKind::File },
+                            kind: if voice {
+                                AttachmentKind::Voice
+                            } else {
+                                AttachmentKind::File
+                            },
                             name: if voice { "Voice note".into() } else { name },
                             size: total,
                             path,
@@ -541,12 +627,16 @@ impl Model {
                 self.transmitting = state == "starting" || state == "sending";
                 if state == "sending" {
                     for m in self.messages.iter_mut() {
-                        if m.dir == Dir::Out && matches!(m.state, Some(OutState::Queued) | Some(OutState::Calling)) {
+                        if m.dir == Dir::Out
+                            && matches!(m.state, Some(OutState::Queued) | Some(OutState::Calling))
+                        {
                             m.state = Some(OutState::Sending);
                         }
                     }
                     for m in self.mail.iter_mut() {
-                        if m.dir == Dir::Out && matches!(m.state, Some(OutState::Queued) | Some(OutState::Calling)) {
+                        if m.dir == Dir::Out
+                            && matches!(m.state, Some(OutState::Queued) | Some(OutState::Calling))
+                        {
                             m.state = Some(OutState::Sending);
                         }
                     }
@@ -640,15 +730,6 @@ pub struct Conversation {
     pub unread: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct InboxFile {
-    pub name: String,
-    pub size: u64,
-    pub path: Option<String>,
-    pub from: String,
-    pub at: i64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,13 +751,30 @@ mod tests {
 
     #[test]
     fn a_new_message_is_unread_and_toasted_unless_chats_is_open() {
-        let mut m = Model { page: Page::Radio, ..Model::default() };
-        m.handle(EngineEvent::Message { from: "K1AB".into(), text: "hello".into(), at: 5 }, 100);
+        let mut m = Model {
+            page: Page::Radio,
+            ..Model::default()
+        };
+        m.handle(
+            EngineEvent::Message {
+                from: "K1AB".into(),
+                text: "hello".into(),
+                at: 5,
+            },
+            100,
+        );
         assert_eq!(m.unread_chats(), 1);
         assert_eq!(m.toasts.len(), 1);
         m.go(Page::Chats);
         assert_eq!(m.unread_chats(), 0);
-        m.handle(EngineEvent::Message { from: "K1AB".into(), text: "again".into(), at: 6 }, 100);
+        m.handle(
+            EngineEvent::Message {
+                from: "K1AB".into(),
+                text: "again".into(),
+                at: 6,
+            },
+            100,
+        );
         assert_eq!(m.unread_chats(), 0);
         assert_eq!(m.toasts.len(), 1);
     }
@@ -686,15 +784,36 @@ mod tests {
         let mut m = Model::default();
         m.add_out(msg("a", "K1AB", Dir::Out, 1));
         m.add_out(msg("b", "W2CD", Dir::Out, 2));
-        m.handle(EngineEvent::Link { link: LinkState::Calling { peer: "K1AB".into(), attempt: 1, of: 3 } }, 0);
+        m.handle(
+            EngineEvent::Link {
+                link: LinkState::Calling {
+                    peer: "K1AB".into(),
+                    attempt: 1,
+                    of: 3,
+                },
+            },
+            0,
+        );
         assert_eq!(m.messages[0].state, Some(OutState::Calling));
         assert_eq!(m.messages[1].state, Some(OutState::Queued));
-        m.handle(EngineEvent::Tx { state: "sending".into(), reason: None }, 0);
+        m.handle(
+            EngineEvent::Tx {
+                state: "sending".into(),
+                reason: None,
+            },
+            0,
+        );
         assert!(m.transmitting);
         assert_eq!(m.messages[0].state, Some(OutState::Sending));
         m.handle(EngineEvent::Sent { id: "a".into() }, 0);
         assert_eq!(m.messages[0].state, Some(OutState::Sent));
-        m.handle(EngineEvent::Failed { id: "b".into(), reason: "No answer".into() }, 9);
+        m.handle(
+            EngineEvent::Failed {
+                id: "b".into(),
+                reason: "No answer".into(),
+            },
+            9,
+        );
         assert_eq!(m.messages[1].state, Some(OutState::Failed));
         assert_eq!(m.messages[1].note.as_deref(), Some("No answer"));
         assert_eq!(m.toasts.last().unwrap().kind, ToastKind::Warn);
@@ -704,40 +823,96 @@ mod tests {
     fn a_plain_heard_keeps_what_an_announcement_said() {
         let mut m = Model::default();
         m.handle(
-            EngineEvent::Heard { heard: Heard { call: "K1AB".into(), at: 1, lat: Some(1.0), lon: Some(2.0), relay: Some(true), ..Default::default() } },
+            EngineEvent::Heard {
+                heard: Heard {
+                    call: "K1AB".into(),
+                    at: 1,
+                    lat: Some(1.0),
+                    lon: Some(2.0),
+                    relay: Some(true),
+                    ..Default::default()
+                },
+            },
             0,
         );
-        m.handle(EngineEvent::Heard { heard: Heard { call: "K1AB".into(), at: 2, snr: Some(4.0), ..Default::default() } }, 0);
+        m.handle(
+            EngineEvent::Heard {
+                heard: Heard {
+                    call: "K1AB".into(),
+                    at: 2,
+                    snr: Some(4.0),
+                    ..Default::default()
+                },
+            },
+            0,
+        );
         assert_eq!(m.heard.len(), 1);
         let h = &m.heard[0];
-        assert_eq!((h.at, h.lat, h.relay, h.snr), (2, Some(1.0), Some(true), Some(4.0)));
+        assert_eq!(
+            (h.at, h.lat, h.relay, h.snr),
+            (2, Some(1.0), Some(true), Some(4.0))
+        );
     }
 
     #[test]
     fn a_received_voice_note_lands_in_the_conversation() {
         let mut m = Model::default();
         m.handle(
-            EngineEvent::File { name: "x.kvm".into(), done: 154, total: 154, dir: Dir::In, id: "f".into(), from: Some("K1AB".into()), path: Some("/in/x.kvm".into()) },
+            EngineEvent::File {
+                name: "x.kvm".into(),
+                done: 154,
+                total: 154,
+                dir: Dir::In,
+                id: "f".into(),
+                from: Some("K1AB".into()),
+                path: Some("/in/x.kvm".into()),
+            },
             50,
         );
         let a = m.messages[0].attachment.as_ref().unwrap();
         assert_eq!(a.kind, AttachmentKind::Voice);
         assert_eq!(a.seconds, Some(1.0));
         // A transfer still in progress shows nothing yet.
-        m.handle(EngineEvent::File { name: "y.txt".into(), done: 1, total: 9, dir: Dir::In, id: "g".into(), from: Some("K1AB".into()), path: None }, 50);
+        m.handle(
+            EngineEvent::File {
+                name: "y.txt".into(),
+                done: 1,
+                total: 9,
+                dir: Dir::In,
+                id: "g".into(),
+                from: Some("K1AB".into()),
+                path: None,
+            },
+            50,
+        );
         assert_eq!(m.messages.len(), 1);
     }
 
     #[test]
     fn conversations_list_the_latest_first_and_count_unread() {
-        let mut m = Model::default();
-        m.messages = vec![msg("1", "K1AB", Dir::In, 10), msg("2", "W2CD", Dir::Out, 20), msg("3", "K1AB", Dir::In, 30)];
+        let mut m = Model {
+            messages: vec![
+                msg("1", "K1AB", Dir::In, 10),
+                msg("2", "W2CD", Dir::Out, 20),
+                msg("3", "K1AB", Dir::In, 30),
+            ],
+            ..Model::default()
+        };
         let c = m.conversations();
         assert_eq!(c[0].peer, "K1AB");
         assert_eq!(c[0].unread, 2);
         assert_eq!(c[1].peer, "W2CD");
         assert_eq!(m.thread("K1AB").len(), 2);
-        m.heard = vec![Heard { call: "K1AB".into(), ..Default::default() }, Heard { call: "N3EF".into(), ..Default::default() }];
+        m.heard = vec![
+            Heard {
+                call: "K1AB".into(),
+                ..Default::default()
+            },
+            Heard {
+                call: "N3EF".into(),
+                ..Default::default()
+            },
+        ];
         assert_eq!(m.on_the_air().len(), 1);
     }
 
@@ -750,9 +925,19 @@ mod tests {
         }
         m.handle(EngineEvent::Spectrum { bins: bins.clone() }, 1000);
         assert!(m.receiving && m.signal > 0.0);
-        m.handle(EngineEvent::Spectrum { bins: vec![-90.0; 100] }, 1500);
+        m.handle(
+            EngineEvent::Spectrum {
+                bins: vec![-90.0; 100],
+            },
+            1500,
+        );
         assert!(m.receiving, "holds for 1.5 s");
-        m.handle(EngineEvent::Spectrum { bins: vec![-90.0; 100] }, 3000);
+        m.handle(
+            EngineEvent::Spectrum {
+                bins: vec![-90.0; 100],
+            },
+            3000,
+        );
         assert!(!m.receiving);
     }
 
@@ -768,6 +953,23 @@ mod tests {
         assert_eq!(m.status().title, "Sending");
         m.engine_error = "boom".into();
         assert_eq!(m.status().title, "Radio not running");
+    }
+
+    #[test]
+    fn the_support_note_waits_a_week_then_a_month() {
+        let day = DAY_MS;
+        let mut s = Support {
+            first: 1,
+            last: 0,
+            off: false,
+        };
+        assert!(!s.due(3 * day));
+        assert!(s.due(8 * day));
+        s.last = 8 * day;
+        assert!(!s.due(20 * day));
+        assert!(s.due(39 * day));
+        s.off = true;
+        assert!(!s.due(100 * day));
     }
 
     #[test]

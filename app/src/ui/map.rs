@@ -3,7 +3,7 @@
 //! position are pinned on it.
 
 use alloy_ui::prelude::*;
-use alloy_ui::{pt, rgb, Path, Pointer, Point};
+use alloy_ui::{pt, rgb, Path, Point, Pointer};
 
 use super::kit::*;
 use crate::types::RelayInfo;
@@ -26,7 +26,14 @@ pub struct MapState {
 
 impl Default for MapState {
     fn default() -> Self {
-        MapState { zoom: 1.0, lat: 30.0, lon: 10.0, drag: None, centred: false, width: 800.0 }
+        MapState {
+            zoom: 1.0,
+            lat: 30.0,
+            lon: 10.0,
+            drag: None,
+            centred: false,
+            width: 800.0,
+        }
     }
 }
 
@@ -110,7 +117,10 @@ impl MapState {
 
 pub fn view(k: &Kahf, pins: Vec<Pin>, height: f32) -> V {
     let (zoom, clat, clon) = (k.ui.map.zoom, k.ui.map.lat, k.ui.map.lon);
-    let me = pins.iter().find(|p| p.kind == PinKind::Me).map(|p| (p.lat, p.lon));
+    let me = pins
+        .iter()
+        .find(|p| p.kind == PinKind::Me)
+        .map(|p| (p.lat, p.lon));
     let canvas = canvas::<Kahf>(0.0, height, move |f| {
         let size = f.size();
         let pal = f.palette();
@@ -118,9 +128,14 @@ pub fn view(k: &Kahf, pins: Vec<Pin>, height: f32) -> V {
         let ox = px(clon, zoom) - f64::from(size.width) / 2.0;
         let oy = py(clat, zoom) - f64::from(size.height) / 2.0;
         let w = world(zoom);
-        let at = |lat: f64, lon: f64, shift: f64| pt((px(lon, zoom) + shift - ox) as f32, (py(lat, zoom) - oy) as f32);
+        let at = |lat: f64, lon: f64, shift: f64| {
+            pt((px(lon, zoom) + shift - ox) as f32, (py(lat, zoom) - oy) as f32)
+        };
         // The ocean, then the land, repeated once either side so dragging wraps around.
-        f.rect(alloy_ui::Rectangle::new(pt(0.0, 0.0), size), rgb(0x1b3a52).with_alpha(0.35));
+        f.rect(
+            alloy_ui::Rectangle::new(pt(0.0, 0.0), size),
+            rgb(0x1b3a52).with_alpha(0.35),
+        );
         for ring in land() {
             for shift in [-w, 0.0, w] {
                 let pts: Vec<Point> = ring.iter().map(|(lo, la)| at(*la, *lo, shift)).collect();
@@ -133,11 +148,21 @@ pub fn view(k: &Kahf, pins: Vec<Pin>, height: f32) -> V {
         }
         for lon in (-180..=180).step_by(30) {
             for shift in [-w, 0.0, w] {
-                f.line(at(80.0, f64::from(lon), shift), at(-80.0, f64::from(lon), shift), 0.5, pal.border);
+                f.line(
+                    at(80.0, f64::from(lon), shift),
+                    at(-80.0, f64::from(lon), shift),
+                    0.5,
+                    pal.border,
+                );
             }
         }
         for lat in (-60..=60).step_by(30) {
-            f.line(at(f64::from(lat), -180.0, -w), at(f64::from(lat), 180.0, w), 0.5, pal.border);
+            f.line(
+                at(f64::from(lat), -180.0, -w),
+                at(f64::from(lat), 180.0, w),
+                0.5,
+                pal.border,
+            );
         }
         for pin in &pins {
             let (color, r) = match pin.kind {
@@ -166,7 +191,12 @@ pub fn view(k: &Kahf, pins: Vec<Pin>, height: f32) -> V {
     if let Some((la, lo)) = me {
         ctl = ctl.push(button("My position").act(move |k: &mut Kahf| k.ui.map.center_on(la, lo)));
     }
-    ctl = ctl.push(caption("Drag to move. The map is drawn from outlines built into KAHF, so it works without the internet.").dim());
+    ctl = ctl.push(
+        caption(
+            "Drag to move. The map is drawn from outlines built into KAHF, so it works without the internet.",
+        )
+        .dim(),
+    );
     col![canvas, ctl.align_center()].gap(6.0).into()
 }
 
@@ -176,20 +206,35 @@ pub fn pins(k: &Kahf) -> Vec<Pin> {
     let relays: &[RelayInfo] = &k.m.relays;
     for r in relays {
         if let (Some(lat), Some(lon)) = (r.lat, r.lon) {
-            out.push(Pin { label: r.call.clone(), lat, lon, kind: PinKind::Relay });
+            out.push(Pin {
+                label: r.call.clone(),
+                lat,
+                lon,
+                kind: PinKind::Relay,
+            });
         }
     }
     for h in &k.m.heard {
         if let (Some(lat), Some(lon)) = (h.lat, h.lon) {
             if !relays.iter().any(|r| r.call == h.call) {
-                out.push(Pin { label: h.call.clone(), lat, lon, kind: PinKind::Station });
+                out.push(Pin {
+                    label: h.call.clone(),
+                    lat,
+                    lon,
+                    kind: PinKind::Station,
+                });
             }
         }
     }
     let l = &k.m.settings.location;
     if l.mode != crate::types::LocationMode::Off {
         if let (Some(lat), Some(lon)) = (l.lat, l.lon) {
-            out.push(Pin { label: "YOU".into(), lat, lon, kind: PinKind::Me });
+            out.push(Pin {
+                label: "YOU".into(),
+                lat,
+                lon,
+                kind: PinKind::Me,
+            });
         }
     }
     out

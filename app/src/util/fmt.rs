@@ -35,17 +35,6 @@ impl Quality {
             Quality::Unknown => "Unknown",
         }
     }
-
-    /// 0 to 4 bars.
-    pub fn level(self) -> u8 {
-        match self {
-            Quality::Excellent => 4,
-            Quality::Good => 3,
-            Quality::Fair => 2,
-            Quality::Weak | Quality::VeryWeak => 1,
-            Quality::Unknown => 0,
-        }
-    }
 }
 
 /// Typing speed in plain terms, from net bits per second (8 bits per character).
@@ -88,12 +77,11 @@ pub fn time_ago(ms: i64, now_ms: i64) -> String {
 
 /// Local time of day, "14:05", from unix milliseconds.
 pub fn clock(ms: i64) -> String {
-    Local.timestamp_millis_opt(ms).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
-}
-
-/// Local date and time, "21 Nov 14:05".
-pub fn stamp(ms: i64) -> String {
-    Local.timestamp_millis_opt(ms).single().map(|t| t.format("%-d %b %H:%M").to_string()).unwrap_or_default()
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%H:%M").to_string())
+        .unwrap_or_default()
 }
 
 /// 18112.35 kHz as "18.11235 MHz". 17 m dials have up to two decimals of kHz: all are shown.
@@ -184,20 +172,6 @@ pub fn relative(unix: i64, now: i64) -> String {
     }
 }
 
-/// What a mode name means in a sentence.
-pub fn mode_explained(name: &str) -> &'static str {
-    match name.trim_start_matches("KAMI-") {
-        "256" | "128" | "64" => "Very slow but reaches the weakest signals.",
-        "32" | "16" => "Slow and sure. A good starting point.",
-        "8" | "4" => "Medium speed for decent signals.",
-        "1a" => "Fast. Needs a clear signal.",
-        "1b" => "Faster. Needs a good signal.",
-        "1c" => "Very fast. Needs a strong signal.",
-        "1d" => "Fastest. Needs an excellent signal.",
-        _ => "",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,7 +180,6 @@ mod tests {
     fn snr_is_graded() {
         assert_eq!(Quality::of(None), Quality::Unknown);
         assert_eq!(Quality::of(Some(12.0)).label(), "Excellent");
-        assert_eq!(Quality::of(Some(-20.0)).level(), 1);
         assert_eq!(Quality::of(Some(0.0)), Quality::Fair);
     }
 

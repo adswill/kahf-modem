@@ -13,7 +13,9 @@ pub fn lab(label: &str, control: impl Into<V>) -> V {
 }
 
 pub fn lab_hint(label: &str, control: impl Into<V>, hint: &str) -> V {
-    col![caption(label).dim(), control.into(), caption(hint).dim()].gap(4.0).into()
+    col![caption(label).dim(), control.into(), caption(hint).dim()]
+        .gap(4.0)
+        .into()
 }
 
 /// A boxed note. `warn` makes it stand out.
@@ -33,13 +35,22 @@ pub fn choice(selected: bool, title: &str, sub: &str, on: impl Fn(&mut Kahf) + S
 }
 
 /// A Test button with its answer beside it. The tests only listen or look; they never transmit.
-pub fn test_button(k: &Kahf, key: &str, label: &str, run: impl Fn(&mut Kahf, &str) + Send + Sync + 'static) -> V {
+pub fn test_button(
+    k: &Kahf,
+    key: &str,
+    label: &str,
+    run: impl Fn(&mut Kahf, &str) + Send + Sync + 'static,
+) -> V {
     let state = k.ui.tests.get(key).cloned();
     let running = matches!(state, Some(TestState::Running));
     let key_owned = key.to_string();
-    let b = button(if running { "Testing…".to_string() } else { label.to_string() })
-        .enabled(!running)
-        .act(move |k: &mut Kahf| run(k, &key_owned));
+    let b = button(if running {
+        "Testing…".to_string()
+    } else {
+        label.to_string()
+    })
+    .enabled(!running)
+    .act(move |k: &mut Kahf| run(k, &key_owned));
     let mut r = row![b].gap(10.0).align_center();
     if let Some(TestState::Done { ok, text: t }) = state {
         let a = text(t).caption();
@@ -54,13 +65,30 @@ pub fn titled(title: &str, body: impl Into<V>) -> V {
 }
 
 /// A device list as a dropdown with "Computer default" first. Index 0 is the default.
-pub fn device_pick(devices: &[String], current: &str, set: impl Fn(&mut Kahf, String) + Send + Sync + 'static) -> V {
+pub fn device_pick(
+    devices: &[String],
+    current: &str,
+    set: impl Fn(&mut Kahf, String) + Send + Sync + 'static,
+) -> V {
     let mut names = vec!["Computer default".to_string()];
     names.extend(devices.iter().cloned());
-    let sel = if current.is_empty() { Some(0) } else { devices.iter().position(|d| d == current).map(|i| i + 1) };
+    let sel = if current.is_empty() {
+        Some(0)
+    } else {
+        devices.iter().position(|d| d == current).map(|i| i + 1)
+    };
     let items = devices.to_vec();
     pick(names, sel)
-        .act(move |k: &mut Kahf, i: usize| set(k, if i == 0 { String::new() } else { items[i - 1].clone() }))
+        .act(move |k: &mut Kahf, i: usize| {
+            set(
+                k,
+                if i == 0 {
+                    String::new()
+                } else {
+                    items[i - 1].clone()
+                },
+            )
+        })
         .into()
 }
 
@@ -76,7 +104,10 @@ pub fn lit(label: &str, on: bool, bad: bool) -> V {
 
 /// A one-line text box that writes into the state.
 pub fn edit(value: &str, hint: &str, set: impl Fn(&mut Kahf, String) + Send + Sync + 'static) -> V {
-    input(value.to_string()).hint(hint).act(move |k: &mut Kahf, v: String| set(k, v)).into()
+    input(value.to_string())
+        .hint(hint)
+        .act(move |k: &mut Kahf, v: String| set(k, v))
+        .into()
 }
 
 /// The warning and estimate shown before files are sent.
@@ -89,7 +120,11 @@ pub fn file_notice(k: &Kahf, files: &[crate::types::PickedFile]) -> V {
     let over = total > FILE_LIMIT_BYTES;
     let bps = k.m.estimate_bps();
     let line = if over {
-        format!("{} to send. That is over the {} limit. Radio is slow, so larger files are not accepted.", size_words(total), size_words(FILE_LIMIT_BYTES))
+        format!(
+            "{} to send. That is over the {} limit. Radio is slow, so larger files are not accepted.",
+            size_words(total),
+            size_words(FILE_LIMIT_BYTES)
+        )
     } else {
         format!(
             "{} to send. At the current speed ({}) it takes {}. On a weak signal it can take up to {}.",

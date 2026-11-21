@@ -26,7 +26,11 @@ pub fn view(k: &Kahf) -> V {
         .gap(10.0)
         .align_center(),
     );
-    left = left.push(spectrum(k.m.spectrum.clone(), k.m.waterfall.iter().cloned().collect(), 330.0));
+    left = left.push(spectrum(
+        k.m.spectrum.clone(),
+        k.m.waterfall.iter().cloned().collect(),
+        330.0,
+    ));
     left = left.push(caption("Brighter is stronger. The scale is the sound from your radio, in kilohertz. The shaded band is where KAHF listens.").dim());
 
     let current = bands::index_of(s.freq_khz);
@@ -52,14 +56,21 @@ pub fn view(k: &Kahf) -> V {
         side = side.push(
             row![
                 text("Changes are not applied yet.").caption(),
-                button(if k.ui.applying { "Restarting…" } else { "Apply and restart the radio" })
-                    .primary()
-                    .enabled(!k.ui.applying)
-                    .act(|k: &mut Kahf| k.apply_hardware()),
+                button(if k.ui.applying {
+                    "Restarting…"
+                } else {
+                    "Apply and restart the radio"
+                })
+                .primary()
+                .enabled(!k.ui.applying)
+                .act(|k: &mut Kahf| k.apply_hardware()),
             ]
             .gap(10.0)
             .align_center(),
         );
     }
-    row![col![left].pad(16.0).fill(), scroll(side.pad(16.0)).w(420.0)].gap(0.0).fill().into()
+    row![col![left].pad(16.0).fill(), scroll(side.pad(16.0)).w(420.0)]
+        .gap(0.0)
+        .fill()
+        .into()
 }

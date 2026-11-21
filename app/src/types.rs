@@ -363,7 +363,12 @@ pub struct Location {
 
 impl Default for Location {
     fn default() -> Self {
-        Location { mode: LocationMode::Off, lat: None, lon: None, radius_km: 50 }
+        Location {
+            mode: LocationMode::Off,
+            lat: None,
+            lon: None,
+            radius_km: 50,
+        }
     }
 }
 
@@ -405,7 +410,12 @@ pub struct RigChoice {
 
 impl Default for RigChoice {
     fn default() -> Self {
-        RigChoice { model: None, name: String::new(), port: String::new(), baud: 19_200 }
+        RigChoice {
+            model: None,
+            name: String::new(),
+            port: String::new(),
+            baud: 19_200,
+        }
     }
 }
 
@@ -486,14 +496,35 @@ impl Default for Settings {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum EngineEvent {
-    Link { link: LinkState },
-    Message { from: String, text: String, at: i64 },
-    Heard { heard: Heard },
-    Metrics { metrics: Metrics },
-    Spectrum { bins: Vec<f32> },
-    Tx { state: String, #[serde(default)] reason: Option<String> },
-    Sent { id: String },
-    Failed { id: String, reason: String },
+    Link {
+        link: LinkState,
+    },
+    Message {
+        from: String,
+        text: String,
+        at: i64,
+    },
+    Heard {
+        heard: Heard,
+    },
+    Metrics {
+        metrics: Metrics,
+    },
+    Spectrum {
+        bins: Vec<f32>,
+    },
+    Tx {
+        state: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    Sent {
+        id: String,
+    },
+    Failed {
+        id: String,
+        reason: String,
+    },
     File {
         name: String,
         done: u64,
@@ -513,9 +544,15 @@ pub enum EngineEvent {
         #[serde(default)]
         files: Vec<MailFile>,
     },
-    Level { level: f32 },
-    Relay { status: RelayStatus },
-    Log { text: String },
+    Level {
+        level: f32,
+    },
+    Relay {
+        status: RelayStatus,
+    },
+    Log {
+        text: String,
+    },
 }
 
 #[cfg(test)]
@@ -539,10 +576,28 @@ mod tests {
 
     #[test]
     fn engine_events_parse() {
-        let e: EngineEvent = serde_json::from_value(json!({ "type": "link", "link": { "state": "calling", "peer": "K1AB", "attempt": 2, "of": 5 } })).unwrap();
-        assert_eq!(e, EngineEvent::Link { link: LinkState::Calling { peer: "K1AB".into(), attempt: 2, of: 5 } });
-        let e: EngineEvent = serde_json::from_value(json!({ "type": "link", "link": { "state": "idle" } })).unwrap();
-        assert_eq!(e, EngineEvent::Link { link: LinkState::Idle });
+        let e: EngineEvent = serde_json::from_value(
+            json!({ "type": "link", "link": { "state": "calling", "peer": "K1AB", "attempt": 2, "of": 5 } }),
+        )
+        .unwrap();
+        assert_eq!(
+            e,
+            EngineEvent::Link {
+                link: LinkState::Calling {
+                    peer: "K1AB".into(),
+                    attempt: 2,
+                    of: 5
+                }
+            }
+        );
+        let e: EngineEvent =
+            serde_json::from_value(json!({ "type": "link", "link": { "state": "idle" } })).unwrap();
+        assert_eq!(
+            e,
+            EngineEvent::Link {
+                link: LinkState::Idle
+            }
+        );
         let e: EngineEvent = serde_json::from_value(json!({ "type": "file", "name": "a.txt", "done": 5, "total": 10, "dir": "in", "id": "x", "from": "K1AB" })).unwrap();
         assert!(matches!(e, EngineEvent::File { done: 5, .. }));
         let e: EngineEvent = serde_json::from_value(json!({ "type": "tx", "state": "sending" })).unwrap();

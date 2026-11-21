@@ -36,8 +36,19 @@ pub fn lat_lon_to_locator(lat: f64, lon: f64) -> String {
     let low = |n: f64| char::from(b'a' + n as u8);
     let (lo1, la1) = ((l / 20.0).floor(), (b / 10.0).floor());
     let (lo2, la2) = (((l % 20.0) / 2.0).floor(), (b % 10.0).floor());
-    let (lo3, la3) = ((((l % 2.0) * 60.0) / 5.0).floor(), (((b % 1.0) * 60.0) / 2.5).floor());
-    format!("{}{}{}{}{}{}", up(lo1), up(la1), lo2 as u8, la2 as u8, low(lo3.min(23.0)), low(la3.min(23.0)))
+    let (lo3, la3) = (
+        (((l % 2.0) * 60.0) / 5.0).floor(),
+        (((b % 1.0) * 60.0) / 2.5).floor(),
+    );
+    format!(
+        "{}{}{}{}{}{}",
+        up(lo1),
+        up(la1),
+        lo2 as u8,
+        la2 as u8,
+        low(lo3.min(23.0)),
+        low(la3.min(23.0))
+    )
 }
 
 /// A latitude inside -90 to 90.
@@ -77,7 +88,10 @@ pub fn sun_elevation(lat: f64, lon: f64, unix: i64) -> f64 {
         - 0.002697 * (3.0 * g).cos()
         + 0.00148 * (3.0 * g).sin();
     let eq = 229.18
-        * (0.000075 + 0.001868 * g.cos() - 0.032077 * g.sin() - 0.014615 * (2.0 * g).cos() - 0.040849 * (2.0 * g).sin());
+        * (0.000075 + 0.001868 * g.cos()
+            - 0.032077 * g.sin()
+            - 0.014615 * (2.0 * g).cos()
+            - 0.040849 * (2.0 * g).sin());
     let utc_min = (unix.rem_euclid(86_400)) as f64 / 60.0;
     let sun_lon = (720.0 - utc_min - eq) / 4.0;
     let h = (lon - sun_lon) * rad;
@@ -122,9 +136,15 @@ pub fn reach_notice(lat: Option<f64>, lon: Option<f64>, unix: i64) -> Option<(To
     let (lat, lon) = (lat?, lon?);
     let el = sun_elevation(lat, lon, unix);
     Some(if el > 5.0 {
-        (Tone::Good, "It is daylight at your place. 17 m usually works on paths of about 1000 to 4000 km now.")
+        (
+            Tone::Good,
+            "It is daylight at your place. 17 m usually works on paths of about 1000 to 4000 km now.",
+        )
     } else if el > -6.0 {
-        (Tone::Warn, "Dawn or dusk at your place. 17 m may open or close on a path at any time.")
+        (
+            Tone::Warn,
+            "Dawn or dusk at your place. 17 m may open or close on a path at any time.",
+        )
     } else {
         (
             Tone::Warn,
@@ -140,7 +160,10 @@ mod tests {
     #[test]
     fn locators_round_trip() {
         let (lat, lon) = locator_to_lat_lon("JN45rm").unwrap();
-        assert!((lat - 45.52).abs() < 0.01 && (lon - 9.46).abs() < 0.01, "{lat} {lon}");
+        assert!(
+            (lat - 45.52).abs() < 0.01 && (lon - 9.46).abs() < 0.01,
+            "{lat} {lon}"
+        );
         assert_eq!(lat_lon_to_locator(lat, lon).to_uppercase(), "JN45RM");
         let (la, lo) = locator_to_lat_lon("JN45").unwrap();
         assert!((la - 45.5).abs() < 1e-9 && (lo - 9.0).abs() < 1e-9);

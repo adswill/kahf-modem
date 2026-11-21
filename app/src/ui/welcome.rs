@@ -38,5 +38,7 @@ pub fn view(_k: &Kahf) -> V {
 }
 
 fn step(title: &str, body: &str) -> V {
-    row![text(title).label().w(190.0), text(body).dim().fill_w()].gap(12.0).into()
+    row![text(title).label().w(190.0), text(body).dim().fill_w()]
+        .gap(12.0)
+        .into()
 }

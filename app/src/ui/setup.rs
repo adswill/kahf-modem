@@ -13,8 +13,15 @@ use crate::util::{bands, callsign, fmt, geo};
 fn can_next(k: &Kahf) -> bool {
     let s = &k.ui.setup;
     match s.step {
-        0 => !s.have_licence || (callsign::valid(&callsign::normalise(&s.draft.callsign)) && callsign::problem(&s.draft.callsign).is_none()),
-        3 => s.draft.location.mode == LocationMode::Off || (geo::valid_lat(s.pos.lat()) && geo::valid_lon(s.pos.lon())),
+        0 => {
+            !s.have_licence
+                || (callsign::valid(&callsign::normalise(&s.draft.callsign))
+                    && callsign::problem(&s.draft.callsign).is_none())
+        }
+        3 => {
+            s.draft.location.mode == LocationMode::Off
+                || (geo::valid_lat(s.pos.lat()) && geo::valid_lon(s.pos.lon()))
+        }
         _ => true,
     }
 }
@@ -35,11 +42,20 @@ pub fn view(k: &Kahf) -> V {
         3 => place(k),
         _ => ready(k),
     };
-    let cancel_to = if k.m.settings.setup_done { Page::Chats } else { Page::Welcome };
+    let cancel_to = if k.m.settings.setup_done {
+        Page::Chats
+    } else {
+        Page::Welcome
+    };
     col![
-        row![heading("KAHF").accent(), text("Set up").dim(), space(), button("Cancel").ghost().act(move |k: &mut Kahf| k.go(cancel_to))]
-            .gap(12.0)
-            .align_center(),
+        row![
+            heading("KAHF").accent(),
+            text("Set up").dim(),
+            space(),
+            button("Cancel").ghost().act(move |k: &mut Kahf| k.go(cancel_to))
+        ]
+        .gap(12.0)
+        .align_center(),
         steps,
         scroll(col![body].pad(4.0)).fill(),
         row![
@@ -47,13 +63,16 @@ pub fn view(k: &Kahf) -> V {
                 k.ui.setup.step = k.ui.setup.step.saturating_sub(1);
             }),
             space(),
-            button(if last { "Start listening" } else { "Continue" }).primary().enabled(can_next(k)).act(move |k: &mut Kahf| {
-                if k.ui.setup.step + 1 < SETUP_STEPS.len() {
-                    k.ui.setup.step += 1;
-                } else {
-                    k.finish_setup();
-                }
-            }),
+            button(if last { "Start listening" } else { "Continue" })
+                .primary()
+                .enabled(can_next(k))
+                .act(move |k: &mut Kahf| {
+                    if k.ui.setup.step + 1 < SETUP_STEPS.len() {
+                        k.ui.setup.step += 1;
+                    } else {
+                        k.finish_setup();
+                    }
+                }),
         ]
         .align_center(),
     ]
@@ -70,19 +89,29 @@ fn who(k: &Kahf) -> V {
     let ok = callsign::valid(&call) && msg.is_none();
     let mut c = col![
         heading("Who are you on the air?"),
-        text("Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.").dim(),
-        choice(st.have_licence, "I have an amateur radio licence", "I can transmit and I know my callsign.", |k| k.ui.setup.have_licence = true),
+        text("Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.")
+            .dim(),
+        choice(
+            st.have_licence,
+            "I have an amateur radio licence",
+            "I can transmit and I know my callsign.",
+            |k| k.ui.setup.have_licence = true
+        ),
     ]
     .gap(10.0);
     if st.have_licence {
         c = c.push(lab(
             "Your callsign",
-            input(st.draft.callsign.clone()).hint("For example KA1ABC").act(|k: &mut Kahf, v: String| k.ui.setup.draft.callsign = v.to_uppercase()),
+            input(st.draft.callsign.clone())
+                .hint("For example KA1ABC")
+                .act(|k: &mut Kahf, v: String| k.ui.setup.draft.callsign = v.to_uppercase()),
         ));
         c = c.push(match msg {
             Some(m) => text(m).caption().danger(),
             None if ok => text("Looks good.").caption().success(),
-            None => text("Letters and numbers, with at least one number.").caption().dim(),
+            None => text("Letters and numbers, with at least one number.")
+                .caption()
+                .dim(),
         });
         c = c.push(note("Only transmit if your licence allows it on the frequency you use. KAHF cannot check that for you.", true));
     }
@@ -111,7 +140,11 @@ fn radio(k: &Kahf) -> V {
                     k.ui.setup.previewing = true;
                     let mut s = k.m.settings.clone();
                     k.ui.setup.hw.apply_to(&mut s);
-                    s.callsign = if k.ui.setup.have_licence { callsign::normalise(&k.ui.setup.draft.callsign) } else { String::new() };
+                    s.callsign = if k.ui.setup.have_licence {
+                        callsign::normalise(&k.ui.setup.draft.callsign)
+                    } else {
+                        String::new()
+                    };
                     s.listen_only = true;
                     k.preview_engine(s);
                 }),
@@ -121,7 +154,11 @@ fn radio(k: &Kahf) -> V {
             .align_center(),
         );
         if st.previewing {
-            c = c.push(spectrum(k.m.spectrum.clone(), k.m.waterfall.iter().cloned().collect(), 200.0));
+            c = c.push(spectrum(
+                k.m.spectrum.clone(),
+                k.m.waterfall.iter().cloned().collect(),
+                200.0,
+            ));
         }
     }
     c = c.push(heading("2. Radio control (optional)").sub());
@@ -144,7 +181,12 @@ fn channel(k: &Kahf) -> V {
             ""
         };
         let khz = ch.khz;
-        c = c.push(choice(sel, &format!("17 metres, {}   {}", ch.name, fmt::mhz(khz)), sub, move |k| k.ui.setup.draft.freq_khz = khz));
+        c = c.push(choice(
+            sel,
+            &format!("17 metres, {}   {}", ch.name, fmt::mhz(khz)),
+            sub,
+            move |k| k.ui.setup.draft.freq_khz = khz,
+        ));
     }
     c.into()
 }
@@ -166,7 +208,14 @@ fn ready(k: &Kahf) -> V {
     col![
         heading("You are ready"),
         text("This is what KAHF will do. You can change all of it later.").dim(),
-        row_of("Callsign", if st.have_licence { call } else { "listening only".into() }),
+        row_of(
+            "Callsign",
+            if st.have_licence {
+                call
+            } else {
+                "listening only".into()
+            }
+        ),
         row_of(
             "Sound",
             match st.hw.kind {
@@ -175,7 +224,14 @@ fn ready(k: &Kahf) -> V {
                 SoundKind::None => "none yet".into(),
             }
         ),
-        row_of("Radio control", if st.hw.rig.model.is_some() { st.hw.rig.name.clone() } else { "off".into() }),
+        row_of(
+            "Radio control",
+            if st.hw.rig.model.is_some() {
+                st.hw.rig.name.clone()
+            } else {
+                "off".into()
+            }
+        ),
         row_of("Channel", format!("{}, 17 m", fmt::mhz(st.draft.freq_khz))),
         row_of(
             "Map",

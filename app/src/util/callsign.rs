@@ -21,7 +21,10 @@ pub fn problem(text: &str) -> Option<&'static str> {
     if c.is_empty() {
         return None;
     }
-    if !c.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '/') {
+    if !c
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '/')
+    {
         return Some("Use letters and numbers only.");
     }
     if c.len() < 3 {

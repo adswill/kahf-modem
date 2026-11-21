@@ -38,7 +38,11 @@ impl Bridge {
             data_dir,
         ));
         core::start_poll_loop(shared.clone());
-        Bridge { shared, events, jobs: Arc::default() }
+        Bridge {
+            shared,
+            events,
+            jobs: Arc::default(),
+        }
     }
 }
 
@@ -77,19 +81,44 @@ pub struct Hw {
 impl Hw {
     pub fn from_settings(s: &Settings) -> Self {
         let parts: Vec<&str> = s.rig_spec.split(':').collect();
-        let direct = !s.rig_spec.is_empty() && !s.rig_spec.starts_with("rigctld") && !s.rig_spec.starts_with("flrig");
+        let direct =
+            !s.rig_spec.is_empty() && !s.rig_spec.starts_with("rigctld") && !s.rig_spec.starts_with("flrig");
         Hw {
-            kind: if !s.sdr.is_empty() { SoundKind::Sdr } else { SoundKind::Sound },
+            kind: if !s.sdr.is_empty() {
+                SoundKind::Sdr
+            } else {
+                SoundKind::Sound
+            },
             audio_in: s.audio_in.clone(),
             audio_out: s.audio_out.clone(),
             sdr: s.sdr.clone(),
             rig: s.rig.clone(),
             rigctld: s.rigctld.clone(),
-            d_model: if direct { parts[0].to_string() } else { String::new() },
-            d_port: if direct { parts.get(1).unwrap_or(&"").to_string() } else { String::new() },
-            d_baud: if direct { parts.get(2).filter(|p| p.chars().all(|c| c.is_ascii_digit())).unwrap_or(&"").to_string() } else { String::new() },
+            d_model: if direct {
+                parts[0].to_string()
+            } else {
+                String::new()
+            },
+            d_port: if direct {
+                parts.get(1).unwrap_or(&"").to_string()
+            } else {
+                String::new()
+            },
+            d_baud: if direct {
+                parts
+                    .get(2)
+                    .filter(|p| p.chars().all(|c| c.is_ascii_digit()))
+                    .unwrap_or(&"")
+                    .to_string()
+            } else {
+                String::new()
+            },
             d_ptt: if direct {
-                parts.last().filter(|p| PTTS.iter().any(|(id, _)| id == *p)).unwrap_or(&"cat").to_string()
+                parts
+                    .last()
+                    .filter(|p| PTTS.iter().any(|(id, _)| id == *p))
+                    .unwrap_or(&"cat")
+                    .to_string()
             } else {
                 "cat".into()
             },
@@ -110,9 +139,21 @@ impl Hw {
 
     /// Writes the choices into settings.
     pub fn apply_to(&self, s: &mut Settings) {
-        s.audio_in = if self.kind == SoundKind::Sound { self.audio_in.clone() } else { String::new() };
-        s.audio_out = if self.kind == SoundKind::Sound { self.audio_out.clone() } else { String::new() };
-        s.sdr = if self.kind == SoundKind::Sdr { self.sdr.clone() } else { String::new() };
+        s.audio_in = if self.kind == SoundKind::Sound {
+            self.audio_in.clone()
+        } else {
+            String::new()
+        };
+        s.audio_out = if self.kind == SoundKind::Sound {
+            self.audio_out.clone()
+        } else {
+            String::new()
+        };
+        s.sdr = if self.kind == SoundKind::Sdr {
+            self.sdr.clone()
+        } else {
+            String::new()
+        };
         s.rig = self.rig.clone();
         s.rigctld = self.rigctld.trim().to_string();
         s.rig_spec = self.spec();
@@ -185,7 +226,6 @@ pub enum MailView {
 /// Everything the screens remember about what the person is typing or choosing.
 pub struct Ui {
     pub peer: String,
-    pub new_call: String,
     pub draft: String,
     pub kind: MessageKind,
     pub mail_to: String,
@@ -211,16 +251,12 @@ pub struct Ui {
     pub licence: bool,
     pub terms: bool,
     pub manual_relay: String,
-    pub hint_call: String,
-    pub book_tab: usize,
     pub book_filter: String,
-    pub qso_sort: usize,
     pub uploads_open: bool,
     pub upload_busy: bool,
     pub update: Option<Result<UpdateCheck, String>>,
     pub server: Option<ServerCheck>,
     pub help_topic: String,
-    pub voice_clip: Option<VoiceClip>,
     /// The voice note playing: message id, when it started, how long it is.
     pub playing: Option<(String, Instant, f64)>,
     pub rec_start: Option<Instant>,
@@ -228,13 +264,16 @@ pub struct Ui {
     pub map: crate::ui::map::MapState,
     pub tour_step: usize,
     pub support_nudge: bool,
+    pub call_edit: String,
+    pub help_query: String,
+    /// The moment the support note may appear.
+    pub nudge_at: Option<Instant>,
 }
 
 impl Ui {
     fn new(settings: &Settings) -> Self {
         Ui {
             peer: String::new(),
-            new_call: String::new(),
             draft: String::new(),
             kind: MessageKind::Chat,
             mail_to: String::new(),
@@ -260,22 +299,21 @@ impl Ui {
             licence: false,
             terms: false,
             manual_relay: String::new(),
-            hint_call: String::new(),
-            book_tab: 0,
             book_filter: String::new(),
-            qso_sort: 0,
             uploads_open: false,
             upload_busy: false,
             update: None,
             server: None,
             help_topic: String::new(),
-            voice_clip: None,
             playing: None,
             rec_start: None,
             find: String::new(),
             map: Default::default(),
             tour_step: 0,
             support_nudge: false,
+            call_edit: settings.callsign.clone(),
+            help_query: String::new(),
+            nudge_at: None,
         }
     }
 }
@@ -302,7 +340,10 @@ pub struct Kahf {
 }
 
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub fn now_unix() -> i64 {
@@ -323,7 +364,13 @@ impl Kahf {
         m.restore(store::load(&data_dir));
         m.page = m.first_page();
         let ui = Ui::new(&m.settings);
-        Kahf { m, ui, bridge, dirty_since: None, last_poll: Instant::now() }
+        Kahf {
+            m,
+            ui,
+            bridge,
+            dirty_since: None,
+            last_poll: Instant::now(),
+        }
     }
 
     /// A state with nothing saved and no engine, for tests and screenshots.
@@ -332,7 +379,13 @@ impl Kahf {
         let bridge = Bridge::new(dir);
         let m = Model::default();
         let ui = Ui::new(&m.settings);
-        Kahf { m, ui, bridge, dirty_since: None, last_poll: Instant::now() }
+        Kahf {
+            m,
+            ui,
+            bridge,
+            dirty_since: None,
+            last_poll: Instant::now(),
+        }
     }
 
     pub fn shared(&self) -> Arc<Shared> {
@@ -361,13 +414,25 @@ impl Kahf {
 
     /// Takes in what came from the engine and from finished work. Called 25 times a second.
     pub fn pump(&mut self) {
-        let events: Vec<Value> = self.bridge.events.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+        if self.ui.nudge_at.is_some_and(|t| Instant::now() >= t) {
+            self.ui.nudge_at = None;
+            self.ui.support_nudge = true;
+        }
+        let events: Vec<Value> = self
+            .bridge
+            .events
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default();
         let now = now_ms();
         let mut changed = !events.is_empty();
         for ev in events {
             match serde_json::from_value::<EngineEvent>(ev) {
                 Ok(e) => {
-                    let persist = !matches!(e, EngineEvent::Spectrum { .. } | EngineEvent::Level { .. } | EngineEvent::Log { .. });
+                    let persist = !matches!(
+                        e,
+                        EngineEvent::Spectrum { .. } | EngineEvent::Level { .. } | EngineEvent::Log { .. }
+                    );
                     self.m.handle(e, now);
                     if persist {
                         self.mark_dirty();
@@ -376,15 +441,29 @@ impl Kahf {
                 Err(e) => log_line(&format!("ignored an engine event: {e}")),
             }
         }
-        let jobs: Vec<Job> = self.bridge.jobs.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
+        let jobs: Vec<Job> = self
+            .bridge
+            .jobs
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default();
         changed |= !jobs.is_empty();
         for job in jobs {
             job(self);
         }
-        if self.ui.playing.as_ref().is_some_and(|(_, t, secs)| t.elapsed().as_secs_f64() > secs + 0.3) {
+        if self
+            .ui
+            .playing
+            .as_ref()
+            .is_some_and(|(_, t, secs)| t.elapsed().as_secs_f64() > secs + 0.3)
+        {
             self.ui.playing = None;
         }
-        if self.ui.rec_start.is_some_and(|t| t.elapsed() >= Duration::from_secs(30)) {
+        if self
+            .ui
+            .rec_start
+            .is_some_and(|t| t.elapsed() >= Duration::from_secs(30))
+        {
             let to = callsign::normalise(&self.ui.peer);
             self.finish_recording(to);
         }
@@ -449,7 +528,7 @@ impl Kahf {
             self.spawn(move |s| core::engine_set_relay_hints(s, hints), |_, _| {});
             self.refresh_relay_directory(false);
         }
-        self.spawn(|s| core::app_info(s), |k, v| {
+        self.spawn(core::app_info, |k, v| {
             if let Ok(i) = parse::<AppInfo>(v) {
                 k.m.info = i;
             }
@@ -457,6 +536,42 @@ impl Kahf {
         self.refresh_book();
         self.m.ready = true;
         self.apply_theme();
+        self.maybe_nudge();
+    }
+
+    /// Asks once in a while, 30 seconds after start, if the person would like to support KAHF.
+    fn maybe_nudge(&mut self) {
+        if !self.m.settings.setup_done {
+            return;
+        }
+        let now = now_ms();
+        if self.m.support.first == 0 {
+            self.m.support.first = now;
+            self.mark_dirty();
+        }
+        if self.m.support.due(now) {
+            self.ui.nudge_at = Some(Instant::now() + Duration::from_secs(30));
+        }
+    }
+
+    pub fn close_nudge(&mut self, never: bool) {
+        self.ui.support_nudge = false;
+        self.m.support.last = now_ms();
+        self.m.support.off |= never;
+        self.mark_dirty();
+    }
+
+    pub fn tour_to(&mut self, step: usize) {
+        self.ui.tour_step = step;
+        if let Some(s) = crate::ui::overlays::STOPS.get(step) {
+            self.go(s.page);
+        }
+    }
+
+    pub fn finish_tour(&mut self) {
+        self.m.tour_open = false;
+        self.set(|s| s.tour_done = true);
+        self.go(Page::Chats);
     }
 
     pub fn apply_theme(&self) {
@@ -464,11 +579,20 @@ impl Kahf {
     }
 
     fn load_hardware_lists(&mut self) {
-        self.spawn(|_| (core::list_audio_devices(), core::detect_sdr(), core::rig_direct_models()), |k, (d, s, r)| {
-            k.ui.devices = d;
-            k.ui.sdrs = s;
-            k.ui.direct_rigs = r.into_iter().filter_map(|v| parse::<DirectRig>(v).ok()).collect();
-        });
+        self.spawn(
+            |_| {
+                (
+                    core::list_audio_devices(),
+                    core::detect_sdr(),
+                    core::rig_direct_models(),
+                )
+            },
+            |k, (d, s, r)| {
+                k.ui.devices = d;
+                k.ui.sdrs = s;
+                k.ui.direct_rigs = r.into_iter().filter_map(|v| parse::<DirectRig>(v).ok()).collect();
+            },
+        );
         self.check_hamlib();
     }
 
@@ -476,13 +600,20 @@ impl Kahf {
         self.spawn(
             |s| {
                 let available = core::rig_available();
-                let models = if available { core::rig_models().unwrap_or_default() } else { Vec::new() };
+                let models = if available {
+                    core::rig_models().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let _ = s;
                 (available, models, core::rig_ports())
             },
             |k, (available, models, ports)| {
                 k.ui.rig_available = Some(available);
-                k.ui.rig_models = models.into_iter().filter_map(|m| serde_json::from_value(serde_json::to_value(m).ok()?).ok()).collect();
+                k.ui.rig_models = models
+                    .into_iter()
+                    .filter_map(|m| serde_json::from_value(serde_json::to_value(m).ok()?).ok())
+                    .collect();
                 k.ui.rig_ports = ports;
             },
         );
@@ -507,14 +638,17 @@ impl Kahf {
     /// Starts (or restarts) the engine. Never fails loudly: a problem becomes a sentence.
     pub fn start_engine(&mut self, then: impl FnOnce(&mut Kahf, bool) + Send + 'static) {
         let v = serde_json::to_value(&self.m.settings).unwrap_or(Value::Null);
-        self.spawn(move |s| core::engine_start(s, v), move |k, r| {
-            let ok = r.is_ok();
-            k.m.engine_error = match r {
-                Ok(()) => String::new(),
-                Err(e) => explain_start_error(&e),
-            };
-            then(k, ok);
-        });
+        self.spawn(
+            move |s| core::engine_start(s, v),
+            move |k, r| {
+                let ok = r.is_ok();
+                k.m.engine_error = match r {
+                    Ok(()) => String::new(),
+                    Err(e) => explain_start_error(&e),
+                };
+                then(k, ok);
+            },
+        );
     }
 
     /// The end of setup: remember it and start the radio.
@@ -596,7 +730,11 @@ impl Kahf {
 
     // ---- tests ("Test" buttons: they only listen or look, never transmit) --------------------
 
-    pub fn run_test(&mut self, key: &str, work: impl FnOnce(&Shared) -> Result<String, String> + Send + 'static) {
+    pub fn run_test(
+        &mut self,
+        key: &str,
+        work: impl FnOnce(&Shared) -> Result<String, String> + Send + 'static,
+    ) {
         let key = key.to_string();
         self.ui.tests.insert(key.clone(), TestState::Running);
         self.spawn(work, move |k, r| {
@@ -658,11 +796,14 @@ impl Kahf {
             self.warn("That does not look like a callsign.");
             return;
         }
-        self.spawn(move |s| core::engine_connect(s, to), |k, r| {
-            if let Err(e) = r {
-                k.warn(e);
-            }
-        });
+        self.spawn(
+            move |s| core::engine_connect(s, to),
+            |k, r| {
+                if let Err(e) = r {
+                    k.warn(e);
+                }
+            },
+        );
     }
 
     pub fn hang_up(&mut self) {
@@ -694,16 +835,23 @@ impl Kahf {
         });
         self.mark_dirty();
         let (uid, kind_s) = (id.clone(), kind.as_str().to_string());
-        self.spawn(move |s| core::engine_send(s, uid, peer, body, kind_s), move |k, r| {
-            if let Err(e) = r {
-                k.m.fail_msg(&id, e);
-            }
-        });
+        self.spawn(
+            move |s| core::engine_send(s, uid, peer, body, kind_s),
+            move |k, r| {
+                if let Err(e) = r {
+                    k.m.fail_msg(&id, e);
+                }
+            },
+        );
     }
 
     /// Checks the size limit, then asks the person to confirm.
     pub fn ask_send_files(&mut self, to: &str, files: Vec<PickedFile>) {
-        let ok: Vec<PickedFile> = files.iter().filter(|f| f.size <= fmt::FILE_LIMIT_BYTES).cloned().collect();
+        let ok: Vec<PickedFile> = files
+            .iter()
+            .filter(|f| f.size <= fmt::FILE_LIMIT_BYTES)
+            .cloned()
+            .collect();
         if ok.len() < files.len() {
             self.warn(format!(
                 "Files over {} cannot be sent: radio is too slow for them. Zip or shrink the file, or send it another way.",
@@ -711,7 +859,10 @@ impl Kahf {
             ));
         }
         if !ok.is_empty() {
-            self.m.pending_files = Some(PendingFiles { to: to.to_string(), files: ok });
+            self.m.pending_files = Some(PendingFiles {
+                to: to.to_string(),
+                files: ok,
+            });
         }
     }
 
@@ -750,11 +901,14 @@ impl Kahf {
         });
         self.mark_dirty();
         let (uid, path) = (id.clone(), file.path);
-        self.spawn(move |s| core::engine_send_file(s, uid, peer, path), move |k, r| {
-            if let Err(e) = r {
-                k.m.fail_msg(&id, e);
-            }
-        });
+        self.spawn(
+            move |s| core::engine_send_file(s, uid, peer, path),
+            move |k, r| {
+                if let Err(e) = r {
+                    k.m.fail_msg(&id, e);
+                }
+            },
+        );
     }
 
     pub fn send_voice(&mut self, to: &str, clip: VoiceClip) {
@@ -784,11 +938,14 @@ impl Kahf {
         });
         self.mark_dirty();
         let (uid, clip_id) = (id.clone(), clip.id);
-        self.spawn(move |s| core::voice_send(s, uid, peer, clip_id), move |k, r| {
-            if let Err(e) = r {
-                k.m.fail_msg(&id, e);
-            }
-        });
+        self.spawn(
+            move |s| core::voice_send(s, uid, peer, clip_id),
+            move |k, r| {
+                if let Err(e) = r {
+                    k.m.fail_msg(&id, e);
+                }
+            },
+        );
     }
 
     pub fn send_mail(&mut self) -> bool {
@@ -801,7 +958,11 @@ impl Kahf {
             return false;
         }
         let id = self.m.new_id(now_ms());
-        let subject = if self.ui.mail_subject.trim().is_empty() { "(no subject)".to_string() } else { self.ui.mail_subject.trim().to_string() };
+        let subject = if self.ui.mail_subject.trim().is_empty() {
+            "(no subject)".to_string()
+        } else {
+            self.ui.mail_subject.trim().to_string()
+        };
         let body = self.ui.mail_body.clone();
         let files = std::mem::take(&mut self.ui.mail_files);
         self.m.mail.push(MailItem {
@@ -811,7 +972,14 @@ impl Kahf {
             subject: subject.clone(),
             body: body.clone(),
             at: now_ms(),
-            files: files.iter().map(|f| MailFile { name: f.name.clone(), size: f.size, path: Some(f.path.clone()) }).collect(),
+            files: files
+                .iter()
+                .map(|f| MailFile {
+                    name: f.name.clone(),
+                    size: f.size,
+                    path: Some(f.path.clone()),
+                })
+                .collect(),
             state: Some(OutState::Queued),
             note: None,
             read: true,
@@ -819,14 +987,17 @@ impl Kahf {
         self.mark_dirty();
         let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
         let uid = id.clone();
-        self.spawn(move |s| core::engine_send_mail(s, uid, peer, subject, body, paths), move |k, r| {
-            if let Err(e) = r {
-                k.m.update_mail(&id, |m| {
-                    m.state = Some(OutState::Failed);
-                    m.note = Some(e);
-                });
-            }
-        });
+        self.spawn(
+            move |s| core::engine_send_mail(s, uid, peer, subject, body, paths),
+            move |k, r| {
+                if let Err(e) = r {
+                    k.m.update_mail(&id, |m| {
+                        m.state = Some(OutState::Failed);
+                        m.note = Some(e);
+                    });
+                }
+            },
+        );
         self.ui.mail_subject.clear();
         self.ui.mail_body.clear();
         true
@@ -841,7 +1012,9 @@ impl Kahf {
                 k.m.recording = true;
                 k.ui.rec_start = Some(Instant::now());
             }
-            Err(e) => k.warn(format!("Could not record: {e}. Check the microphone in Settings, under Radio.")),
+            Err(e) => k.warn(format!(
+                "Could not record: {e}. Check the microphone in Settings, under Radio."
+            )),
         });
     }
 
@@ -864,14 +1037,14 @@ impl Kahf {
         self.m.recording = false;
         self.m.record_level = 0.0;
         self.ui.rec_start = None;
-        self.spawn(|s| core::voice_cancel(s), |_, _| {});
+        self.spawn(core::voice_cancel, |_, _| {});
     }
 
     /// Plays or stops a voice note.
     pub fn toggle_play(&mut self, id: &str, path: Option<String>, seconds: f64) {
         if self.ui.playing.as_ref().is_some_and(|p| p.0 == id) {
             self.ui.playing = None;
-            self.spawn(|s| core::voice_stop_play(s), |_, _| {});
+            self.spawn(core::voice_stop_play, |_, _| {});
             return;
         }
         let Some(path) = path else {
@@ -879,17 +1052,22 @@ impl Kahf {
             return;
         };
         self.ui.playing = Some((id.to_string(), Instant::now(), seconds));
-        self.spawn(move |s| core::voice_play(s, path), |k, r| {
-            if let Err(e) = r {
-                k.ui.playing = None;
-                k.warn(format!("Could not play it: {e}"));
-            }
-        });
+        self.spawn(
+            move |s| core::voice_play(s, path),
+            |k, r| {
+                if let Err(e) = r {
+                    k.ui.playing = None;
+                    k.warn(format!("Could not play it: {e}"));
+                }
+            },
+        );
     }
 
     /// Opens the system's file chooser; `done` gets the files chosen.
     pub fn pick_files(&mut self, done: impl FnOnce(&mut Kahf, Vec<PickedFile>)) {
-        let picked = alloy_ui::files::open_many().title("Choose files to send").pick_all();
+        let picked = alloy_ui::files::open_many()
+            .title("Choose files to send")
+            .pick_all();
         let described = core::describe_files(&picked);
         let files: Vec<PickedFile> = described.into_iter().filter_map(|v| parse(v).ok()).collect();
         if !files.is_empty() {
@@ -918,49 +1096,63 @@ impl Kahf {
 
     pub fn set_relay(&mut self, on: bool) {
         let (licence, terms) = (self.ui.licence, self.ui.terms);
-        self.spawn(move |s| core::engine_set_relay(s, on, licence, terms), move |k, r| match r {
-            Err(e) => k.warn(e),
-            Ok(()) => {
-                k.set(|s| s.relay = on);
-                k.refresh_live();
-                if on {
-                    k.share_on_map();
+        self.spawn(
+            move |s| core::engine_set_relay(s, on, licence, terms),
+            move |k, r| match r {
+                Err(e) => k.warn(e),
+                Ok(()) => {
+                    k.set(|s| s.relay = on);
+                    k.refresh_live();
+                    if on {
+                        k.share_on_map();
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     pub fn share_on_map(&mut self) {
-        self.spawn(|s| core::map_share(s), |k, r| match r {
+        self.spawn(core::map_share, |k, r| match r {
             Ok(t) => k.toast(t, ToastKind::Info),
             Err(e) => k.warn(e),
         });
     }
 
     pub fn refresh_relay_directory(&mut self, refresh: bool) {
-        self.spawn(move |s| core::relay_directory(s, refresh), move |k, r| match r {
-            Ok(rows) => {
-                k.m.relays = rows.into_iter().filter_map(|v| parse(v).ok()).collect();
-                if refresh {
-                    let n = k.m.relays.len();
-                    k.toast(format!("{n} relay{} known.", if n == 1 { "" } else { "s" }), ToastKind::Info);
+        self.spawn(
+            move |s| core::relay_directory(s, refresh),
+            move |k, r| match r {
+                Ok(rows) => {
+                    k.m.relays = rows.into_iter().filter_map(|v| parse(v).ok()).collect();
+                    if refresh {
+                        let n = k.m.relays.len();
+                        k.toast(
+                            format!("{n} relay{} known.", if n == 1 { "" } else { "s" }),
+                            ToastKind::Info,
+                        );
+                    }
                 }
-            }
-            Err(e) => {
-                if refresh {
-                    k.warn(format!("Could not reach the server: {e}. KAHF still works without it."));
+                Err(e) => {
+                    if refresh {
+                        k.warn(format!(
+                            "Could not reach the server: {e}. KAHF still works without it."
+                        ));
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     pub fn set_relay_hints(&mut self, calls: Vec<String>) {
         self.set(|s| s.relay_hints = calls.clone());
-        self.spawn(move |s| core::engine_set_relay_hints(s, calls), |k, r| {
-            if let Err(e) = r {
-                k.warn(e);
-            }
-        });
+        self.spawn(
+            move |s| core::engine_set_relay_hints(s, calls),
+            |k, r| {
+                if let Err(e) = r {
+                    k.warn(e);
+                }
+            },
+        );
     }
 
     /// Rereads what the engine keeps outside the window: the relay's numbers and the logbook.
@@ -983,7 +1175,7 @@ impl Kahf {
     }
 
     pub fn refresh_book(&mut self) {
-        self.spawn(|s| core::logbook(s), |k, v| {
+        self.spawn(core::logbook, |k, v| {
             if let Ok(b) = parse::<Logbook>(v) {
                 k.m.book = b;
             }
@@ -1000,24 +1192,33 @@ impl Kahf {
     pub fn upload_logbook(&mut self, service: &'static str) {
         let cfg = serde_json::to_value(&self.m.settings.export_services).unwrap_or(json!({}));
         self.ui.upload_busy = true;
-        self.spawn(move |s| core::upload_logbook(s, service.to_string(), cfg), |k, r| {
-            k.ui.upload_busy = false;
-            match r {
-                Ok(t) => k.toast(t, ToastKind::Good),
-                Err(e) => k.warn(e),
-            }
-        });
+        self.spawn(
+            move |s| core::upload_logbook(s, service.to_string(), cfg),
+            |k, r| {
+                k.ui.upload_busy = false;
+                match r {
+                    Ok(t) => k.toast(t, ToastKind::Good),
+                    Err(e) => k.warn(e),
+                }
+            },
+        );
     }
 
     pub fn check_update(&mut self) {
         self.ui.update = None;
-        self.spawn(|_| core::check_update(), |k, r| {
-            k.ui.update = Some(r.and_then(parse::<UpdateCheck>));
-        });
+        self.spawn(
+            |_| core::check_update(),
+            |k, r| {
+                k.ui.update = Some(r.and_then(parse::<UpdateCheck>));
+            },
+        );
     }
 
     pub fn check_server(&mut self) {
-        self.spawn(|_| core::server_status(), |k, v| k.ui.server = parse::<ServerCheck>(v).ok());
+        self.spawn(
+            |_| core::server_status(),
+            |k, v| k.ui.server = parse::<ServerCheck>(v).ok(),
+        );
     }
 }
 
@@ -1034,21 +1235,18 @@ fn log_line(text: &str) {
     eprintln!("kahf: {text}");
 }
 
-/// Where things are, for tests and the About page.
-#[allow(dead_code)]
-pub fn pretty_path(p: &PathBuf) -> String {
-    p.display().to_string()
-}
-
 impl Kahf {
     /// Starts the engine with the draft settings of setup, so the person can see the spectrum
     /// move before finishing. Nothing is saved.
     pub fn preview_engine(&mut self, s: Settings) {
         let v = serde_json::to_value(&s).unwrap_or(Value::Null);
-        self.spawn(move |sh| core::engine_start(sh, v), |k, r| {
-            if let Err(e) = r {
-                k.m.engine_error = explain_start_error(&e);
-            }
-        });
+        self.spawn(
+            move |sh| core::engine_start(sh, v),
+            |k, r| {
+                if let Err(e) = r {
+                    k.m.engine_error = explain_start_error(&e);
+                }
+            },
+        );
     }
 }
