@@ -268,6 +268,8 @@ pub struct Ui {
     pub help_query: String,
     /// The moment the support note may appear.
     pub nudge_at: Option<Instant>,
+    /// The saved theme still has to be applied: the window does not exist yet while `init` runs.
+    pub theme_pending: bool,
 }
 
 impl Ui {
@@ -314,6 +316,7 @@ impl Ui {
             call_edit: settings.callsign.clone(),
             help_query: String::new(),
             nudge_at: None,
+            theme_pending: true,
         }
     }
 }
@@ -414,6 +417,10 @@ impl Kahf {
 
     /// Takes in what came from the engine and from finished work. Called 25 times a second.
     pub fn pump(&mut self) {
+        if self.ui.theme_pending {
+            self.ui.theme_pending = false;
+            self.apply_theme();
+        }
         if self.ui.nudge_at.is_some_and(|t| Instant::now() >= t) {
             self.ui.nudge_at = None;
             self.ui.support_nudge = true;
@@ -535,7 +542,6 @@ impl Kahf {
         });
         self.refresh_book();
         self.m.ready = true;
-        self.apply_theme();
         self.maybe_nudge();
     }
 
