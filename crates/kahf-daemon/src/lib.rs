@@ -136,10 +136,12 @@ const PREAMBLE_THRESHOLD: f64 = 0.5;
 const PREAMBLE_REFINE: usize = 24;
 /// How long after a burst its playback may still come back to us (a virtual cable, a monitor).
 /// A link nobody has used for this long is closed by a relay that has something to deliver.
+/// How long after the peer's last DATA frame it keeps the turn.
+const PEER_TURN_HOLD: Duration = Duration::from_millis(2500);
 /// How long after a hang-up it is sent a second time.
 const DISC_REPEAT: Duration = Duration::from_millis(2500);
 const LINK_IDLE_DROP: Duration = Duration::from_secs(20);
-const ECHO_WINDOW: Duration = Duration::from_millis(1500);
+const ECHO_WINDOW: Duration = Duration::from_secs(8);
 /// How far below the strongest correlation a repeat may be and still count as a peak.
 const PEAK_TOLERANCE: f64 = 0.05;
 const LEAD_SILENCE: usize = RATE as usize / 5; // lets PTT and VOX settle
@@ -2060,6 +2062,9 @@ struct Worker {
     /// A hang-up frame to send a second time, in case the first was lost (the other station may
     /// have been transmitting and deaf): when, and the frame.
     disc_again: Option<(Instant, Vec<u8>)>,
+    /// When a DATA frame of the peer was last heard: the peer has the turn, and is waiting for
+    /// our acknowledgement or about to send more.
+    peer_data_at: Option<Instant>,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -2224,6 +2229,7 @@ impl Worker {
             echoes: VecDeque::new(),
             last_link_activity: Instant::now(),
             disc_again: None,
+            peer_data_at: None,
             watch: lbt::ChannelWatch::new(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -2571,6 +2577,9 @@ impl Worker {
     /// Items for other stations are skipped, so they never block the ones that can go.
     fn next_due(&mut self) -> Option<(u64, Payload)> {
         if tx_refusal(&self.shared.flags).is_some() {
+            return None;
+        }
+        if self.peer_has_turn() {
             return None;
         }
         if !self.transmit_allowed() || !self.relay_slot_open() {
@@ -2958,6 +2967,12 @@ impl Worker {
     /// Runs link timers (handshake retries, DATA retransmits) on the monotonic clock.
     /// True while a burst of ours is on the air or built and about to go. Frames held back
     /// by the channel check or a closed slot do not count, so a dead link still times out.
+    /// The peer sent DATA a moment ago, so it has the turn: our own data waits for its
+    /// acknowledgement round to end instead of talking over it (the channel is half duplex).
+    fn peer_has_turn(&self) -> bool {
+        self.peer_data_at.is_some_and(|t| t.elapsed() < PEER_TURN_HOLD)
+    }
+
     fn airing(&self) -> bool {
         self.tx.is_some() || !self.bursts.is_empty()
     }
@@ -2968,7 +2983,9 @@ impl Worker {
     /// covers the peer's reply, again and again.
     fn tick_link(&mut self) {
         let now = Instant::now();
-        if !self.airing() {
+        // The link's clock runs only while the channel is ours or idle: not while we transmit,
+        // not while the peer's signal is on the air, and not while the peer has the turn.
+        if !self.airing() && !self.peer_has_turn() && !self.watch.busy_now(now) {
             self.link_ms += now.duration_since(self.link_mark).as_millis() as u64;
         }
         self.link_mark = now;
@@ -3130,7 +3147,10 @@ impl Worker {
                 let secs = job.samples.len() as f64 / RATE as f64;
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(Instant::now());
+                self.watch.tx_finished(
+                    Instant::now(),
+                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
+                );
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -3138,7 +3158,10 @@ impl Worker {
             Err(e) => {
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(Instant::now());
+                self.watch.tx_finished(
+                    Instant::now(),
+                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
+                );
                 self.emit_tx(TxState::Failed(e.clone()));
                 self.log(format!("transmit failed: {e}"));
                 true
@@ -3367,7 +3390,7 @@ impl Worker {
         let until =
             Instant::now() + Duration::from_secs_f64(burst_samples as f64 / RATE as f64) + ECHO_WINDOW;
         self.echoes.push_back((until, frames));
-        while self.echoes.len() > 16 {
+        while self.echoes.len() > 64 {
             self.echoes.pop_front();
         }
     }
@@ -3502,6 +3525,9 @@ impl Worker {
             return;
         }
         self.last_link_activity = Instant::now();
+        if payload.first() == Some(&0x10) {
+            self.peer_data_at = Some(Instant::now());
+        }
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
@@ -4664,10 +4690,7 @@ mod tests {
 
     /// The same, end to end: two stations on a shared bus with a quiet signal and a noise floor
     /// (what a real sound path such as BlackHole delivers) still connect.
-    // Real time and sensitive to the CPU: run with `cargo test -p kahf-daemon -- --ignored`, as
-    // the soak test does. The same engine is checked on real devices by `examples/soak.rs`.
     #[test]
-    #[ignore]
     fn two_stations_connect_over_a_quiet_noisy_bus() {
         let _rt = realtime();
         let (mut a, mut b) = shared_bus_noisy(["ZZ1ALPHA", "ZZ2BRAVO"], "noisy", 0.0063, 0.0002);
@@ -4740,6 +4763,40 @@ mod tests {
     }
 
     #[test]
+    fn our_data_waits_while_the_peer_has_the_turn() {
+        let _rt = realtime();
+        let mut w = bare_worker("turn", "AA1AAA");
+        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "my turn later")], vec![5], false);
+        w.link_state = LinkState::Connected {
+            peer: "BB1BBB".into(),
+        };
+        assert!(w.next_due().is_some(), "an idle channel holds up our data");
+        // The peer's DATA was just heard: it has the turn.
+        w.on_frame(vec![0x10, 0, b'x']);
+        assert!(w.peer_has_turn());
+        assert!(w.next_due().is_none(), "our data went out over the peer's turn");
+        // Its turn runs out when it sends no more.
+        w.peer_data_at = Some(Instant::now() - PEER_TURN_HOLD - Duration::from_millis(10));
+        assert!(!w.peer_has_turn());
+        assert!(w.next_due().is_some());
+    }
+
+    #[test]
+    fn the_link_clock_stands_still_in_the_peers_turn() {
+        let _rt = realtime();
+        let mut w = bare_worker("turn-clock", "AA1AAA");
+        w.link_mark = Instant::now() - Duration::from_millis(500);
+        w.tick_link();
+        let idle = w.link_ms;
+        assert!(idle >= 400, "the clock did not run on an idle channel: {idle}");
+        w.peer_data_at = Some(Instant::now());
+        w.link_mark = Instant::now() - Duration::from_millis(500);
+        w.tick_link();
+        assert_eq!(w.link_ms, idle, "the clock ran during the peer's turn");
+    }
+
+    #[test]
     fn our_own_frames_played_back_are_recognised_and_other_frames_are_not() {
         let mut w = bare_worker("own-echo", "AA1AAA");
         let mine = vec![0x10, 3, b'h', b'i'];
@@ -4751,10 +4808,7 @@ mod tests {
         assert!(!w.is_own_echo(&mine));
     }
 
-    // Real time and sensitive to the CPU: run with `cargo test -p kahf-daemon -- --ignored`, as
-    // the soak test does. The same engine is checked on real devices by `examples/soak.rs`.
     #[test]
-    #[ignore]
     fn two_stations_on_one_shared_audio_bus_connect_and_talk() {
         let _rt = realtime();
         let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], "bus");
