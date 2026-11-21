@@ -1,0 +1,20 @@
+[package]
+name = "kahf-app-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Everything the KAHF desktop app does besides drawing: the engine, radio control, voice notes, logbook and relay status"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+kahf-daemon = { path = "../kahf-daemon" }
+kahf-audio = { path = "../kahf-audio" }
+kahf-core = { path = "../kahf-core" }
+kahf-sdr = { path = "../kahf-sdr" }
+kahf-log = { path = "../kahf-log" }
+kahf-prop = { path = "../kahf-prop" }
+kahf-rig = { path = "../kahf-rig" }
+kahf-export = { path = "../kahf-export" }
+codec2 = "0.3.1"
+ureq = "2"
