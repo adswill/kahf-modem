@@ -200,6 +200,51 @@ pub enum Scan {
 /// Fewest samples worth scanning: a preamble and a minimal burst.
 pub const MIN_SCAN_SAMPLES: usize = 4000;
 
+/// Decoder iterations of the cheap first pass of [`scan`].
+const QUICK_ITERS: usize = 10;
+
+/// Decodes the burst as `n` codewords of ladder mode `i`, or `None` when that guess is wrong.
+fn try_hypothesis(
+    wf: &phy::WeakFrame,
+    i: usize,
+    n: usize,
+    end: usize,
+    variants: &[Option<usize>],
+    iters: usize,
+) -> Option<Heard> {
+    let mode = &LADDER[i];
+    let sets = wf.llrs(mode.modulation, mode.coded_bits(n), variants)?;
+    let cws: Vec<Option<(Vec<u8>, u8)>> = (0..n)
+        .map(|c| {
+            sets.iter().find_map(|llr| {
+                let (data, id) = ldpc::decode(&combine(llr, mode, n, c), iters)
+                    .and_then(|b| frame::parse_payload_id(&b))?;
+                // The kind bits (2..1) are free; everything else must match this guess.
+                let want = descriptor(mode, n > 1, FrameKind::Link);
+                (id & !0b110 == want).then_some((data, id))
+            })
+        })
+        .collect();
+    // Every decoded codeword carries the burst's kind; the first one speaks for it.
+    let kind = cws
+        .iter()
+        .flatten()
+        .map(|(_, id)| FrameKind::from_bits(id >> 1))
+        .next()?;
+    let frames = cws
+        .into_iter()
+        .flatten()
+        .map(|(d, _)| d)
+        .filter(|f| !f.is_empty())
+        .collect();
+    Some(Heard {
+        mode: i,
+        kind,
+        frames,
+        end,
+    })
+}
+
 /// Look for a burst of any mode in `samples` (about the last 16 s of audio). `prefer` is the
 /// ladder index tried first (the mode last heard). Cost is about 0.2 s of CPU per call when a
 /// preamble is present or not, a little more after a hit.
@@ -223,42 +268,15 @@ pub fn scan(samples: &[f32], prefer: usize) -> Scan {
         }
     }
     hyps.sort_by_key(|&(i, _, end)| (i != prefer, end));
-    for (i, n, end) in hyps {
-        let mode = &LADDER[i];
-        let Some(sets) = wf.llrs(mode.modulation, mode.coded_bits(n), &VARIANTS) else {
-            continue;
-        };
-        let cws: Vec<Option<(Vec<u8>, u8)>> = (0..n)
-            .map(|c| {
-                sets.iter().find_map(|llr| {
-                    let (data, id) = ldpc::decode(&combine(llr, mode, n, c), 50)
-                        .and_then(|b| frame::parse_payload_id(&b))?;
-                    // The kind bits (2..1) are free; everything else must match this guess.
-                    let want = descriptor(mode, n > 1, FrameKind::Link);
-                    (id & !0b110 == want).then_some((data, id))
-                })
-            })
-            .collect();
-        if cws.iter().any(|c| c.is_some()) {
-            // Every decoded codeword carries the burst's kind; the first one speaks for it.
-            let kind = cws
-                .iter()
-                .flatten()
-                .map(|(_, id)| FrameKind::from_bits(id >> 1))
-                .next()
-                .unwrap_or_default();
-            let frames = cws
-                .into_iter()
-                .flatten()
-                .map(|(d, _)| d)
-                .filter(|f| !f.is_empty())
-                .collect();
-            return Scan::Heard(Heard {
-                mode: i,
-                kind,
-                frames,
-                end,
-            });
+    // A wrong guess costs a full demodulation and a failed decode, about a second for all of them,
+    // which the receiver cannot afford while the peer sits on another rung. So first a cheap pass
+    // (static channel estimate, few decoder iterations) over every guess; only when nothing in it
+    // decodes, the thorough pass with tracked estimates and the full iteration count.
+    for (variants, iters) in [(&VARIANTS[..1], QUICK_ITERS), (&VARIANTS[..], 50)] {
+        for &(i, n, end) in &hyps {
+            if let Some(heard) = try_hypothesis(&wf, i, n, end, variants, iters) {
+                return Scan::Heard(heard);
+            }
         }
     }
     Scan::Pending { from }
