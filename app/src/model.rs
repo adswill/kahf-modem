@@ -675,14 +675,14 @@ impl Model {
         }
     }
 
-    /// A signal inside the KAHF channel (0.3 to 2.7 kHz) well above the floor lights the meter.
+    /// A signal inside the KAHF lane (1.26 to 1.74 kHz) well above the floor lights the meter.
     fn update_signal(&mut self, bins: &[f32], now_ms: i64) {
         let n = bins.len();
         if n == 0 {
             return;
         }
-        let lo = (300 * n) / 4000;
-        let hi = ((2700 * n) / 4000).max(lo + 1).min(n);
+        let lo = (1260 * n) / 4000;
+        let hi = ((1740 * n) / 4000).max(lo + 1).min(n);
         let band = &bins[lo.min(hi - 1)..hi];
         let mean = band.iter().sum::<f32>() / band.len().max(1) as f32;
         let mut sorted = bins.to_vec();

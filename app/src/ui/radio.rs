@@ -52,10 +52,18 @@ pub fn view(k: &Kahf) -> V {
             .dim(),
     ]
     .gap(10.0);
-    side = side.push(
-        tabs(lanes.iter().map(|c| c.name.as_str()), current.unwrap_or(5))
-            .act(|k: &mut Kahf, i: usize| k.set_frequency(bands::channels()[i].khz)),
-    );
+    for half in lanes.chunks(6) {
+        let mut r = row![].gap(6.0);
+        for ch in half {
+            let khz = ch.khz;
+            r = r.push(
+                button(ch.name.clone())
+                    .nav(current == Some(ch.index))
+                    .act(move |k: &mut Kahf| k.set_frequency(khz)),
+            );
+        }
+        side = side.push(r);
+    }
     if let Some(i) = current {
         side = side.push(caption(format!("{}: {}.", lanes[i].name, lanes[i].what)).dim());
     }
