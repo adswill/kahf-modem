@@ -41,3 +41,4 @@ server/.wrangler/
 # Desktop app
 app/target/
 app/shots/
+graphify-out/
