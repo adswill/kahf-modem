@@ -6,3 +6,12 @@ members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kah
 version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+
+# The modem's signal processing is heavy: optimise it even in debug builds and tests, so the
+# receive thread keeps up in real time (the spectrum must stay at 25 frames a second, and the
+# audio of a sound card must be decoded as fast as it arrives).
+[profile.dev.package.kahf-core]
+opt-level = 3
+
+[profile.dev.package.kahf-daemon]
+opt-level = 2
