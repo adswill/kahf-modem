@@ -1,7 +1,7 @@
 //! Engine events to the JSON the window understands (see `ui/src/lib/types.ts`).
 
 use kahf_core::link::LinkState;
-use kahf_daemon::{Event, TxState};
+use kahf_daemon::{Delivery, Event, TxState};
 use serde_json::{json, Value};
 
 /// A message the window sent that is still in the engine's outbox.
@@ -58,6 +58,13 @@ pub fn event_json(ev: &Event, pending: &[Pending]) -> Vec<Value> {
         Event::FileProgress { id, name, done, total } => match pending.iter().find(|p| p.engine_id == *id) {
             Some(p) => vec![json!({
                 "type": "file", "id": p.ui_id, "name": name, "done": done, "total": total, "dir": "out"
+            })],
+            None => Vec::new(),
+        },
+        Event::Delivery { id, state, note } => match pending.iter().find(|p| p.engine_id == *id) {
+            Some(p) => vec![json!({
+                "type": "delivery", "id": p.ui_id, "note": note,
+                "state": match state { Delivery::AtRelay => "atrelay", Delivery::Delivered => "delivered", Delivery::Waiting => "waiting" }
             })],
             None => Vec::new(),
         },

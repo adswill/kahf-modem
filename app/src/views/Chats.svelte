@@ -55,6 +55,9 @@
       case "queued": return app.settings.autoLink ? "waiting for the channel" : "waiting";
       case "calling": return "reaching them";
       case "sending": return "sending";
+      case "atrelay": return "a relay has it";
+      case "delivered": return "delivered";
+      case "waiting": return m.note ?? "no answer yet, trying again";
       case "sent": return "sent";
       case "failed": return "not delivered";
       default: return "";
@@ -259,7 +262,7 @@
                 <div class="fn">{m.attachment.name}</div>
                 <div class="faint small">
                   {sizeWords(m.attachment.size)}
-                  {#if m.dir === "out" && m.state !== "sent" && m.state !== "failed" && m.attachment.done}· {Math.round(((m.attachment.done ?? 0) / Math.max(1, m.attachment.size)) * 100)}%{/if}
+                  {#if m.dir === "out" && m.state !== "sent" && m.state !== "delivered" && m.state !== "atrelay" && m.state !== "failed" && m.attachment.done}· {Math.round(((m.attachment.done ?? 0) / Math.max(1, m.attachment.size)) * 100)}%{/if}
                 </div>
                 {#if m.dir === "out" && m.state === "sending"}
                   <div class="prog"><i style:width={`${Math.min(100, ((m.attachment.done ?? 0) / Math.max(1, m.attachment.size)) * 100)}%`}></i></div>
@@ -274,7 +277,7 @@
           <div class="meta small faint mono">
             {#if m.kind !== "chat"}<span class="tag warn">{m.kind}</span>{/if}
             <span>{clock(m.at)}</span>
-            {#if m.dir === "out"}<span class:okc={m.state === "sent"} class:badc={m.state === "failed"}>· {stateText(m)}</span>{/if}
+            {#if m.dir === "out"}<span class:okc={m.state === "sent" || m.state === "delivered" || m.state === "atrelay"} class:badc={m.state === "failed"}>· {stateText(m)}</span>{/if}
           </div>
           {#if m.state === "failed"}
             <div class="why small">

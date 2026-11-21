@@ -120,7 +120,9 @@ export interface RelayInfo {
   source: "server" | "heard" | "manual";
   lastSeen: number | null;
 }
-export type OutState = "queued" | "calling" | "sending" | "sent" | "failed";
+/** queued: waiting for a clear lane; sending: on the air; atrelay: a relay answered; delivered: the receiver answered;
+ * waiting: nobody answered, it is tried again; sent: left the outbox (fallback); failed: given up, with a reason. */
+export type OutState = "queued" | "calling" | "sending" | "atrelay" | "delivered" | "waiting" | "sent" | "failed";
 
 export interface Msg {
   id: string;
@@ -212,6 +214,7 @@ export type EngineEvent =
   | { type: "spectrum"; bins: number[] }
   | { type: "tx"; state: "starting" | "sending" | "done" | "failed"; reason?: string }
   | { type: "sent"; id: string }
+  | { type: "delivery"; id: string; state: "atrelay" | "delivered" | "waiting"; note?: string }
   | { type: "failed"; id: string; reason: string }
   | { type: "file"; name: string; done: number; total: number; dir: "in" | "out"; id: string; from?: string; path?: string }
   | { type: "mail"; from: string; subject: string; body: string; at: number; files: { name: string; size: number; path?: string }[] }

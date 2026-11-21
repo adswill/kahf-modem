@@ -69,6 +69,17 @@ pub struct Config {
     pub data_dir: PathBuf,
 }
 
+/// The delivery states the sender sees (MESH-SPEC 7.2), besides waiting, sending and failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// A relay answered: the message is on its way.
+    AtRelay,
+    /// The station it is for answered.
+    Delivered,
+    /// Nobody answered; it stays in the outbox and is tried again.
+    Waiting,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Link(kahf_core::link::LinkState),
@@ -125,6 +136,9 @@ pub enum Event {
     Metrics(LinkStatus),
     /// A station was heard on the air: its callsign and the SNR (dB) of the burst, if known.
     Heard { call: String, snr_db: Option<f32> },
+    /// Where a message of ours stands, by its public id: answered by a relay on its way, delivered (answered
+    /// by the station it is for), or waiting because the other side did not answer (it is tried again).
+    Delivery { id: u64, state: Delivery, note: String },
     Log(String),
     /// Transmit progress: Starting (PTT on), Sending (audio handed to the radio),
     /// Done (PTT off) or Failed (with the reason).
@@ -298,7 +312,7 @@ struct Flags {
     /// Occupancy reports waiting for the server link (kept in memory, newest last).
     occupancy: Mutex<VecDeque<OccupancyReport>>,
     /// Referee counters since start: rounds run, requests heard, grants given.
-    ref_counts: [AtomicU64; 3],
+    ref_counts: [AtomicU64; 4],
 }
 
 /// The transmit gate's settings. The built-in table is **not verified** (`plan_verified` is
@@ -338,7 +352,7 @@ impl Flags {
             radio_known: AtomicBool::new(false),
             radio_dial_hz: AtomicU64::new(0),
             occupancy: Mutex::new(VecDeque::new()),
-            ref_counts: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            ref_counts: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 }
@@ -624,6 +638,11 @@ impl Engine {
     pub fn referee_counts(&self) -> (u64, u64, u64) {
         let c = &self.shared.flags.ref_counts;
         (c[0].load(Ordering::Relaxed), c[1].load(Ordering::Relaxed), c[2].load(Ordering::Relaxed))
+    }
+
+    /// How many "I am here" frames from operators this relay has heard since start.
+    pub fn heres_heard(&self) -> u64 {
+        self.shared.flags.ref_counts[3].load(Ordering::Relaxed)
     }
 
     /// The newest occupancy report, without taking it from the queue.
@@ -2757,7 +2776,13 @@ impl Worker {
     fn backbone_step(&mut self) {
         self.bb_ensure();
         self.beacon_step();
-        let Some(bb) = &self.bb else { return };
+        let Some(bb) = &self.bb else {
+            self.refs.here_seen.clear();
+            return;
+        };
+        if !self.refs.here_seen.is_empty() {
+            bb.send(BbJob::HeardHash(std::mem::take(&mut self.refs.here_seen)));
+        }
         for r in bb.take_results() {
             match r {
                 BbResult::Pulled(p) => {
@@ -3346,6 +3371,9 @@ impl Worker {
             self.bb_item_done(id, false);
         } else {
             self.log(format!("send failed, will retry: {why}"));
+            if let Some(id) = self.tags.get(&id).map(|t| t.0) {
+                self.emit(Event::Delivery { id, state: Delivery::Waiting, note: why });
+            }
         }
         self.persist_outbox();
     }
@@ -5233,6 +5261,9 @@ mod tests {
             wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "through the relay"), 400).is_some(),
             "the relayed message did not arrive"
         );
+        // A heard the relay answer, not B: the message is "at the relay", not "delivered".
+        let told: Vec<Delivery> = a.poll_events().into_iter().filter_map(|e| if let Event::Delivery { state, .. } = e { Some(state) } else { None }).collect();
+        assert!(told.contains(&Delivery::AtRelay) && !told.contains(&Delivery::Delivered), "{told:?}");
         // The forward is counted when B has acknowledged it, a moment after B showed the message.
         let counted = |r: &Engine| r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64);
         assert!(wait_until(30, || counted(&r) == 1), "one forward counted");
@@ -6079,6 +6110,55 @@ mod tests {
         let older = "P1|99|7|";
         w.bb_plan(99, older, &backbone::b64_encode(&key.sign_raw(older.as_bytes())));
         assert_eq!(w.plan_epoch, Some(100));
+    }
+
+    #[test]
+    fn the_sender_is_told_delivered_when_the_receiver_answered() {
+        let mut e = bus_engines("delivered", &["AA1AAA", "BB1BBB"]);
+        let id = e[0].send_chat("BB1BBB", "did you get this", false).unwrap();
+        let clock = e[0].clock.clone();
+        let t0 = clock.now();
+        let mut states = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(120) && !states.iter().any(|(_, s)| *s == Delivery::Delivered) {
+            for ev in e[0].poll_events() {
+                if let Event::Delivery { id, state, .. } = ev {
+                    states.push((id, state));
+                }
+            }
+            let _ = e[1].poll_events();
+            clock.sleep(Duration::from_millis(20));
+        }
+        assert_eq!(states, vec![(id, Delivery::Delivered)]);
+    }
+
+    #[test]
+    fn an_operator_that_hears_a_relay_tells_it_it_is_here_once_in_a_while() {
+        let mut st = referee_cell("ref-here", 1);
+        let mut z = st.pop().unwrap();
+        let mut a = st.pop().unwrap();
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        // Beacons every 12 s; the operator picks a window slot after the first one it hears.
+        let clock = test_clock();
+        let t0 = clock.now();
+        while clock.now() < t0 + Duration::from_secs(90) && r.heres_heard() == 0 {
+            for e in [&mut r, &mut a, &mut z] {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        assert_eq!(r.heres_heard(), 1, "the relay did not hear an operator say it is here");
+        // Not again within ten minutes.
+        let t1 = clock.now();
+        while clock.now() < t1 + Duration::from_secs(300) {
+            for e in [&mut r, &mut a, &mut z] {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(100));
+        }
+        assert_eq!(r.heres_heard(), 1, "the operator repeated itself inside ten minutes");
     }
 
     #[test]

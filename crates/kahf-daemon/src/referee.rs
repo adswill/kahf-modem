@@ -65,6 +65,11 @@ pub(crate) struct RefState {
     pub acks: Vec<Vec<u8>>,
     // operator side
     relay: Option<RelayView>,
+    /// When this station last told the relay it is here (ms on this station's clock), and when the next try is planned.
+    last_here_ms: Option<u64>,
+    here_at_ms: Option<u64>,
+    /// Stations a relay heard saying they are here: (24 bit hash, SNR dB), waiting to go to the mesh.
+    pub here_seen: Vec<(u32, i32)>,
     op: Op,
     cw: u32,
     quiet_until_ms: u64,
@@ -82,6 +87,9 @@ impl RefState {
             granted: Vec::new(),
             acks: Vec::new(),
             relay: None,
+            last_here_ms: None,
+            here_at_ms: None,
+            here_seen: Vec::new(),
             op: Op::Idle,
             cw: 1,
             quiet_until_ms: 0,
@@ -143,9 +151,10 @@ impl Worker {
         true
     }
 
-    /// Relay: the epoch cycle. Operator: nothing here (its steps run from `ref_gate`).
+    /// Relay: the epoch cycle. Operator: tell the relay it is here, once in a while.
     pub(crate) fn referee_step(&mut self) {
         if !self.is_ref_relay() {
+            self.here_step();
             return;
         }
         let t = self.ref_utc_ms();
@@ -206,6 +215,56 @@ impl Worker {
         }
     }
 
+    /// An operator that hears a relay says so, in a window slot, at most every ten minutes and not
+    /// while it has something to send (a request tells the relay as well). The relay passes only the
+    /// 24 bit hash on to the mesh, which is what presence is made of.
+    fn here_step(&mut self) {
+        const EVERY_MS: u64 = 600_000;
+        if tx_refusal(&self.shared.flags).is_some() || !self.dg.is_idle() {
+            return;
+        }
+        let Some(rel) = self.refs.relay.clone().filter(|_| self.ref_relay_call().is_some()) else {
+            self.refs.here_at_ms = None;
+            return;
+        };
+        let now = self.now_ms();
+        if self.refs.last_here_ms.is_some_and(|t| now.saturating_sub(t) < EVERY_MS) {
+            return;
+        }
+        match self.refs.here_at_ms {
+            None => {
+                let r = 1 + self.dg_jitter(0, 1_000).as_millis() as u64 % WINDOW as u64;
+                let mut k = 0;
+                loop {
+                    let at = rel.slot0_ms + k * EPOCH_MS + r * SLOT_MS + SEND_AT_MS;
+                    if at > now + 300 {
+                        self.refs.here_at_ms = Some(at);
+                        break;
+                    }
+                    k += 1;
+                }
+            }
+            Some(at) if now >= at => {
+                self.refs.here_at_ms = None;
+                if now > at + SEND_LATE_MS {
+                    return;
+                }
+                let snr = self.link.own_snr_db().map_or(0u8, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8);
+                let frame = Frame {
+                    header: bundle::Header { kind: Kind::Here, flags: 0, hops: 0, next_hop: rel.h, source: self.dg.my, index: 0, count: 1 },
+                    body: vec![snr],
+                }
+                .encode();
+                if let Ok(f) = frame {
+                    if self.ref_send(&[f]) {
+                        self.refs.last_here_ms = Some(now);
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
     /// A beacon, request or grant frame addressed to (or heard by) this station.
     pub(crate) fn ref_on_frame(&mut self, f: &Frame) {
         match f.header.kind {
@@ -237,6 +296,12 @@ impl Worker {
                         self.refs.reqs.push((f.header.source, dest, slots.clamp(1, 2)));
                     }
                 }
+            }
+            Kind::Here if self.is_ref_relay() => {
+                let snr = f.body.first().filter(|b| **b > 0).map_or(0, |b| (*b as f32 / 2.0 - 30.0).round() as i32);
+                self.shared.flags.ref_counts[3].fetch_add(1, Ordering::Relaxed);
+                self.refs.here_seen.retain(|(h, _)| *h != f.header.source);
+                self.refs.here_seen.push((f.header.source, snr));
             }
             Kind::Grant if !self.is_ref_relay() => {
                 let Some((_, count, abs)) = rf::decode_grant(f) else { return };

@@ -78,6 +78,11 @@ struct DgSend {
 }
 
 impl DgState {
+    /// Nothing is being sent or waited for.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.sends.is_empty() && self.deadline.is_none()
+    }
+
     /// The first message being sent: its destination and how many chunks are not acknowledged.
     pub(crate) fn first_send(&self) -> Option<(u32, usize)> {
         self.sends.first().map(|s| (s.dest_h, s.acked.iter().filter(|a| !**a).count()))
@@ -391,6 +396,9 @@ impl Worker {
             let s = self.dg.sends.remove(si);
             self.auto_fails.remove(&s.peer.to_uppercase());
             let public = self.tags.get(&s.oid).map(|t| t.0).unwrap_or(s.oid);
+            // The one that answered is the destination itself, or a relay on the way to it.
+            let state = if s.dest_h == f.header.source { Delivery::Delivered } else { Delivery::AtRelay };
+            self.emit(Event::Delivery { id: public, state, note: String::new() });
             self.outbox.done(s.oid);
             self.bb_item_done(s.oid, true);
             self.record_forward(public);
@@ -417,7 +425,7 @@ impl Worker {
         match h.kind {
             Kind::Message => self.dg_on_message(&frame),
             Kind::Ack => self.dg_on_ack(&frame),
-            Kind::Beacon | Kind::Request | Kind::Grant => self.ref_on_frame(&frame),
+            Kind::Beacon | Kind::Request | Kind::Grant | Kind::Here => self.ref_on_frame(&frame),
             _ => {}
         }
     }

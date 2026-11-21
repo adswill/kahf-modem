@@ -196,6 +196,15 @@ impl Backbone {
         self.post_frames(frames).map(|_| ())
     }
 
+    /// Stations that told this relay they are here, by hash.
+    pub fn heard_hashes(&self, list: &[(u32, i32)]) -> Result<(), String> {
+        if list.is_empty() {
+            return Ok(());
+        }
+        let frames: Vec<Value> = list.iter().take(40).map(|(h, snr)| json!({ "t": "heard", "dest": h, "snr": snr, "lane": 0 })).collect();
+        self.post_frames(frames).map(|_| ())
+    }
+
     /// Hands a message to the mesh. `Ok(Routed)` when a relay that hears the destination was found,
     /// `Ok(Unrouted)` when nobody does yet (the caller sends it on the radio), `Ok(Duplicate)` when
     /// another relay already handed over the same id.
@@ -369,6 +378,8 @@ impl Ws {
 /// Work for the server thread.
 pub enum BbJob {
     Heard(Vec<(String, Option<i32>, u64)>),
+    /// Stations that said they are here, by 24 bit hash and SNR: all the mesh ever learns of them.
+    HeardHash(Vec<(u32, i32)>),
     Submit(Queued, u64, u64),
     Pull,
     Receipt(String, bool, String),
@@ -505,6 +516,11 @@ impl BbHandle {
                                 .collect();
                             frames.iter().try_for_each(|f| w.send(f)).is_ok()
                         }
+                        BbJob::HeardHash(list) => list
+                            .iter()
+                            .take(40)
+                            .try_for_each(|(h, snr)| w.send(&json!({ "t": "heard", "dest": h, "snr": snr, "lane": 0 })))
+                            .is_ok(),
                         BbJob::Queue(items, bytes) => w.send(&json!({ "t": "queue", "items": items, "bytes": bytes, "urgency": 0 })).is_ok(),
                         BbJob::Submit(q, _, _) => {
                             let ok = w.send(&submit_frame(q)).is_ok();
@@ -548,6 +564,7 @@ impl BbHandle {
                             }
                         }
                     }
+                    BbJob::HeardHash(list) => report(&out, &mut last_error, bb.heard_hashes(&list), "reporting stations"),
                     BbJob::Queue(items, bytes) => report(&out, &mut last_error, bb.queue(items, bytes), "reporting the queue"),
                     BbJob::Pull => match bb.pull() {
                         Ok(p) => {

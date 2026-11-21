@@ -141,7 +141,7 @@ class AppState {
         id: "send",
         title: "You have sent a message",
         why: "Pick a station, write a line, press Send.",
-        done: this.messages.some((m) => m.dir === "out" && m.state === "sent"),
+        done: this.messages.some((m) => m.dir === "out" && (m.state === "sent" || m.state === "delivered" || m.state === "atrelay")),
       },
     ];
   }
@@ -620,10 +620,22 @@ class AppState {
           for (const m of this.mail) if (m.dir === "out" && (m.state === "queued" || m.state === "calling")) this.updateMail(m.id, { state: "sending" });
         }
         break;
-      case "sent":
-        if (this.mail.some((m) => m.id === e.id)) this.updateMail(e.id, { state: "sent", note: undefined });
-        else this.update(e.id, { state: "sent", note: undefined });
+      case "delivery": {
+        const patch = { state: e.state, note: e.state === "waiting" ? e.note || "No answer yet. KAHF tries again." : undefined };
+        if (this.mail.some((m) => m.id === e.id)) this.updateMail(e.id, patch);
+        else this.update(e.id, patch);
         break;
+      }
+      case "sent": {
+        // The message left the outbox. A more exact word (delivered, at the relay) that arrived first stays.
+        const keep = (s?: string) => s === "delivered" || s === "atrelay";
+        if (this.mail.some((m) => m.id === e.id)) {
+          if (!keep(this.mail.find((m) => m.id === e.id)?.state)) this.updateMail(e.id, { state: "sent", note: undefined });
+        } else if (!keep(this.messages.find((m) => m.id === e.id)?.state)) {
+          this.update(e.id, { state: "sent", note: undefined });
+        }
+        break;
+      }
       case "failed":
         if (this.mail.some((m) => m.id === e.id)) this.updateMail(e.id, { state: "failed", note: e.reason });
         else this.update(e.id, { state: "failed", note: e.reason });

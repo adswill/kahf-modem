@@ -54,7 +54,7 @@
   }
 
   const stateText = (s?: string) =>
-    ({ queued: "waiting for the channel", calling: "reaching them", sending: "sending", sent: "sent", failed: "not delivered" })[s ?? ""] ?? "";
+    ({ queued: "waiting for the channel", calling: "reaching them", sending: "sending", atrelay: "a relay has it", delivered: "delivered", waiting: "no answer yet, trying again", sent: "sent", failed: "not delivered" })[s ?? ""] ?? "";
 </script>
 
 <div class="mail">
@@ -131,7 +131,7 @@
           <div class="row small muted">
             <span>{current.dir === "in" ? "From" : "To"} <span class="call">{current.peer}</span></span>
             <span>·</span><span>{timeAgo(current.at)}</span>
-            {#if current.dir === "out"}<span class="tag {current.state === 'sent' ? 'good' : current.state === 'failed' ? 'bad' : 'warn'}">{stateText(current.state)}</span>{/if}
+            {#if current.dir === "out"}<span class="tag {current.state === 'sent' || current.state === 'delivered' || current.state === 'atrelay' ? 'good' : current.state === 'failed' ? 'bad' : 'warn'}">{stateText(current.state)}</span>{/if}
           </div>
         </header>
         <hr class="rule" />
