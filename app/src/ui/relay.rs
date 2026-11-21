@@ -44,9 +44,7 @@ pub fn view(k: &Kahf) -> V {
 fn use_relays(k: &Kahf) -> V {
     let hints = &k.m.settings.relay_hints;
     let mut c = col![
-        text("A relay is a station that stays on the air and passes messages along, so people who cannot hear each other can still talk. When a station does not answer, KAHF tries the relays you chose here, in order.")
-            .dim()
-            .fill_w(),
+        para("A relay is a station that stays on the air and passes messages along, so people who cannot hear each other can still talk. When a station does not answer, KAHF tries the relays you chose here, in order.", 100),
         row![text("You").label(), text("→ Relay →").accent(), text("Them").label()].gap(12.0),
         row![
             heading("Relays I know").sub(),
@@ -54,9 +52,7 @@ fn use_relays(k: &Kahf) -> V {
             button("Update from kahf.dev").act(|k: &mut Kahf| k.refresh_relay_directory(true)),
         ]
         .align_center(),
-        caption("This list comes from kahf.dev when you are online, and is remembered for when you are not. KAHF works without the internet: relays you add by callsign are used the same way.")
-            .dim()
-            .fill_w(),
+        para("This list comes from kahf.dev when you are online, and is remembered for when you are not. KAHF works without the internet: relays you add by callsign are used the same way.", 100),
     ]
     .gap(10.0);
     if k.m.relays.is_empty() && hints.is_empty() {
@@ -253,7 +249,7 @@ fn run_relay(k: &Kahf) -> V {
         ]
         .gap(10.0),
     );
-    c = c.push(caption("Every twelve seconds the relay announces itself and gives stations a turn on its lane. Nothing is stored on a server: the server only plans which relay serves which lane.").dim().fill_w());
+    c = c.push(para("Every twelve seconds the relay announces itself and gives stations a turn on its lane. Nothing is stored on a server: the server only plans which relay serves which lane.", 100));
     if r.slots.is_empty() {
         c = c.push(caption("No fixed schedule is shown: the relay plans its own turns on the lane.").dim().fill_w());
     } else {
@@ -300,7 +296,7 @@ fn run_relay(k: &Kahf) -> V {
     }
     c = c.push(heading("What it has done").sub());
     if r.recent.is_empty() {
-        c = c.push(text("Nothing forwarded yet. Quiet is normal: relays are used when stations cannot reach each other.").dim().fill_w());
+        c = c.push(para("Nothing forwarded yet. Quiet is normal: relays are used when stations cannot reach each other.", 100));
     } else {
         for h in &r.recent {
             c = c.push(
@@ -332,9 +328,7 @@ fn start_panel(k: &Kahf) -> V {
     let sharing = k.m.settings.location.mode != LocationMode::Off && k.m.settings.location.lat.is_some();
     let ready = k.ui.licence && k.ui.terms && !k.m.settings.listen_only;
     let mut c = col![
-        text("Running a relay means your station passes messages between others, by itself, while your radio stays on. It helps the whole network, and it is a responsibility.")
-            .dim()
-            .fill_w(),
+        para("Running a relay means your station passes messages between others, by itself, while your radio stays on. It helps the whole network, and it is a responsibility.", 100),
         heading("Before you start").sub(),
         text("• Your radio and computer stay on and attended."),
         text("• Your licence allows automatic or unattended operation."),

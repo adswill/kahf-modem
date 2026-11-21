@@ -1,3 +1,5 @@
+import { LANES, LANE_WIDTH_HZ } from "../band.js";
+
 // Body of the kahf.dev home page. A printed chart of the idea: a plotting sheet with range
 // rings and great-circle passages, a ruler of the twelve 17 m lanes, a relay's twelve second
 // round, what you can send, and an honest list of what exists and what does not yet.
@@ -125,14 +127,15 @@ ${labels}${rose}${cart}
 // ---------------------------------------------------------------------------------------
 // The twelve lanes: 700 Hz apart, 480 Hz wide, from 18 111.2 kHz (MESH-SPEC 2.1 and 2.2).
 // ---------------------------------------------------------------------------------------
-const LANE_ROLES = ["relay", "relay", "relay", "relay", "spare", "calling", "calling", "spare", "relay", "relay", "relay", "relay"];
-const LANE_NAMES = ["R1", "R2", "R3", "R4", "X1", "C1", "C2", "X2", "R5", "R6", "R7", "R8"];
+const ROLE_NAME = { R: "relay", C: "calling", X: "spare" };
+const LANE_ROLES = LANES.map((l) => ROLE_NAME[l.role[0]]);
+const LANE_NAMES = LANES.map((l) => l.role);
 const ROLE_WORDS = {
   relay: "Relay lane: relays send to operators here, and bigger transfers use it.",
   calling: "Calling lane: operators ask here, and relays announce themselves. Kept short.",
   spare: "Spare lane: a buffer between busy lanes, and room for a faster transfer when the plan allows it.",
 };
-const laneLower = (k) => 18111200 + 700 * k;
+const laneLower = (k) => LANES[k].lowerHz;
 const mhz = (hz) => (hz / 1e6).toFixed(5);
 
 const RX0 = 18109000, RX1 = 18120200, RW = 1000, RPAD = 30;
@@ -155,8 +158,8 @@ function laneRuler() {
   s += `<text class="dim" x="${RPAD}" y="204" font-size="12">MHz, transmitted frequency. Upper edge of the band plan block: 18.120.</text>`;
   // Lanes.
   LANE_ROLES.forEach((role, k) => {
-    const x0 = rx(laneLower(k)), w = rx(laneLower(k) + 480) - x0, delay = (0.05 * k).toFixed(2);
-    s += `<g class="lane ${role}" tabindex="0" role="button" data-k="${k}" aria-label="Lane ${LANE_NAMES[k]}, ${role}, ${mhz(laneLower(k) + 240)} megahertz">` +
+    const x0 = rx(laneLower(k)), w = rx(laneLower(k) + LANE_WIDTH_HZ) - x0, delay = (0.05 * k).toFixed(2);
+    s += `<g class="lane ${role}" tabindex="0" role="button" data-k="${k}" aria-label="Lane ${LANE_NAMES[k]}, ${role}, ${mhz(LANES[k].centreHz)} megahertz">` +
       `<g class="rise" style="animation-delay:${delay}s"><rect class="bar" x="${f1(x0)}" y="64" width="${f1(w)}" height="86"/>` +
       `<text class="nm" x="${f1(x0 + w / 2)}" y="112" ${role === "spare" ? "" : ""}>${LANE_NAMES[k]}</text></g>` +
       `<rect class="hit" x="${f1(x0 - 4)}" y="40" width="${f1(w + 8)}" height="120"/></g>`;
@@ -166,8 +169,8 @@ function laneRuler() {
 
 function laneTable() {
   const rows = LANE_ROLES.map((role, k) => {
-    const centre = laneLower(k) + 240;
-    return `<tr data-k="${k}"><td>${LANE_NAMES[k]}</td><td>${role[0].toUpperCase() + role.slice(1)}</td><td>${mhz(centre)}</td><td>${mhz(centre - 1500)}</td></tr>`;
+    const centre = LANES[k].centreHz;
+    return `<tr data-k="${k}"><td>${LANE_NAMES[k]}</td><td>${role[0].toUpperCase() + role.slice(1)}</td><td>${mhz(centre)}</td><td>${mhz(LANES[k].dialHz)}</td></tr>`;
   }).join("");
   return `<table class="lanes"><caption>All twelve lanes. The USB dial is where the radio is set so that the lane lands at 1500 Hz of audio.</caption>` +
     `<thead><tr><th scope="col">Lane</th><th scope="col">Role</th><th scope="col">Centre, MHz</th><th scope="col">USB dial, MHz</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -246,7 +249,7 @@ an_operator_asks_the_relay_gets_a_grant_and_the_message_.. <b>ok</b>
 
 test result: ok. 98 passed; 0 failed; 1 ignored</code></pre>
 </div>
-<p class="note">Simulated channel, virtual clock. Core has 343 tests and the server 1173. None of it has touched a real radio.</p>
+<p class="note">Simulated channel, virtual clock. Core has 343 tests and the server 1172. None of it has touched a real radio.</p>
 </div>
 </div>
 

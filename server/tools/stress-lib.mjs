@@ -7,23 +7,21 @@
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 
-// The band segment is the one value shared with the server: it comes from the single
-// constant in src/core.js, so a segment change needs no edit here. Everything derived
-// from it (channel count, frequencies, expected channels) is calculated again below.
-// A remote run therefore expects the server under test to use the same segment as this
-// checkout; a server deployed before the 17 m move fails every band scenario.
-const { BAND_SEGMENT_KHZ, CHANNEL_WIDTH_KHZ } = await import("../src/core.js");
+// The channel plan comes from the one table in src/band.js (twelve 17 m lanes, channel =
+// lane number). Everything the scenarios expect is calculated again below from plain
+// numbers (lane k lower edge = 18_111_200 + 700 k Hz, 700 Hz cells), not from the server's
+// functions. A remote run expects the server under test to use the same plan as this checkout.
+const { BAND_SEGMENT_KHZ, BAND_CHANNELS, reportKhz } = await import("../src/core.js");
 const LOW = BAND_SEGMENT_KHZ.low;
 const HIGH = BAND_SEGMENT_KHZ.high;
-const W10 = Math.round(CHANNEL_WIDTH_KHZ * 10); // channel width in tenths of a kHz
-const NCH = Math.floor(((HIGH - LOW) * 10) / W10);
+const NCH = BAND_CHANNELS;
 const LAST = NCH - 1;
-/** Integer kHz inside channel n. */
-const freqOf = (n) => Math.ceil(LOW + CHANNEL_WIDTH_KHZ * n);
-/** A channel in the middle of the band (channel 1 of 3), used where any valid channel will do. */
+/** Integer kHz inside lane n (reports carry whole kHz; lanes 0, 3, 7 and 10 have none, so fall back to 18112). */
+const freqOf = (n) => reportKhz(n) ?? 18_112;
+/** A lane in the middle of the band, used where any valid channel will do. */
 const MID = Math.floor(NCH / 2);
-/** The channel the default test report is heard on: channel 0, which is in the online pool. */
-const BUSY_CH = 0;
+/** The lane the default test report is heard on: lane 1 (R2), in the online pool. */
+const BUSY_CH = 1;
 
 const enc = new TextEncoder();
 const BASE = "https://kahf.test";
@@ -243,10 +241,10 @@ const tx = (channel, duration, extra = {}) => ({ channel, duration, direction: "
 
 /** Independent channel number for an integer kHz, written without the server's constants. */
 function expectedChannel(khz) {
-  const tenths = Math.round((khz - LOW) * 10);
-  if (tenths < 0) return null;
-  const c = Math.floor(tenths / W10);
-  return c < NCH ? c : null;
+  const off = khz * 1000 - 18_111_200;
+  if (off < 0) return null;
+  const c = Math.floor(off / 700);
+  return c < 12 ? c : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +309,7 @@ S(G.sig, "signature over a different body (frequency changed after signing)", "4
   const k = await h.key();
   const f = reportFields(h);
   const body = await h.sign(k, f);
-  const r = await h.post("/report", { ...body, frequency_khz: LOW + 1 });
+  const r = await h.post("/report", { ...body, frequency_khz: freqOf(BUSY_CH) + 1 });
   status(r, 401);
   eq((await stationsOf(h, f.reporter_call)).length, 0, "stored records");
 });
@@ -826,13 +824,15 @@ S(G.freq, `every integer kHz from ${LOW - 5} to ${HIGH + 5} maps to the channel 
   const missing = [...want].filter((c) => !got.has(c)), extra = [...got].filter((c) => !want.has(c));
   check(missing.length === 0 && extra.length === 0, `missing channels ${snip(missing)}, extra channels ${snip(extra)}`);
 }, {});
-S(G.freq, `channel pools are consistent (${NCH} channels, online and open split cleanly)`, `pools cover 0..${LAST} once; busy channel removed from the area's list`, async (h) => {
+S(G.freq, `channel pools are consistent (12 lanes: online, open and emergency split cleanly)`, `pools cover 0..${LAST} once, by lane role; busy channel removed from the area's list`, async (h) => {
   status((await report(h, { frequency_khz: freqOf(BUSY_CH) })).res, 200);
   const z = (await h.get("/zones")).json;
-  eq(z.pools.bandChannels, NCH, "bandChannels");
-  const all = [...z.pools.online, ...z.pools.open].sort((a, b) => a - b);
-  eq(all, Array.from({ length: NCH }, (_, i) => i), "online + open");
-  check(z.pools.online.every((c) => !z.pools.open.includes(c)), "online and open overlap");
+  eq(z.pools.bandChannels, 12, "bandChannels");
+  const all = [...z.pools.online, ...z.pools.open, ...z.pools.emergency].sort((a, b) => a - b);
+  eq(all, Array.from({ length: 12 }, (_, i) => i), "online + open + emergency");
+  eq(z.pools.online, [0, 1, 2, 3, 8, 9, 10, 11], "online pool is the relay lanes R1-R8");
+  eq(z.pools.open, [5, 6], "open pool is the calling lanes C1, C2");
+  eq(z.pools.emergency, [4, 7], "emergency pool is the spare lanes X1, X2");
   const entry = z.pools.areas.N51W1;
   check(entry, "N51W1 missing from pools.areas");
   check(!entry.channels.includes(BUSY_CH) || !z.pools.online.includes(BUSY_CH), "busy channel is still offered");

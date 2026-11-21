@@ -95,12 +95,17 @@ calls are not checked against each other's earlier slots.
 
 ### Band
 
-All channel numbers come from one constant, `BAND_SEGMENT_KHZ` in
-`src/core.js` (lower edge included, upper edge excluded), and the channel width
-`CHANNEL_WIDTH_KHZ` (2.7 kHz). `BAND_CHANNELS` is derived from them. The segment
-is the 17 m relay segment, 18.111 to 18.120 MHz, which holds 3 channels
-(centres 18112.35, 18115.05 and 18117.75 kHz). The segment values are a working
-choice and must be confirmed before deployment.
+The channel plan is one table, `LANES` in `src/band.js`, mirroring
+`crates/kahf-core/src/lanes.rs`: twelve 17 m lanes, 480 Hz wide, 700 Hz apart, lane k
+lower edge 18 111 200 + 700 k Hz, centre = lower + 240 Hz, USB dial = centre - 1500 Hz.
+Roles in lane order: R1-R4, X1, C1, C2, X2, R5-R8 (C1 is lane 5, dial 18113.44 kHz).
+A channel number in schedules, busy zones and pools is the lane number 0 to 11.
+`BAND_SEGMENT_KHZ` (18111 to 18120 kHz, lower edge included) is the 17 m segment.
+`channelOf(kHz)` maps a frequency to the lane whose 700 Hz cell holds it; reports carry
+whole kHz, so only lanes 1, 2, 4, 5, 6, 8, 9 and 11 can be named that way (`reportKhz`).
+Pools follow the lane roles, as in `Plan::default_plan`: relay lanes are `online`,
+calling lanes C1 and C2 are `open` (the default), spare lanes X1 and X2 are `emergency`.
+The segment values are a working choice and must be confirmed before deployment.
 
 ### POST /report
 

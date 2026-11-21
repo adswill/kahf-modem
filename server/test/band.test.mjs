@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 // Tests for the band segment, channel mapping, area keys and the register and
 // schedule validators in src/core.js. Run with: npm test (node --test).
 import { test } from "node:test";
@@ -5,7 +6,9 @@ import assert from "node:assert/strict";
 import {
   BAND_CHANNELS,
   BAND_SEGMENT_KHZ,
-  CHANNEL_WIDTH_KHZ,
+  LANES,
+  POOLS,
+  reportKhz,
   MAX_SCHEDULE_REQUESTS,
   areaKey,
   busyZones,
@@ -19,26 +22,62 @@ import {
 const KEY = encodeBase64(new Uint8Array(32).fill(7));
 const SIG = encodeBase64(new Uint8Array(64));
 
-test("band: channel count is derived from the one segment constant", () => {
-  const span = BAND_SEGMENT_KHZ.high - BAND_SEGMENT_KHZ.low;
-  assert.equal(BAND_CHANNELS, Math.floor(span / CHANNEL_WIDTH_KHZ));
-  assert.equal(BAND_CHANNELS, Math.floor((span * 10) / (CHANNEL_WIDTH_KHZ * 10)));
-  assert.ok(BAND_CHANNELS > 0);
+test("band: the table has twelve lanes that match lanes.rs", () => {
+  assert.equal(BAND_CHANNELS, 12);
+  assert.equal(LANES.length, 12);
+  assert.equal(LANES[0].lowerHz, 18_111_200);
+  assert.deepEqual(LANES.map((l) => l.role), ["R1", "R2", "R3", "R4", "X1", "C1", "C2", "X2", "R5", "R6", "R7", "R8"]);
+  for (const l of LANES) {
+    assert.equal(l.lowerHz, 18_111_200 + 700 * l.k);
+    assert.equal(l.centreHz, l.lowerHz + 240);
+    assert.equal(l.dialHz, l.centreHz - 1500);
+  }
+  // C1 is lane 5 with the USB dial at 18113.44 kHz.
+  assert.equal(LANES[5].role, "C1");
+  assert.equal(LANES[5].dialHz, 18_113_440);
+  // Every lane lies inside the 17 m segment.
+  assert.ok(LANES.at(-1).lowerHz + 480 <= BAND_SEGMENT_KHZ.high * 1000);
+  assert.ok(LANES[0].lowerHz >= BAND_SEGMENT_KHZ.low * 1000);
+  assert.deepEqual(BAND_SEGMENT_KHZ, { low: 18_111, high: 18_120 });
   assert.ok(Object.isFrozen(BAND_SEGMENT_KHZ));
+  assert.ok(Object.isFrozen(LANES));
 });
 
-test("band: channelOf maps the segment edges and rejects what lies outside", () => {
-  assert.equal(channelOf(BAND_SEGMENT_KHZ.low), 0);
-  // Every channel's own lower edge and centre map back to that channel.
-  for (let n = 0; n < BAND_CHANNELS; n += 1) {
-    assert.equal(channelOf(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * n), n);
-    assert.equal(channelOf(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * (n + 0.5)), n);
+test("band: the table agrees with the Rust sources", () => {
+  const rs = readFileSync(new URL("../../crates/kahf-core/src/lanes.rs", import.meta.url), "utf8");
+  assert.match(rs, /LANE_WIDTH_HZ: u64 = 480/);
+  assert.match(rs, /LANE_PITCH_HZ: u64 = 700/);
+  assert.match(rs, /AUDIO_CENTRE_HZ: u64 = 1500/);
+  assert.match(rs, /18_111_200/);
+});
+
+test("band: pools follow the lane roles (relay online, calling open, spare emergency)", () => {
+  assert.deepEqual([...POOLS.online], [0, 1, 2, 3, 8, 9, 10, 11]);
+  assert.deepEqual([...POOLS.open], [5, 6]);
+  assert.deepEqual([...POOLS.emergency], [4, 7]);
+});
+
+test("band: channelOf maps a frequency to its lane and rejects what lies outside", () => {
+  assert.equal(channelOf(18_111.2), 0);
+  assert.equal(channelOf(18_111), null);
+  for (const l of LANES) {
+    assert.equal(channelOf(l.lowerHz / 1000), l.k);
+    assert.equal(channelOf(l.centreHz / 1000), l.k);
+    assert.equal(channelOf((l.lowerHz + 699) / 1000), l.k);
   }
-  assert.equal(channelOf(BAND_SEGMENT_KHZ.high - 1), BAND_CHANNELS - 1);
+  assert.equal(channelOf(18_119.599), 11);
+  assert.equal(channelOf(18_119.6), null);
   assert.equal(channelOf(BAND_SEGMENT_KHZ.high), null);
   assert.equal(channelOf(BAND_SEGMENT_KHZ.low - 1), null);
   assert.equal(channelOf(NaN), null);
   assert.equal(channelOf("145000"), null);
+});
+
+test("band: reportKhz gives a whole kHz that maps back to the lane, or null", () => {
+  const got = LANES.map((l) => reportKhz(l.k));
+  assert.deepEqual(got, [null, 18_112, 18_113, null, 18_114, 18_115, 18_116, null, 18_117, 18_118, null, 18_119]);
+  for (const l of LANES) if (got[l.k] !== null) assert.equal(channelOf(got[l.k]), l.k);
+  assert.equal(reportKhz(12), null);
 });
 
 test("area keys: one-degree squares named by the south-west corner", () => {
@@ -51,7 +90,7 @@ test("area keys: one-degree squares named by the south-west corner", () => {
 test("zone reports: out-of-band and undated records are skipped", () => {
   const base = { reporter_location: { mode: "precise", latitude: 51.5, longitude: -0.1 }, heard_at: "2026-11-17T11:59:00Z" };
   const reports = zoneReports([
-    { ...base, frequency_khz: BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * 1.5 },
+    { ...base, frequency_khz: 18_112 },
     { ...base, frequency_khz: BAND_SEGMENT_KHZ.high + 10 },
     { ...base, frequency_khz: 145_000, heard_at: "not a time" },
     { ...base, frequency_khz: 145_000, reporter_location: null },

@@ -516,7 +516,11 @@ fn help(k: &Kahf) -> V {
         Some(t) => {
             page = page.push(heading(t.title));
             for p in t.body {
-                page = page.push(text(*p));
+                let mut lines = col![].gap(2.0);
+                for line in wrap_lines(p, 56) {
+                    lines = lines.push(text(line));
+                }
+                page = page.push(lines);
             }
         }
         None => page = page.push(text("Nothing found. Try another word.").dim()),

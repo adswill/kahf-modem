@@ -36,7 +36,7 @@ pub fn view(k: &Kahf) -> V {
         k.m.waterfall.iter().cloned().collect(),
         330.0,
     ));
-    left = left.push(caption("Brighter is stronger. The scale is the sound from your radio, in kilohertz. The shaded band is where KAHF listens.").dim());
+    left = left.push(para("Brighter is stronger. The scale is the sound from your radio, in kilohertz. The shaded band is where KAHF listens.", 60));
 
     let current = bands::index_of(s.freq_khz);
     let lanes = bands::channels();
@@ -48,8 +48,7 @@ pub fn view(k: &Kahf) -> V {
         ]
         .gap(10.0)
         .align_center(),
-        caption("KAHF uses 17 metres only (18.111 to 18.120 MHz), in twelve narrow lanes, each 480 Hz wide. Set your radio to upper sideband and to the dial shown for the lane. C1 is where stations call each other; R lanes belong to relays. Relays take care of the rest, so start with C1.")
-            .dim(),
+        para("KAHF uses 17 metres only (18.111 to 18.120 MHz), in twelve narrow lanes, each 480 Hz wide. Set your radio to upper sideband and to the dial shown for the lane. C1 is where stations call each other; R lanes belong to relays. Relays take care of the rest, so start with C1.", 60),
     ]
     .gap(10.0);
     for half in lanes.chunks(6) {
@@ -71,7 +70,7 @@ pub fn view(k: &Kahf) -> V {
         heading("How the radio is heard").sub(),
         audio_picker(k, Where::Radio),
         heading("Radio control").sub(),
-        caption("Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card.").dim(),
+        para("Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card.", 60),
         rig_picker(k, Where::Radio),
     ].gap(10.0));
     if k.hardware_dirty() {

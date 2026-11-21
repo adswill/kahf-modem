@@ -16,7 +16,7 @@ export const SITE_PAGES = {
 <section class="sec tight" aria-labelledby="n-how">
 <h2 id="n-how">How a relay works</h2>
 <ol class="steps">
-<li><b>A station sends.</b>The sender transmits a signed message on the channel. If the addressee does not answer, the sender's computer asks the relays that heard it.</li>
+<li><b>A station sends.</b>The sender transmits a signed message on a lane. If the addressee does not answer, the sender's computer asks the relays that heard it.</li>
 <li><b>A relay hears it.</b>A relay that received the frames checks them and tells the network only that it heard them: ids, sizes and routing facts, never the message itself.</li>
 <li><b>The relay passes it on.</b>In its scheduled slot the relay sends the message to the addressee. The receiver checks the sender's signature, so a relay cannot change a message without being caught.</li>
 </ol>
@@ -27,7 +27,7 @@ export const SITE_PAGES = {
 <div class="grid even">
 <div>
 <p>A relay registers with the network server under its callsign, one-degree area and key. A registration lasts 48 hours unless the relay registers again.</p>
-<p>It then asks for send and receive slots. The server hands out slots that avoid channels already busy in the area, and a relay that cannot receive while it transmits takes turns.</p>
+<p>It then asks for send and receive slots. The server hands out slots that avoid lanes already busy in the area, and a relay that cannot receive while it transmits takes turns.</p>
 </div>
 <div>
 <dl class="kv">
@@ -81,7 +81,7 @@ export const SITE_PAGES = {
 <ol class="steps">
 <li><b>Install.</b>Download the build for your system. It is not signed with an Apple or Microsoft certificate yet, so your computer will warn you. On macOS, right-click and choose Open.</li>
 <li><b>Set up.</b>Enter your callsign, choose the audio device for your radio, and set the radio to a data mode. KAHF starts in listen only, so nothing is sent.</li>
-<li><b>Listen.</b>Tune a 17 m channel inside 18.068 to 18.168 MHz and watch the spectrum. Check the channel is clear before you connect.</li>
+<li><b>Listen.</b>Tune the radio to the USB dial of a lane (twelve lanes sit inside 18.111 to 18.120 MHz) and watch the spectrum. Check the lane and its neighbours are clear before you connect.</li>
 <li><b>Send.</b>Connect to a station, write a message, and confirm. KAHF asks you before every transmission.</li>
 </ol>
 <p class="note">To build from source instead, see the build guide in the repository.</p>

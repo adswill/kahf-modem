@@ -19,7 +19,7 @@ export async function load(url, context, nextLoad) {
 }`;
 register("data:text/javascript," + encodeURIComponent(HOOK));
 const { handleRequest } = await import("../src/routes.js");
-const { canonicalJson, encodeBase64, BAND_SEGMENT_KHZ, CHANNEL_WIDTH_KHZ } = await import("../src/core.js");
+const { canonicalJson, encodeBase64, BAND_CHANNELS, reportKhz } = await import("../src/core.js");
 
 // Constants written out here on purpose, so the checks do not reuse the server's own values.
 const START_MS = Date.parse("2026-11-17T12:00:00Z");
@@ -27,10 +27,10 @@ const TICK_MS = 60_000; // one reception round per simulated minute
 const TICKS = 20; // 20 simulated minutes of reports
 const EXPIRY_MS = 48 * 3_600_000;
 const BUSY_WINDOW_S = 600;
-// Band layout comes from the one segment constant; the channel count is worked out here again.
-const LOW_KHZ = BAND_SEGMENT_KHZ.low;
-const CHANNEL_KHZ = CHANNEL_WIDTH_KHZ;
-const CHANNELS = Math.floor(((BAND_SEGMENT_KHZ.high - BAND_SEGMENT_KHZ.low) * 10) / Math.round(CHANNEL_WIDTH_KHZ * 10));
+// Twelve lanes from the one table in src/band.js. Reports carry whole kHz, and only some
+// lanes have a whole kHz inside them; busy zones are simulated on those lanes.
+const CHANNELS = BAND_CHANNELS;
+const REPORTABLE = Array.from({ length: CHANNELS }, (_, c) => c).filter((c) => reportKhz(c) !== null);
 const SLOT_MIN = 1;
 const SLOT_MAX = 300;
 const BASE = "https://kahf.test";
@@ -96,8 +96,8 @@ function areaName(lat, lon) {
   return `${lat >= 0 ? "N" : "S"}${Math.abs(Math.floor(lat))}${lon >= 0 ? "E" : "W"}${Math.abs(Math.floor(lon))}`;
 }
 
-/** Integer kHz inside channel c: 1 kHz above the channel start, always in the same channel. */
-const freqOf = (c) => LOW_KHZ + 1 + Math.floor(CHANNEL_KHZ * c);
+/** Whole kHz inside lane c (only for lanes in REPORTABLE). */
+const freqOf = (c) => reportKhz(c);
 
 /** Heard-station callsign for channel c (fixed per channel). */
 const heardCall = (c) => `R9${letters(c, 2)}`;
@@ -152,8 +152,8 @@ export async function runSimulation({ stations = 40, relays = 6, seed = 1 } = {}
   const cells = Array.from({ length: cellCount }, (_, k) => ({ lat: 50 + k, lon: -3 + (k % 5) }));
   const busy = cells.map(() => {
     const chans = new Set();
-    // Up to 4 busy channels per cell, fewer when the band has fewer channels.
-    while (chans.size < Math.min(4, CHANNELS)) chans.add(pick(CHANNELS));
+    // Up to 4 busy channels per cell, taken from the lanes a whole-kHz report can name.
+    while (chans.size < Math.min(4, REPORTABLE.length)) chans.add(REPORTABLE[pick(REPORTABLE.length)]);
     // Silent after `until` ticks. The first channel of each cell stays busy to the end,
     // so every area has busy channels at the final check; the others may go quiet early.
     return [...chans].map((channel, idx) => ({ channel, until: idx === 0 ? TICKS : 1 + pick(TICKS) }));

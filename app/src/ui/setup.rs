@@ -89,8 +89,7 @@ fn who(k: &Kahf) -> V {
     let ok = callsign::valid(&call) && msg.is_none();
     let mut c = col![
         heading("Who are you on the air?"),
-        text("Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.")
-            .dim(),
+        para("Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.", 100),
         choice(
             st.have_licence,
             "I have an amateur radio licence",
@@ -128,7 +127,7 @@ fn radio(k: &Kahf) -> V {
     let st = &k.ui.setup;
     let mut c = col![
         heading("Connect your radio"),
-        text("Two separate things: how the sound reaches the computer, and, optionally, letting KAHF control the radio's frequency.").dim(),
+        para("Two separate things: how the sound reaches the computer, and, optionally, letting KAHF control the radio's frequency.", 100),
         heading("1. Sound").sub(),
         audio_picker(k, Where::Setup),
     ]
@@ -170,7 +169,7 @@ fn channel(k: &Kahf) -> V {
     let st = &k.ui.setup;
     let mut c = col![
         heading("Where do you listen?"),
-        text("KAHF uses one band, 17 metres (18.111 to 18.120 MHz), in twelve narrow lanes. Start with C1, where stations call each other. You can change lane later on the Radio screen.").dim(),
+        para("KAHF uses one band, 17 metres (18.111 to 18.120 MHz), in twelve narrow lanes. Start with C1, where stations call each other. You can change lane later on the Radio screen.", 100),
     ]
     .gap(10.0);
     for ch in bands::channels() {
@@ -194,7 +193,7 @@ fn channel(k: &Kahf) -> V {
 fn place(k: &Kahf) -> V {
     col![
         heading("Do you want to be on the map?"),
-        text("The public map at kahf.dev shows stations that choose to share where they are. It is off unless you turn it on.").dim(),
+        para("The public map at kahf.dev shows stations that choose to share where they are. It is off unless you turn it on.", 100),
         location_editor(k, Where::Setup),
     ]
     .gap(10.0)

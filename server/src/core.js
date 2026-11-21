@@ -522,33 +522,9 @@ export function validateSchedule(body) {
 // Busy zones, channel pools and relay slots (plan sections 2.4, 5.3, 5.4).
 // ---------------------------------------------------------------------------
 
-/**
- * The one band segment KAHF uses, in kHz. The lower edge is included and the
- * upper edge is not. Every channel count and channel number is derived from
- * this constant and CHANNEL_WIDTH_KHZ, so change the segment here only.
- */
-export const BAND_SEGMENT_KHZ = Object.freeze({ low: 18_111, high: 18_120 });
-
-/** Width of one channel in kHz (plan section 2.2). */
-export const CHANNEL_WIDTH_KHZ = 2.7;
-
-/** Whole channels that fit in the segment. */
-export const BAND_CHANNELS = Math.floor(((BAND_SEGMENT_KHZ.high - BAND_SEGMENT_KHZ.low) * 10) / (CHANNEL_WIDTH_KHZ * 10));
-
-/**
- * Channel number for a frequency in kHz, or null when it is outside the
- * channel grid. Integer arithmetic in tenths of a kHz keeps the edges exact.
- * @param {number} frequencyKhz
- * @returns {number | null}
- */
-export function channelOf(frequencyKhz) {
-  if (!Number.isFinite(frequencyKhz)) return null;
-  const tenths = Math.round((frequencyKhz - BAND_SEGMENT_KHZ.low) * 10);
-  const width = Math.round(CHANNEL_WIDTH_KHZ * 10);
-  if (tenths < 0) return null;
-  const channel = Math.floor(tenths / width);
-  return channel < BAND_CHANNELS ? channel : null;
-}
+// The channel plan (twelve 17 m lanes) lives in band.js; channel numbers are lane numbers.
+import { BAND_CHANNELS, POOLS, channelOf } from "./band.js";
+export { BAND_SEGMENT_KHZ, BAND_CHANNELS, LANES, POOLS, channelOf, reportKhz } from "./band.js";
 
 /** An area is a one-degree square, named by its south-west corner, e.g. "N51W1". */
 const AREA_KEY_RE = /^(?:N(?:0|[1-9]|[1-8]\d)|S(?:[1-9]|[1-8]\d|90))(?:E(?:0|[1-9]\d?|1[0-7]\d)|W(?:[1-9]\d?|1[0-7]\d|180))$/;
@@ -640,23 +616,23 @@ export function busyZones(reports, nowUnix) {
 }
 
 /**
- * Channel pools for the client. The lower third of the band is the online
- * pool, kept for areas where stations are online (every area in zoneBusy).
- * The rest is the open pool, used everywhere else (defaultPool). Each listed
- * area gets its online channels minus the ones busy there.
+ * Channel pools for the client, by lane role as in the Rust Plan::default_plan:
+ * relay lanes R1-R8 are the online pool, kept for areas where stations are
+ * online (every area in zoneBusy); calling lanes C1 and C2 are the open pool,
+ * used everywhere else (defaultPool); spare lanes X1 and X2 are the emergency
+ * pool. Each listed area gets its online channels minus the ones busy there.
  * @param {Record<string, number[]>} zoneBusy output of busyZones
  * @returns {{
  *   bandChannels: number,
  *   online: number[],
  *   open: number[],
+ *   emergency: number[],
  *   defaultPool: "open",
  *   areas: Record<string, { pool: "online", channels: number[] }>
  * }}
  */
 export function poolPlan(zoneBusy) {
-  const onlineCount = Math.floor(BAND_CHANNELS / 3);
-  const online = Array.from({ length: onlineCount }, (_, i) => i);
-  const open = Array.from({ length: BAND_CHANNELS - onlineCount }, (_, i) => onlineCount + i);
+  const online = [...POOLS.online];
   /** @type {Record<string, { pool: "online", channels: number[] }>} */
   const areas = {};
   const zones = zoneBusy && typeof zoneBusy === "object" ? zoneBusy : {};
@@ -664,7 +640,7 @@ export function poolPlan(zoneBusy) {
     const busy = new Set(Array.isArray(zones[area]) ? zones[area] : []);
     areas[area] = { pool: "online", channels: online.filter((c) => !busy.has(c)) };
   }
-  return { bandChannels: BAND_CHANNELS, online, open, defaultPool: "open", areas };
+  return { bandChannels: BAND_CHANNELS, online, open: [...POOLS.open], emergency: [...POOLS.emergency], defaultPool: "open", areas };
 }
 
 /**

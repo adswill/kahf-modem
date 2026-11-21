@@ -117,7 +117,7 @@ export function bondCount(snrDb, bytes) {
 
 /**
  * Widen grants into runs of adjacent physical lanes. `wants` is [[relay, lanes wanted]], at most 4
- * (five lanes would be 3280 Hz, over the 2700 Hz cap). Never the calling lanes, never over another run.
+ * (five lanes would be 3280 Hz, over the segment bandwidth cap). Never the calling lanes, never over another run.
  * Returns [{relay, slot, first, count}].
  */
 export function bond(p, wants) {

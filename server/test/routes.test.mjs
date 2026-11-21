@@ -7,9 +7,9 @@ import { register } from "node:module";
 import {
   BAND_CHANNELS,
   BAND_SEGMENT_KHZ,
-  CHANNEL_WIDTH_KHZ,
   canonicalJson,
   channelOf,
+  reportKhz,
   encodeBase64,
   EXPIRY_MS,
   MAX_SCHEDULE_REQUESTS,
@@ -67,7 +67,7 @@ async function sha256Base64(s) {
 }
 
 // Whole-kHz frequency inside channel n (the report validator wants integer kHz).
-const freqOf = (n) => Math.ceil(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * n);
+const freqOf = (n) => reportKhz(n);
 const LAST = BAND_CHANNELS - 1;
 
 const REPORT = {
@@ -175,7 +175,7 @@ test("GET /zones: busy channels per area from live records, with the pool split"
   await store.put({
     ...REPORT,
     reporter_call: "K2BUSY",
-    frequency_khz: freqOf(0),
+    frequency_khz: freqOf(1),
     heard_at: "2026-11-17T11:55:00Z",
     public_key: "k",
     refreshed_at: NOW,
@@ -193,10 +193,10 @@ test("GET /zones: busy channels per area from live records, with the pool split"
   const body = await res.json();
   assert.equal(body.busy_window_s, 600);
   // K1ABC at 51.5074, -0.1278 lies in N51W1; K2BUSY too.
-  assert.deepEqual(body.zones, { N51W1: [0, LAST] });
+  assert.deepEqual(body.zones, { N51W1: [1, LAST] });
   assert.equal(body.pools.defaultPool, "open");
-  assert.equal(body.pools.bandChannels, body.pools.online.length + body.pools.open.length);
-  assert.ok(!body.pools.areas.N51W1.channels.includes(0));
+  assert.equal(body.pools.bandChannels, body.pools.online.length + body.pools.open.length + body.pools.emergency.length);
+  assert.ok(!body.pools.areas.N51W1.channels.includes(1));
   assert.equal(body.pools.areas.N51W1.pool, "online");
 });
 

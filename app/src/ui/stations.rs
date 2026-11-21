@@ -30,9 +30,7 @@ pub fn view(k: &Kahf) -> V {
         ]
         .gap(10.0)
         .align_center(),
-        caption("A station is one person's KAHF setup, named by its callsign. The map shows relays, and stations that chose to share their location, from kahf.dev.")
-            .dim()
-            .fill_w(),
+        para("A station is one person's KAHF setup, named by its callsign. The map shows relays, and stations that chose to share their location, from kahf.dev.", 100),
         map::view(k, map::pins(k), 340.0),
     ]
     .gap(10.0);
@@ -57,9 +55,7 @@ pub fn view(k: &Kahf) -> V {
     );
     if k.m.heard.is_empty() {
         c = c.push(
-            text("Nobody yet. Stations appear when they transmit, so this can take a few minutes, or longer when the band is quiet. If nothing ever appears, check the picture on the Radio screen.")
-                .dim()
-                .fill_w(),
+            para("Nobody yet. Stations appear when they transmit, so this can take a few minutes, or longer when the band is quiet. If nothing ever appears, check the picture on the Radio screen.", 100),
         );
     } else {
         for h in &k.m.heard {
