@@ -6122,8 +6122,8 @@ mod tests {
 
     #[test]
     fn hidden_operators_and_one_relay_every_message_arrives_once() {
-        // Three operators by default; REF_OPS=10 runs ten (about 15 minutes of real time, and not
-        // yet finished within 2400 virtual seconds: see docs/NETWORK-STATUS.md, WP5).
+        // Three operators by default; REF_OPS=10 runs ten (all delivered after 389 virtual seconds,
+        // about 2.5 minutes of real time: see docs/NETWORK-STATUS.md, WP5).
         let ops: usize = std::env::var("REF_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
         let mut st = referee_cell("ref-ten", ops);
         let mut z = st.pop().unwrap();
