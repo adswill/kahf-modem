@@ -8,12 +8,12 @@ Main moved on without this branch (Alloy UI app, messaging layer, new modem ladd
 ## State (checked 2026-11-21)
 - `cargo clippy --workspace --all-targets -D warnings`: clean. kahf-core 397, kahf-daemon 106, kahf-app-core 56, kahf-node 9 tests pass; app (own workspace) 35 pass, clippy clean; server 1169 pass; deploy dry run builds.
 - Real window of the Alloy app: not looked at by this session. Nothing has run on a real radio.
-- Server WP6 is NOT deployed. To deploy (needs the owner): `cd server && npx wrangler secret put PROJECT_KEY < .project-key && npx wrangler deploy`. Migration v3 deletes old backbone data for good.
+- Server WP6 and the redesigned site were DEPLOYED on 2026-11-21 (kahf.dev, version 58e80977): `PROJECT_KEY` secret uploaded, migration v3 ran (old backbone data deleted, as the owner approved on 2026-11-19; the owner told session F to do it). Checked live: home 200, /network 200, unsigned /mesh/poll refused with 400.
 
 ## Definition of done
 TRUE: lanes and 17 m only; transmit gate refuses everything while `plan_verified` is false; lane sensing; bundle chat with delivery states; relay referee (few operators); mesh server code and tests; guides and site; Alloy app shows lanes, gate notice, referee counters.
-FALSE / NOT DONE: anything verified on air; deployed mesh server; the engine paging other relays (WP8), a two-relay test; bonded waveform, hopping and diversity on air (WP9); two-relay test; clash-domain colouring; HF fading sweep of lane bursts; a longer soak with real engines (WP12; the server security review is done, see NETWORK-STATUS); main's ladder bursts in the engine; relay slots in the app.
-ONLY THE OWNER CAN: set `plan_verified` true after checking the band plan; deploy the server and handle the signing key; tag a release; transmit on air.
+FALSE / NOT DONE: anything verified on air; the engine paging other relays (WP8), a two-relay test; bonded waveform, hopping and diversity on air (WP9); two-relay test; clash-domain colouring; HF fading sweep of lane bursts; a longer soak with real engines (WP12; the server security review is done, see NETWORK-STATUS); main's ladder bursts in the engine; relay slots in the app.
+ONLY THE OWNER CAN: set `plan_verified` true after checking the band plan; tag a release; transmit on air.
 
 WP9 note: `hop.rs`, `diversity.rs` and `harq.rs` exist in kahf-core with unit tests, but the engine does not use hop grants or LLR forwarding; a two-hop delivery needs a relay that can send on a second lane, which is a bigger engine change and was not started.
 

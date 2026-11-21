@@ -238,3 +238,5 @@ minute window (it needs a captured TLS request, and only kicks the relay's own e
 the sizes and hashes they report (a registered relay can lie about what it heard, which the learner tolerates because it
 only counts). Not done: an outside review, a longer soak with real engines in a cell, the daemon's parsing of server
 frames under fuzzing.
+
+Deployed 2026-11-21 (owner: "you do it"): signing-key secret `PROJECT_KEY` uploaded, Worker deployed (version 58e80977), old backbone data deleted by migration v3. Decision: the relay switch in the app enables the one lane the plan gives it (a relay serves one lane at a time), not all eight relay lanes.
