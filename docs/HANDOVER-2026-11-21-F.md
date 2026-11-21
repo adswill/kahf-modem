@@ -12,10 +12,10 @@ Main moved on without this branch (Alloy UI app, messaging layer, new modem ladd
 
 ## Definition of done
 TRUE: lanes and 17 m only; transmit gate refuses everything while `plan_verified` is false; lane sensing; bundle chat with delivery states; relay referee (few operators); mesh server code and tests; guides and site; Alloy app shows lanes, gate notice, referee counters.
-FALSE / NOT DONE: anything verified on air; the engine paging other relays (WP8), a two-relay test; bonded waveform, hopping and diversity on air (WP9); two-relay test; clash-domain colouring; HF fading sweep of lane bursts; a longer soak with real engines (WP12; the server security review is done, see NETWORK-STATUS); main's ladder bursts in the engine; relay slots in the app.
+FALSE / NOT DONE: anything verified on air; the engine paging other relays (WP8); bonded waveform, hopping and diversity on air (WP9); two-relay test; clash-domain colouring; HF fading sweep of lane bursts; a longer soak with real engines (WP12; the server security review is done, see NETWORK-STATUS); main's ladder bursts in the engine; relay slots in the app.
 ONLY THE OWNER CAN: set `plan_verified` true after checking the band plan; tag a release; transmit on air.
 
-WP9 note: `hop.rs`, `diversity.rs` and `harq.rs` exist in kahf-core with unit tests, but the engine does not use hop grants or LLR forwarding; a two-hop delivery needs a relay that can send on a second lane, which is a bigger engine change and was not started.
+WP9 note: a two-relay delivery (A to R1 to R2 to B, relays chained by relay hints) works and is tested on virtual-clock buses. `hop.rs`, `diversity.rs` and `harq.rs` exist in kahf-core with unit tests, but the engine does not use hop grants or LLR forwarding (combining weak copies from several relays), and server-planned hops are not used.
 
 ## Next
 Finish WP8, then WP9, WP10 (look at the Alloy window), WP12. Build one crate at a time, `-j 2` (the owner's Mac lags).

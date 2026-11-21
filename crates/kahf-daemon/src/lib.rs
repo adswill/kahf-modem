@@ -5245,6 +5245,31 @@ mod tests {
         );
     }
 
+    /// Two hops: A hears only relay R1, R1 hears R2, R2 hears B. R1 passes the message to R2,
+    /// which delivers it, and B gets it once.
+    #[test]
+    fn a_message_goes_over_two_relays() {
+        let mut st = mesh(
+            "relay-two",
+            &["AA1AAA", "RR1RRR", "RR2RRR", "BB1BBB"],
+            &[(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)],
+            0.0,
+        );
+        let (mut b, mut r2, mut r1, mut a) = (st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap());
+        make_relay(&r1);
+        make_relay(&r2);
+        r1.listen().unwrap();
+        r2.listen().unwrap();
+        b.listen().unwrap();
+        a.set_auto_link(true);
+        a.set_relay_hints(&["RR1RRR".to_string()]);
+        a.set_relay_timeout_ms(500);
+        r1.set_relay_hints(&["RR2RRR".to_string()]);
+        a.send_message("BB1BBB", "over two relays").unwrap();
+        let got = wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "over two relays"), 900);
+        assert!(got.is_some(), "the message did not arrive over two relays");
+    }
+
     #[test]
     fn a_message_reaches_a_station_that_only_a_relay_can_hear() {
         // A and B cannot hear each other; both hear the relay R.
