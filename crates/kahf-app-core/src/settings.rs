@@ -51,6 +51,8 @@ pub struct EngineSettings {
     rig_spec: String,
     sdr: String,
     pub listen_only: bool,
+    /// The dial the person set the radio to, in kHz (a KAHF lane's USB dial); 0 when not set.
+    freq_khz: f64,
     /// The radio chosen by name: Hamlib model number, serial port, speed.
     pub rig_choice: Option<(u32, String, u32)>,
 }
@@ -67,6 +69,7 @@ impl EngineSettings {
             rig_spec: text("rigSpec"),
             sdr: text("sdr"),
             listen_only: flag("listenOnly", false),
+            freq_khz: v.get("freqKhz").and_then(Value::as_f64).unwrap_or(0.0),
             rig_choice: {
                 let r = v.get("rig");
                 let model = r.and_then(|r| r.get("model")).and_then(Value::as_u64);
@@ -86,6 +89,11 @@ impl EngineSettings {
                 }
             },
         }
+    }
+
+    /// The dial in Hz that the engine's transmit gate checks, or `None` when none is set.
+    pub fn dial_hz(&self) -> Option<u64> {
+        (self.freq_khz > 0.0).then(|| (self.freq_khz * 1000.0).round() as u64)
     }
 
     pub fn callsign(&self) -> String {

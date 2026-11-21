@@ -242,9 +242,20 @@ fn run_relay(k: &Kahf) -> V {
     reach = reach.push(button("Check kahf.dev").act(|k: &mut Kahf| k.check_server()));
     c = c.push(kv("Reachable", reach.into()));
 
-    c = c.push(heading("Schedule").sub());
+    c = c.push(heading("Lane referee").sub());
+    let rf = r.referee.clone().unwrap_or_default();
+    c = c.push(
+        row![
+            stat_box(rf.rounds.to_string(), "rounds run"),
+            stat_box(rf.requests.to_string(), "requests heard"),
+            stat_box(rf.grants.to_string(), "turns granted"),
+            stat_box(rf.heres.to_string(), "operators said hello"),
+        ]
+        .gap(10.0),
+    );
+    c = c.push(caption("Every twelve seconds the relay announces itself and gives stations a turn on its lane. Nothing is stored on a server: the server only plans which relay serves which lane.").dim().fill_w());
     if r.slots.is_empty() {
-        c = c.push(text("No slots yet. The relay works on the radio anyway; kahf.dev adds a schedule when it can be reached.").dim().fill_w());
+        c = c.push(caption("No fixed schedule is shown: the relay plans its own turns on the lane.").dim().fill_w());
     } else {
         let now = if r.now_unix > 0 { r.now_unix } else { now_unix() };
         for s in &r.slots {

@@ -15,6 +15,7 @@ product-name = "KAHF"
 [dependencies]
 alloy-ui = { git = "https://github.com/adswill/alloy-ui", rev = "ee795fd2ec35712e08ebcb27b2c8d34d734cb181" }
 kahf-app-core = { path = "../crates/kahf-app-core" }
+kahf-core = { path = "../crates/kahf-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

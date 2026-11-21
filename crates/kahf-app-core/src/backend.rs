@@ -215,6 +215,7 @@ pub fn engine_start(state: &Shared, settings: Value) -> Res<()> {
         engine.set_relay_hints(&calls);
     }
     engine.set_listen_only(s.listen_only);
+    engine.set_dial_hz(s.dial_hz());
     *state.link.lock().map_err(|e| e.to_string())? = None;
     *state.engine.lock().map_err(|e| e.to_string())? = Some(engine);
     Ok(())
@@ -510,6 +511,7 @@ pub fn relay_status(state: &Shared) -> Res<Value> {
         "outbox": outbox,
         "server": server,
         "serverNote": note,
+        "referee": engine.map(|e| { let (r, q, g) = e.referee_counts(); json!({ "rounds": r, "requests": q, "grants": g, "heres": e.heres_heard() }) }),
         "area": if running { area } else { None },
         "nowUnix": live::now_unix(),
     }))
@@ -527,6 +529,26 @@ pub fn relay_directory(state: &Shared, refresh: bool) -> Res<Vec<Value>> {
         .unwrap_or_default();
     let dir = state.data_dir.clone();
     blocking(move || directory::directory(&dir, here, &manual, refresh)).map_err(|e| e.to_string())?
+}
+
+/// The radio's dial changed (the person chose another lane): tell the transmit gate.
+pub fn engine_set_dial(state: &Shared, khz: f64) -> Res<()> {
+    with_engine(state, |e| {
+        e.set_dial_hz(Some((khz * 1000.0).round() as u64));
+        Ok(())
+    })
+}
+
+/// What the transmit gate says, for the Radio screen: `state` is "off", "bench" or "real".
+pub fn tx_gate_status(state: &Shared) -> Res<Value> {
+    let guard = state.engine.lock().map_err(|e| e.to_string())?;
+    Ok(match guard.as_ref() {
+        Some(e) => {
+            let (st, why) = e.tx_gate();
+            json!({ "state": st, "reason": why })
+        }
+        None => json!({ "state": "off", "reason": "The radio engine is not running." }),
+    })
 }
 
 pub fn engine_set_relay_hints(state: &Shared, calls: Vec<String>) -> Res<()> {

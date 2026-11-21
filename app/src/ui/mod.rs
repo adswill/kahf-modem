@@ -104,9 +104,9 @@ fn strip(k: &Kahf) -> V {
     let mut r = row![
         heading("KAHF").accent(),
         text(fmt::mhz(khz)).heading().no_wrap(),
-        tabs(channels.iter().map(|c| c.name), current.unwrap_or(0)).act(move |k: &mut Kahf, i: usize| {
-            k.set_frequency(bands::channels()[i].khz);
-        }),
+        button(current.map_or("lane ?".to_string(), |i| format!("Lane {}", channels[i].name)))
+            .ghost()
+            .act(|k: &mut Kahf| k.go(Page::Radio)),
         widgets::signal_meter(k.m.signal),
         lit("RX", k.m.receiving, false),
         lit("TX", k.m.transmitting, true),

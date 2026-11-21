@@ -170,20 +170,20 @@ fn channel(k: &Kahf) -> V {
     let st = &k.ui.setup;
     let mut c = col![
         heading("Where do you listen?"),
-        text("KAHF uses one band, 17 metres (18.111 to 18.120 MHz). You can change channel later on the Radio screen.").dim(),
+        text("KAHF uses one band, 17 metres (18.111 to 18.120 MHz), in twelve narrow lanes. Start with C1, where stations call each other. You can change lane later on the Radio screen.").dim(),
     ]
     .gap(10.0);
     for ch in bands::channels() {
         let sel = (st.draft.freq_khz - ch.khz).abs() < 0.001;
-        let sub = if ch.index == 0 {
-            "Tune your radio to this frequency. Best by day over long distances, roughly 1000 to 4000 km, and mostly closed at night."
+        let sub = if ch.name == "C1" {
+            "Set your radio to upper sideband and to this dial frequency. Best by day over long distances, roughly 1000 to 4000 km, and mostly closed at night."
         } else {
-            ""
+            ch.what
         };
         let khz = ch.khz;
         c = c.push(choice(
             sel,
-            &format!("17 metres, {}   {}", ch.name, fmt::mhz(khz)),
+            &format!("Lane {}   dial {}", ch.name, fmt::mhz(khz)),
             sub,
             move |k| k.ui.setup.draft.freq_khz = khz,
         ));
