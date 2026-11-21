@@ -595,6 +595,42 @@ impl BbHandle {
 mod tests {
     use super::*;
 
+    /// Whatever the server (or someone pretending to be it) pushes, parsing never panics.
+    #[test]
+    fn parsing_pushed_frames_survives_garbage() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let keys = ["t", "id", "dest", "size", "from", "blob", "status", "reason", "plan", "sig", "epoch", "via"];
+        let types = ["deliver", "receipt", "plan", "found", "dup", "unknown", "routed", "suspended", "slow", "error", "x"];
+        for _ in 0..3000 {
+            let mut frames = Vec::new();
+            for _ in 0..(next() % 5) {
+                let mut m = Map::new();
+                m.insert("t".into(), json!(types[(next() % types.len() as u64) as usize]));
+                for _ in 0..(next() % 6) {
+                    let k = keys[(next() % keys.len() as u64) as usize];
+                    let v = match next() % 7 {
+                        0 => Value::Null,
+                        1 => json!(next() as i64),
+                        2 => json!(-1.5e300),
+                        3 => json!("\u{0}\u{10FFFF}é".repeat((next() % 40) as usize)),
+                        4 => json!([1, "a", null]),
+                        5 => json!({"a": {"b": []}}),
+                        _ => json!(next() % 2 == 0),
+                    };
+                    m.insert(k.into(), v);
+                }
+                frames.push(Value::Object(m));
+            }
+            let _ = parse_frames(&frames);
+        }
+    }
+
     /// The signed body of `/register`, as the app makes it (canonical JSON of the fields).
     fn register_body(b: &Backbone, area: &str) -> Value {
         let mut f = Map::new();
