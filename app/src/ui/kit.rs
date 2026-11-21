@@ -64,8 +64,58 @@ pub fn titled(title: &str, body: impl Into<V>) -> V {
     col![heading(title), body.into()].gap(8.0).into()
 }
 
+/// A dropdown that opens in place. Alloy's own `pick` opens a floating list, and inside a
+/// scrolling page that list cannot be clicked, so this one pushes the content below it down.
+/// `key` names it, so only one is open at a time.
+pub fn dropdown(
+    k: &Kahf,
+    key: &'static str,
+    options: Vec<String>,
+    selected: Option<usize>,
+    on: impl Fn(&mut Kahf, usize) + Send + Sync + 'static,
+) -> V {
+    let open = k.ui.open_drop == Some(key);
+    let current = selected
+        .and_then(|i| options.get(i).cloned())
+        .unwrap_or_else(|| "Choose…".into());
+    let head = button(format!("{current}   {}", if open { "▴" } else { "▾" }))
+        .fill_w()
+        .act(move |k: &mut Kahf| {
+            k.ui.open_drop = if k.ui.open_drop == Some(key) {
+                None
+            } else {
+                Some(key)
+            }
+        });
+    if !open {
+        return head.into();
+    }
+    let on = std::sync::Arc::new(on);
+    let mut list = col![].gap(2.0).pad(4.0).fill_w();
+    for (i, name) in options.iter().enumerate() {
+        let on = on.clone();
+        list = list.push(
+            button(name.clone())
+                .nav(selected == Some(i))
+                .fill_w()
+                .act(move |k: &mut Kahf| {
+                    k.ui.open_drop = None;
+                    on(k, i);
+                }),
+        );
+    }
+    let body: V = if options.len() > 8 {
+        scroll(list).h(260.0).into()
+    } else {
+        list.into()
+    };
+    col![head, body.round(8.0).outline().fill_w()].gap(4.0).into()
+}
+
 /// A device list as a dropdown with "Computer default" first. Index 0 is the default.
 pub fn device_pick(
+    k: &Kahf,
+    key: &'static str,
     devices: &[String],
     current: &str,
     set: impl Fn(&mut Kahf, String) + Send + Sync + 'static,
@@ -78,18 +128,16 @@ pub fn device_pick(
         devices.iter().position(|d| d == current).map(|i| i + 1)
     };
     let items = devices.to_vec();
-    pick(names, sel)
-        .act(move |k: &mut Kahf, i: usize| {
-            set(
-                k,
-                if i == 0 {
-                    String::new()
-                } else {
-                    items[i - 1].clone()
-                },
-            )
-        })
-        .into()
+    dropdown(k, key, names, sel, move |k: &mut Kahf, i: usize| {
+        set(
+            k,
+            if i == 0 {
+                String::new()
+            } else {
+                items[i - 1].clone()
+            },
+        )
+    })
 }
 
 /// A short label that lights up (green, or red for `bad`) while `on`, and is dim otherwise.

@@ -264,6 +264,7 @@ pub struct Ui {
     pub map: crate::ui::map::MapState,
     pub tour_step: usize,
     pub support_nudge: bool,
+    pub open_drop: Option<&'static str>,
     pub call_edit: String,
     pub help_query: String,
     /// The moment the support note may appear.
@@ -311,6 +312,7 @@ impl Ui {
             map: Default::default(),
             tour_step: 0,
             support_nudge: false,
+            open_drop: None,
             call_edit: settings.callsign.clone(),
             help_query: String::new(),
             nudge_at: None,
@@ -413,6 +415,14 @@ impl Kahf {
     }
 
     /// Takes in what came from the engine and from finished work. Called 25 times a second.
+    /// The live spectrum, a recording and a playing note need frequent redraws; nothing else does.
+    pub fn wants_fast_tick(&self) -> bool {
+        self.m.page == Page::Radio
+            || self.ui.rec_start.is_some()
+            || self.ui.playing.is_some()
+            || self.ui.setup.previewing
+    }
+
     pub fn pump(&mut self) {
         if self.ui.nudge_at.is_some_and(|t| Instant::now() >= t) {
             self.ui.nudge_at = None;
