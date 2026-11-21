@@ -240,3 +240,5 @@ only counts). Not done: an outside review, a longer soak with real engines in a 
 frames under fuzzing.
 
 Deployed 2026-11-21 (owner: "you do it"): signing-key secret `PROJECT_KEY` uploaded, Worker deployed (version 58e80977), old backbone data deleted by migration v3. Decision: the relay switch in the app enables the one lane the plan gives it (a relay serves one lane at a time), not all eight relay lanes.
+
+Soak in a small cell (virtual clock, in-memory buses; not radio): three operators, four chats each at uneven gaps over three minutes, one relay: all twelve arrive exactly once and in order per sender, never from the receiver's own callsign (`a_cell_of_three_operators_delivers_every_message_once_and_in_order`, about 90 s of real time). Two relays chained by relay hints deliver (`a_message_goes_over_two_relays`). Still open: ten operators in one cell (not finished inside 2400 virtual seconds, WP5 capacity), and any soak with real radios.

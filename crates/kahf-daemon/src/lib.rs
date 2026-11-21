@@ -6169,6 +6169,57 @@ mod tests {
         assert!(z.poll_events().into_iter().all(|e| !matches!(e, Event::Message { .. })), "a duplicate arrived");
     }
 
+    /// Soak in a small cell: three operators write four messages each at uneven intervals over
+    /// three minutes; every message reaches the destination exactly once and in order per sender.
+    #[test]
+    fn a_cell_of_three_operators_delivers_every_message_once_and_in_order() {
+        let mut st = referee_cell("ref-soak", 3);
+        let mut z = st.pop().unwrap();
+        for e in st.iter_mut() {
+            e.listen().unwrap();
+        }
+        z.listen().unwrap();
+        let clock = test_clock();
+        clock.sleep(Duration::from_secs(30));
+        let t0 = clock.now();
+        // (operator index 1..=3, message number, send at second): uneven gaps.
+        let plan: Vec<(usize, usize, u64)> = (1..=3usize)
+            .flat_map(|op| (0..4usize).map(move |n| (op, n, [0u64, 37, 71, 140][n] + op as u64 * 9)))
+            .collect();
+        let mut sent = vec![false; plan.len()];
+        let mut seen: Vec<String> = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(1500) && seen.len() < plan.len() {
+            let el = clock.since(t0).as_secs();
+            for (i, (op, n, at)) in plan.iter().enumerate() {
+                if !sent[i] && el >= *at {
+                    st[*op].send_message("ZZ9ZZZ", &format!("op{op} n{n}")).unwrap();
+                    sent[i] = true;
+                }
+            }
+            for e in st.iter_mut() {
+                let _ = e.poll_events();
+            }
+            for ev in z.poll_events() {
+                if let Event::Message { from, text, .. } = ev {
+                    assert_ne!(from, "ZZ9ZZZ", "a message from the receiver's own callsign");
+                    seen.push(text);
+                }
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), plan.len(), "missing or duplicated: got {seen:?}");
+        assert_eq!(seen.len(), plan.len(), "a duplicate arrived: {seen:?}");
+        for op in 1..=3 {
+            let order: Vec<&String> = seen.iter().filter(|t| t.starts_with(&format!("op{op} "))).collect();
+            let mut want = order.clone();
+            want.sort();
+            assert_eq!(order, want, "operator {op}'s messages arrived out of order");
+        }
+    }
+
     #[test]
     fn a_pushed_plan_is_used_only_when_the_project_key_signed_it() {
         let key = kahf_core::auth::StationKey::generate();
