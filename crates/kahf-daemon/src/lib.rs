@@ -3130,7 +3130,10 @@ impl Worker {
                 let secs = job.samples.len() as f64 / RATE as f64;
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(Instant::now());
+                self.watch.tx_finished(
+                    Instant::now(),
+                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
+                );
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -3138,7 +3141,10 @@ impl Worker {
             Err(e) => {
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(Instant::now());
+                self.watch.tx_finished(
+                    Instant::now(),
+                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
+                );
                 self.emit_tx(TxState::Failed(e.clone()));
                 self.log(format!("transmit failed: {e}"));
                 true

@@ -44,6 +44,12 @@ pub struct ChannelWatch {
     /// Blocks of energy in a row, and whether a stretch long enough to be a burst just ended.
     run: usize,
     ended: bool,
+    /// How long our own sound takes to come back through the sound path (a virtual cable or a
+    /// monitoring radio), measured from the first energy that returns after one of our bursts.
+    /// Zero when nothing comes back.
+    latency: Duration,
+    /// Samples read since our last burst ended, while the first energy of its playback is awaited.
+    probe: Option<usize>,
     rng: u64,
 }
 
@@ -60,6 +66,8 @@ impl ChannelWatch {
             backoff_until: None,
             run: 0,
             ended: false,
+            latency: Duration::ZERO,
+            probe: None,
             rng: seed | 1,
         }
     }
@@ -81,31 +89,73 @@ impl ChannelWatch {
         std::mem::take(&mut self.ended)
     }
 
-    /// Our transmission ended: what arrives for a moment is our own signal.
-    pub fn tx_finished(&mut self, now: Instant) {
+    /// Our transmission of `tx_len` ended: what arrives for a moment is our own signal.
+    pub fn tx_finished(&mut self, now: Instant, tx_len: Duration) {
         self.pending.clear();
         self.last_energy = None;
         self.run = 0;
         self.ended = false;
-        self.ignore_until = Some(now + ECHO_GUARD);
+        // The audio read next starts when the burst did, so the offset of its first energy is the
+        // delay of the sound path. That only holds while the input buffer has not overflowed
+        // (about 2 s), so longer bursts are not used for it.
+        self.probe = (tx_len <= Duration::from_millis(1500)).then_some(0);
+        self.ignore_until = Some(now + self.guard());
+    }
+
+    fn guard(&self) -> Duration {
+        ECHO_GUARD.max(self.latency + Duration::from_millis(300))
+    }
+
+    /// How long the channel must have been quiet before a transmission may start: longer than the
+    /// delay of the sound path, or a signal we cannot see yet would be talked over.
+    fn quiet_needed(&self) -> Duration {
+        LISTEN_QUIET.max(self.latency + Duration::from_millis(150))
+    }
+
+    /// The measured delay of the sound path (zero when none was found).
+    #[cfg(test)]
+    pub fn latency(&self) -> Duration {
+        self.latency
+    }
+
+    fn block_db(block: &[f32]) -> f32 {
+        let mean_sq = block.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / block.len() as f64;
+        if mean_sq <= 0.0 {
+            -120.0
+        } else {
+            ((10.0 * mean_sq.log10()) as f32).max(-120.0)
+        }
     }
 
     /// Judges new receive audio read at `now`.
     pub fn push(&mut self, samples: &[f32], now: Instant) {
         if self.in_echo_guard(now) {
+            // Not judged as someone else's signal, but the first energy that comes back after our
+            // own burst tells how late our sound path is.
+            if let Some(read) = self.probe {
+                let mut at = read;
+                for block in samples.chunks(BLOCK) {
+                    if block.len() == BLOCK && Self::block_db(block) > BUSY_MIN_DB {
+                        let est = Duration::from_secs_f64(at as f64 / kahf_audio::RATE as f64);
+                        self.latency = est.min(Duration::from_millis(1500));
+                        self.probe = None;
+                        return;
+                    }
+                    at += block.len();
+                }
+                self.probe = Some(at);
+            }
             self.pending.clear();
             return;
+        }
+        if self.probe.take().is_some() {
+            // The guard ended with no energy: nothing of ours comes back.
+            self.latency = Duration::ZERO;
         }
         self.pending.extend_from_slice(samples);
         while self.pending.len() >= BLOCK {
             let block: Vec<f32> = self.pending.drain(..BLOCK).collect();
-            let mean_sq = block.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / BLOCK as f64;
-            let db = if mean_sq <= 0.0 {
-                -120.0
-            } else {
-                (10.0 * mean_sq.log10()) as f32
-            }
-            .max(-120.0);
+            let db = Self::block_db(&block);
             if db > (self.floor_db + BUSY_OVER_FLOOR_DB).max(BUSY_MIN_DB) {
                 self.last_energy = Some(now);
                 self.run += 1;
@@ -134,7 +184,7 @@ impl ChannelWatch {
     pub fn may_transmit(&mut self, now: Instant) -> bool {
         let quiet = self
             .last_energy
-            .is_none_or(|t| now.duration_since(t) >= LISTEN_QUIET);
+            .is_none_or(|t| now.duration_since(t) >= self.quiet_needed());
         if !quiet {
             let since = *self.blocked_since.get_or_insert(now);
             self.backoff_until = None;
@@ -201,10 +251,39 @@ mod tests {
     fn our_own_playback_is_not_someone_else() {
         let mut w = ChannelWatch::new(9);
         let t0 = Instant::now();
-        w.tx_finished(t0);
+        w.tx_finished(t0, Duration::from_millis(900));
         // The playback of our own burst arrives just after the transmission.
         w.push(&tone(3200, 0.2), t0 + Duration::from_millis(100));
         assert!(w.may_transmit(t0 + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn the_delay_of_the_sound_path_is_measured_from_the_first_energy_that_returns() {
+        let mut w = ChannelWatch::new(4);
+        let t0 = Instant::now();
+        w.tx_finished(t0, Duration::from_millis(900));
+        // 0.4 s of silence, then our own burst coming back.
+        w.push(&vec![0.0; 3200], t0 + Duration::from_millis(10));
+        w.push(&tone(3200, 0.2), t0 + Duration::from_millis(20));
+        let l = w.latency();
+        assert!(
+            l >= Duration::from_millis(380) && l <= Duration::from_millis(440),
+            "{l:?}"
+        );
+        // While that delay lasts, the channel is not called free sooner than it.
+        let t1 = t0 + Duration::from_secs(5);
+        w.push(&tone(1600, 0.05), t1);
+        assert!(!w.may_transmit(t1 + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn no_playback_means_no_delay() {
+        let mut w = ChannelWatch::new(6);
+        let t0 = Instant::now();
+        w.tx_finished(t0, Duration::from_millis(900));
+        w.push(&vec![0.0; 800], t0 + Duration::from_millis(100));
+        w.push(&vec![0.0; 800], t0 + Duration::from_secs(3));
+        assert_eq!(w.latency(), Duration::ZERO);
     }
 
     #[test]
