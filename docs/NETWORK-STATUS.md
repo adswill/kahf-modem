@@ -191,3 +191,32 @@ app; a WebSocket crate may be added (tungstenite, with rustls); the old queued-m
 | **Not done** | | the relay does not yet use the server's plan to decide when to transmit (its own 12 s referee round still runs; plans are verified and kept); the clash-domain graph and colouring (all relays are still one domain); the learner is fed by `heard` frames and receipts only; the NOAA job and the WebSocket path have not run on the live Worker; sending the occupancy reports to the server |
 
 **To deploy (owner asks first):** `cd server && npx wrangler secret put PROJECT_KEY < .project-key && npx wrangler deploy`. Rollback of the code: `npx wrangler rollback`; the deleted backbone data cannot come back. Old app versions that call `/msg/*` will get 404.
+
+## WP8 (part): delivery states and presence (2026-11-19 to 2026-11-21, session F)
+
+Done and tested: a sender sees where a chat stands (`Event::Delivery`: AtRelay, Delivered, Waiting) and the
+app shows it. An operator that hears a relay says "I am here" in a window slot at most every ten minutes
+(`Kind::Here`); the relay counts these (`heres_heard`) and passes only a 24 bit hash on to the mesh.
+Decision (recorded because the owner was away): two operators may pick the same window slot and then the
+relay hears neither. That is by design (they repeat after ten minutes), so the test uses one operator.
+Not done: the resend-storm check, deliver-first routing in the engine (direct first, relay only when direct
+fails), and keeping mail and voice notes on the direct link only. Not measured on air: everything here runs on
+the virtual clock and in-memory buses.
+
+## Merge with origin/main (2026-11-21, session F)
+
+The owner's other agent moved main on (62 commits: Alloy UI app, messaging layer, new modem ladder, GPL-3.0-or-later).
+Decisions, taken because the owner was away, and why:
+- Engine: our `kahf-daemon` (lane gate, referee, bundle chat, mesh link) is the base. Main's daemon was built on
+  ladder bursts and the old queued-message relay; the two modem paths cannot both drive one engine, and the lane
+  design is the 17 m plan. Main's `kahf-core` work (burst ladder, msg layer, weak-signal sync) is kept in core but is
+  not used by the engine. Not in the engine: main's `lbt.rs`, `server_sync.rs` and daemon examples (removed).
+- Server: our mesh backend and home page; main's extra pages (/network, /start, /protocol, /legal) and the GPL text
+  are kept; the old backbone is gone (owner decision 2026-11-19).
+- Apps: the Alloy UI app (`app/`) and `kahf-app-core` are main's and are kept, adapted to our engine. Old Tauri app
+  files are deleted; `kahf-ui` and `kahf-gui` (egui) are no longer built (they used the removed relay API).
+- Alloy app: twelve lanes (R1-R8, X1-X2, C1-C2) replace the three channels; the dial the person sets is the lane's USB
+  dial and is passed to the transmit gate; the Radio screen shows why transmit is off; the Relay screen shows referee
+  counters; delivery states and the Ko-fi button exist.
+Open: the server still has a three-channel band constant from main (used by its stress tools only); the relay switch
+in the app enables one lane for 24 h, not all relay lanes; relay slots/server sync are no longer shown.
