@@ -200,8 +200,9 @@ app shows it. An operator that hears a relay says "I am here" in a window slot a
 Decision (recorded because the owner was away): two operators may pick the same window slot and then the
 relay hears neither. That is by design (they repeat after ten minutes), so the test uses one operator.
 Deliver-first (relay delivers straight to the destination, pages other relays only on failure) lives in the server
-router (`router.js`) and in the engine's relay forward; the engine does not page other relays itself. Not done: the
-resend-storm check on the new datagram path, and a test that mail and voice notes stay on the direct link. Not measured on air: everything here runs on
+router (`router.js`) and in the engine's relay forward; the engine does not page other relays itself. Added tests (virtual clock, in-memory buses): six chats cost at most 18 bursts and arrive once each; mail, files and
+long texts never take the chat path; a message written while the relay is down arrives after it restarts; a relay's data
+folder holds no trace of the text it carried. Not measured on air: everything here runs on
 the virtual clock and in-memory buses.
 
 ## Merge with origin/main (2026-11-21, session F)

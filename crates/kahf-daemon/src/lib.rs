@@ -6041,6 +6041,60 @@ mod tests {
         assert!(got.is_some(), "the message never reached the destination ({n} stations)");
     }
 
+    /// The relay goes quiet for a while (a crash or a restart): a message written meanwhile is not
+    /// lost, it arrives once the relay is back.
+    #[test]
+    fn a_message_written_while_the_relay_is_down_arrives_when_it_is_back() {
+        let mut st = referee_cell("ref-restart", 1);
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        r.stop_relay();
+        a.send_message("ZZ9ZZZ", "written while the relay was down").unwrap();
+        let early = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")), 100);
+        assert!(early.is_none(), "it cannot arrive without a relay");
+        make_relay(&r);
+        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")), 600);
+        assert!(got.is_some(), "the message was lost across the relay restart");
+    }
+
+    /// Nothing is stored in the network: after a relay carried a chat, its data folder holds no
+    /// trace of the text (the relay keeps counts and hashes, never the words).
+    #[test]
+    fn a_relay_keeps_no_trace_of_the_text_it_carried() {
+        fn contains(dir: &Path, needle: &[u8]) -> bool {
+            let Ok(rd) = fs::read_dir(dir) else { return false };
+            rd.flatten().any(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    contains(&p, needle)
+                } else {
+                    fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle))
+                }
+            })
+        }
+        let mut st = referee_cell("ref-privacy", 1);
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        let words = "purple-giraffe-7731";
+        a.send_message("ZZ9ZZZ", words).unwrap();
+        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text == words), 400);
+        assert!(got.is_some(), "the message never arrived");
+        test_clock().sleep(Duration::from_secs(5));
+        assert!(!contains(&r.config.data_dir, words.as_bytes()), "the relay stored the text");
+        // The scan itself works: it finds the words in a file we plant.
+        let planted = z.config.data_dir.join("planted.txt");
+        fs::write(&planted, words).unwrap();
+        assert!(contains(&z.config.data_dir, words.as_bytes()), "sanity: the scan finds a planted file");
+    }
+
     #[test]
     fn hidden_operators_and_one_relay_every_message_arrives_once() {
         // Three operators by default; REF_OPS=10 runs ten (about 15 minutes of real time, and not
@@ -6129,6 +6183,51 @@ mod tests {
             clock.sleep(Duration::from_millis(20));
         }
         assert_eq!(states, vec![(id, Delivery::Delivered)]);
+    }
+
+    /// The resend storm check: six chats over a clean bus must not cost more than three bursts
+    /// each on the air (the data bursts and the answers together).
+    #[test]
+    fn six_chats_do_not_cause_a_resend_storm() {
+        let mut e = bus_engines("storm", &["AA1AAA", "BB1BBB"]);
+        for i in 0..6 {
+            e[0].send_chat("BB1BBB", &format!("message number {i}"), false).unwrap();
+        }
+        let clock = e[0].clock.clone();
+        let t0 = clock.now();
+        let (mut delivered, mut bursts, mut received) = (0, 0u32, 0);
+        while clock.now() < t0 + Duration::from_secs(300) && delivered < 6 {
+            for (n, eng) in e.iter_mut().enumerate() {
+                for ev in eng.poll_events() {
+                    match ev {
+                        Event::Delivery { state: Delivery::Delivered, .. } if n == 0 => delivered += 1,
+                        Event::Tx { state: TxState::Starting } => bursts += 1,
+                        Event::Message { .. } if n == 1 => received += 1,
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        assert_eq!(delivered, 6, "all six were acknowledged");
+        assert_eq!(received, 6, "each arrived exactly once");
+        assert!(bursts <= 18, "{bursts} bursts for six chats");
+    }
+
+    /// Only short chats take the datagram path (through the lane's relay); mail, files and long
+    /// texts stay on the direct link.
+    #[test]
+    fn mail_files_and_long_texts_never_take_the_chat_path() {
+        let item = |m: &Message| OutItem { kind: "msg".into(), payload: encode_message(m, false) };
+        let (from, to) = ("AA1AAA".to_string(), "BB1BBB".to_string());
+        let chat = Message::Chat { from: from.clone(), to: to.clone(), text: "hi".into() };
+        assert!(is_dg_item(&item(&chat)));
+        let long = Message::Chat { from: from.clone(), to: to.clone(), text: "x".repeat(2000) };
+        assert!(!is_dg_item(&item(&long)));
+        let mail = Message::Mail { from: from.clone(), to: to.clone(), subject: "s".into(), body: "b".into(), attachments: vec![] };
+        assert!(!is_dg_item(&item(&mail)));
+        let file = Message::File { from, to, name: "a.txt".into(), data: vec![1, 2, 3] };
+        assert!(!is_dg_item(&item(&file)));
     }
 
     #[test]
