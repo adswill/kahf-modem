@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::backend::Emitter;
 use codec2::{Codec2, Codec2Mode};
 use kahf_audio::{level_db, AudioIn, AudioOut};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
 
 const MAGIC: &[u8; 4] = b"KVM1";
 const MODE: Codec2Mode = Codec2Mode::MODE_1200;
@@ -163,7 +163,7 @@ fn voice_dir(data_dir: &Path) -> PathBuf {
 }
 
 impl Voice {
-    pub fn record(&self, app: AppHandle, device: Option<String>) -> Result<(), String> {
+    pub fn record(&self, emit: Emitter, device: Option<String>) -> Result<(), String> {
         let mut slot = self.rec.lock().map_err(|e| e.to_string())?;
         if slot.is_some() {
             return Ok(());
@@ -192,7 +192,7 @@ impl Voice {
                 if last_level.elapsed() >= Duration::from_millis(90) {
                     // About -50 dB (quiet room) to -10 dB (loud talker) across the meter.
                     let level = ((level_db(&window) + 50.0) / 40.0).clamp(0.0, 1.0);
-                    let _ = app.emit("engine", json!({ "type": "level", "level": level }));
+                    emit(json!({ "type": "level", "level": level }));
                     window.clear();
                     last_level = Instant::now();
                 }
