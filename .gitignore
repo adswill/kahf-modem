@@ -36,6 +36,5 @@ node_modules/
 server/.wrangler/
 
 # Desktop app
-app/dist/
+app/target/
 app/shots/
-app/src-tauri/gen/
