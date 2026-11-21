@@ -44,7 +44,7 @@ pub const DEFAULT_MOD_LEVEL: u8 = 1;
 /// Interval of `Action::Metrics` while connected, in link time.
 pub const METRICS_INTERVAL_MS: u64 = 5_000;
 /// Number of most recent received frames the frame error rate is measured over.
-pub const FER_WINDOW_FRAMES: usize = 50;
+pub const FER_WINDOW_FRAMES: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkState {
@@ -519,12 +519,17 @@ impl Link {
     /// Gap-based estimate of first-attempt frame loss: skipped sequence numbers over all
     /// sequence numbers seen. Corrupted frames never reach the link, so a gap is the only
     /// loss signal available here.
+    ///
+    /// Reported to the peer for its choice of speed, so it is the loss over the last
+    /// `FER_WINDOW_FRAMES` frames, not over the whole session: a bad start must not keep the
+    /// peer on the slowest speed for hundreds of frames after the channel has cleared.
     fn measured_fer_pct(&self) -> u8 {
-        let total = self.rx_new + self.rx_missing;
-        if total == 0 {
+        let n = self.fer_window.len();
+        if n == 0 {
             return 0;
         }
-        (self.rx_missing * 100 / total).min(100) as u8
+        let lost = self.fer_window.iter().filter(|&&l| l).count();
+        (lost * 100 / n).min(100) as u8
     }
 
     fn reset_arq(&mut self) {
@@ -735,6 +740,23 @@ mod tests {
         n.send_a(&blob);
         assert_eq!(n.b_rx[2..].concat(), blob);
         assert!(n.b_rx[2..].iter().all(|c| c.len() <= MAX_CHUNK));
+    }
+
+    /// A bad start must not hold the reported loss up for the rest of the session.
+    #[test]
+    fn reported_frame_loss_follows_the_recent_frames_not_the_whole_session() {
+        let mut n = connected_pair();
+        // Frame 0 arrives, frame 1 is missed for now (2 arrives first), then 1 is filled in.
+        n.b.on_receive(&encode_data(0, b"a"));
+        n.b.on_receive(&encode_data(2, b"c"));
+        n.b.on_receive(&encode_data(1, b"b"));
+        let early = n.b.measured_fer_pct();
+        assert!(early >= 25, "the gap was not counted: {early}");
+        // Then a long clean run: the loss falls back to zero within the window.
+        for seq in 3..40u8 {
+            n.b.on_receive(&encode_data(seq, b"y"));
+        }
+        assert_eq!(n.b.measured_fer_pct(), 0, "the old gap is still reported");
     }
 
     #[test]

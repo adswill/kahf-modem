@@ -81,6 +81,25 @@ Files are reliable but slow, about 10 bytes a second, because every frame is its
 channel check, a preamble and an acknowledgement. Packing several frames into one burst was
 tried and made transfers fail, so it was reverted; it needs work in the burst and link code.
 
+## Fourth pass: file speed
+
+Files were slow (about 10 bytes a second) and a link that dropped one rung never recovered.
+
+| Finding | Fix |
+|---|---|
+| Every frame went out as its own burst, and every frame got its own acknowledgement burst | Frames the link releases together go out as one burst (up to the rung's size), and a burst earns one acknowledgement: a newer ACK replaces one still waiting |
+| The loss rate reported to the peer was the loss over the whole session, so one bad first window kept it above the limit for hundreds of frames | It is now the loss over the last 16 frames (`kahf-core` link, with a test) |
+| After that early loss the link fell to R4 and stayed. On this clean path R4 lost about half of its frames (FER 43 to 56 percent) and each frame took seconds | The floor of a connected link is Q12 until the repeated rungs decode reliably (reported to the modem work) |
+
+Result over BlackHole, one session, 10 pairs of files (1.2 kB A to B, then 0.9 kB B to A, byte for byte):
+**20 of 20 pass, each in 15 to 18 s** (about 65 bytes a second, six times faster than before, and
+constant instead of 90 to 130 s). `cargo test -p kahf-daemon`: 92 to 93 pass; the noisy-bus
+end-to-end test is ignored again because it fails about one run in ten on a loaded machine (the
+noise bug it covers has an exact unit test).
+
+Open for the modem work: why R4 loses half its frames on a clean path, and a lower floor for
+weak HF links once it does not.
+
 ## Known limits
 
 - The mesh time is long because five engines and two app windows each scan every burst on one
