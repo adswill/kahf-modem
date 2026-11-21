@@ -10,8 +10,12 @@ use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{canvas, image, operation, text_editor};
 use iced::{event, Event, Subscription, Task, Theme};
 use kahf_core::link::{LinkState, CONNECT_TIMEOUT_MS, MAX_CONNECT_RETRIES};
-use kahf_daemon::{Config, Engine, Event as EngineEvent, RelayAck, TxState};
+use kahf_daemon::{
+    Area, Config, Engine, Event as EngineEvent, RelayAck, RelayStep, ServerSync, ServerSyncOptions, TxState,
+    RELAY_SERVER_URL,
+};
 
+use crate::live::{self, Live};
 use crate::sample::{self, Kind};
 use crate::spectrum::{self, Sim, Waterfall};
 use crate::strings as s;
@@ -22,6 +26,8 @@ const TOAST_SECONDS: u64 = 4;
 const MODAL_FADE_MS: u64 = 150;
 const PULSE_SECONDS: f32 = 1.8;
 pub const SNR_SECONDS: usize = 60;
+/// How often the live snapshot (relay state, contacts, logbook) is reread.
+const LIVE_REFRESH: Duration = Duration::from_secs(1);
 
 /// What the radio is busy with, for the pulsing status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +293,7 @@ pub enum Message {
     LogExport,
     OpenMap,
     Callsign(String),
+    Locator(String),
     RoleChosen(Role),
     AudioIn(String),
     AudioOut(String),
@@ -303,6 +310,26 @@ pub enum Message {
     Profile(&'static str),
     Level(f32),
     CheckUpdates,
+    UpdateChecked(Result<crate::update::Outcome, String>),
+    TestRig,
+    TestAudio(Probe),
+    ProbeDone(Probe, Result<String, String>),
+    OpenLogs,
+}
+
+/// What a connection test is checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    Rig,
+    AudioIn,
+    AudioOut,
+}
+
+/// State of one connection test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestState {
+    Running,
+    Done(Result<String, String>),
 }
 
 pub const PROFILES: &[&str] = &[s::PROFILE_AUTO, s::PROFILE_ROBUST, s::PROFILE_FAST];
@@ -319,6 +346,10 @@ pub struct App {
     pub file_sel: Option<usize>,
     pub listen_only: bool,
     pub sample: bool,
+    /// Result of the last update check, shown in Settings.
+    pub update_status: String,
+    /// Last result of each connection test, indexed by `Probe`.
+    pub tests: [Option<TestState>; 3],
     pub role: Role,
     pub callsign: String,
     pub palette: Option<Palette>,
@@ -361,11 +392,20 @@ pub struct App {
     pub relay_licence: bool,
     pub relay_terms: bool,
     live_spectrum: Option<Instant>,
+    /// Engine and data-folder snapshot shown when sample data is off.
+    pub live: Live,
+    live_at: Option<Instant>,
     pub setup_open: bool,
     pub setup_done: bool,
     pub setup_focus: Option<usize>,
     pub tx_intro_seen: bool,
     pub rig_addr: String,
+    /// Maidenhead locator; the relay server is told which square this relay serves.
+    pub locator: String,
+    /// Keeps this relay registered and scheduled on the server while relay mode runs.
+    server_sync: Option<ServerSync>,
+    /// Why the server sync is not running while relay mode is, if it is not.
+    pub server_note: Option<&'static str>,
     pub detected_audio: Vec<String>,
     pub detected_sdr: Vec<String>,
     pub composer: text_editor::Content,
@@ -482,6 +522,8 @@ impl App {
             sample: false,
             role: Role::Station,
             callsign: String::new(),
+            update_status: s::UPDATE_NOT_CHECKED.to_string(),
+            tests: [None, None, None],
             palette: None,
             confirm: None,
             modal_since: None,
@@ -517,11 +559,16 @@ impl App {
             relay_licence: false,
             relay_terms: false,
             live_spectrum: None,
+            live: Live::default(),
+            live_at: None,
             setup_open: false,
             setup_done: false,
             setup_focus: None,
             tx_intro_seen: false,
             rig_addr: String::new(),
+            locator: String::new(),
+            server_sync: None,
+            server_note: None,
             detected_audio: Vec::new(),
             detected_sdr: Vec::new(),
             composer: text_editor::Content::new(),
@@ -844,6 +891,7 @@ impl App {
 
     fn load_sample(&mut self, on: bool) {
         self.sample = on;
+        self.live_at = None;
         if on {
             let me = if self.my_call().is_empty() {
                 "You"
@@ -870,6 +918,29 @@ impl App {
 
     fn audio_choice(name: &str) -> Option<String> {
         (!name.is_empty() && name != s::DEVICE_SYSTEM).then(|| name.to_string())
+    }
+
+    /// Starts one connection test on a worker thread.
+    fn run_probe(&mut self, p: Probe) -> Task<Message> {
+        if self.tests[p as usize] == Some(TestState::Running) {
+            return Task::none();
+        }
+        self.tests[p as usize] = Some(TestState::Running);
+        let addr = self.rig_addr.clone();
+        let input = Self::audio_choice(&self.audio_in);
+        let output = Self::audio_choice(&self.audio_out);
+        Task::perform(
+            async move {
+                std::thread::spawn(move || match p {
+                    Probe::Rig => crate::diag::test_rig(&addr),
+                    Probe::AudioIn => crate::diag::test_audio_in(input.as_deref()),
+                    Probe::AudioOut => crate::diag::test_audio_out(output.as_deref()),
+                })
+                .join()
+                .unwrap_or_else(|_| Err("The test stopped unexpectedly.".into()))
+            },
+            move |r| Message::ProbeDone(p, r),
+        )
     }
 
     fn ensure_engine(&mut self) -> Result<&mut Engine, String> {
@@ -904,6 +975,7 @@ impl App {
 
     /// Drops the engine so the next use rebuilds it with the new settings.
     fn restart_engine(&mut self) {
+        self.stop_server_sync();
         self.engine = None;
         self.connect_try = None;
         self.link = None;
@@ -962,6 +1034,7 @@ impl App {
                 .into(),
             ),
             ("rigctld", self.rig_addr.clone()),
+            ("locator", self.locator.clone()),
         ]
     }
 
@@ -987,6 +1060,7 @@ impl App {
             _ => RigControl::None,
         };
         self.rig_addr = get("rigctld");
+        self.locator = get("locator");
     }
 
     /// Finishes setup. Refused, with a sentence on what to do, until a callsign is set.
@@ -1016,6 +1090,11 @@ impl App {
                 self.busy = Some((Busy::Connecting, Instant::now() + Duration::from_millis(2200)));
             }
             return Ok(None);
+        }
+        if let Step::Message(to, ..) | Step::File(to, _) | Step::Mail(to, ..) = &step {
+            let to = to.clone();
+            self.ensure_engine()?;
+            self.plan_relay_paths(&to);
         }
         let id = match step {
             Step::Connect(to) => {
@@ -1067,6 +1146,8 @@ impl App {
         // The daemon decides whether relay mode runs; the role shown follows it.
         if self.role.is_relay() && !engine.relay_running() {
             self.role = Role::Station;
+            self.server_sync = None;
+            self.server_note = None;
         }
         self.outbox = engine.outbox_pending().len();
         for ev in events {
@@ -1079,6 +1160,44 @@ impl App {
             .is_some_and(|t| t.since.elapsed() > limit)
         {
             self.connect_failed();
+        }
+    }
+
+    /// Rereads the live snapshot about once a second. Skipped while sample data is shown.
+    fn refresh_live(&mut self, now: Instant) {
+        if self.sample || self.live_at.is_some_and(|t| now.duration_since(t) < LIVE_REFRESH) {
+            return;
+        }
+        self.live_at = Some(now);
+        // The list is re-sorted on each read, so the selection follows the callsign, not the row.
+        let selected = self
+            .station_sel
+            .and_then(|i| self.live.stations.get(i))
+            .map(|c| c.call.clone());
+        self.live
+            .refresh(self.engine.as_ref(), self.server_sync.as_ref(), &self.data_dir);
+        self.station_sel = selected.and_then(|call| self.live.stations.iter().position(|c| c.call == call));
+    }
+
+    fn export_log(&mut self) {
+        if self.sample || self.live.qsos.is_empty() {
+            return self.toast(s::LOG_EXPORT_EMPTY, ToastKind::Warning);
+        }
+        match live::export_adif(&self.live.qsos, &self.data_dir) {
+            Ok(_) => self.toast(s::LOG_EXPORT_DONE, ToastKind::Info),
+            Err(e) => {
+                self.engine_note = e;
+                self.toast(s::LOG_EXPORT_FAIL, ToastKind::Warning);
+            }
+        }
+    }
+
+    /// Number of stations heard, for the status bar and the map summary.
+    pub fn stations_heard(&self) -> usize {
+        if self.sample {
+            sample::STATIONS.len()
+        } else {
+            self.live.stations.len()
         }
     }
 
@@ -1186,6 +1305,16 @@ impl App {
                 }
                 self.engine_note = msg;
             }
+            EngineEvent::Relay { from, to, step } => {
+                let line = match step {
+                    RelayStep::Held => format!("{} {from} {} {to}", s::RELAY_EV_HELD, s::RELAY_EV_TO),
+                    RelayStep::Sent => format!("{} {from} {} {to}", s::RELAY_EV_SENT, s::RELAY_EV_TO),
+                    RelayStep::Dropped(why) => {
+                        format!("{} {from} {} {to}: {why}", s::RELAY_EV_DROPPED, s::RELAY_EV_TO)
+                    }
+                };
+                self.note_event(line);
+            }
             EngineEvent::Tx { state } => match state {
                 TxState::Starting | TxState::Sending => {
                     self.busy = Some((Busy::Transmitting, now + Duration::from_secs(30)));
@@ -1212,14 +1341,16 @@ impl App {
     /// Sends the relay start request to the daemon, with the acknowledgement of both ticks.
     /// The daemon's own relay start must also refuse without it; the panel is not the only gate.
     fn start_relay(&mut self, role: Role) {
+        if !(self.relay_licence && self.relay_terms) {
+            return;
+        }
+        // The relay network works on 17 m, so relay mode always starts there.
+        let earlier_band = self.band;
+        self.set_band(spectrum::Band::M17);
         let channels: Vec<f32> = spectrum::channels()
             .iter()
             .map(|(hz, _)| (*hz / 1000.0) as f32)
             .collect();
-        let acknowledged = self.relay_licence && self.relay_terms;
-        if !acknowledged {
-            return;
-        }
         let core_role = if role == Role::Both {
             kahf_core::relay::Role::RelayAndStation
         } else {
@@ -1239,20 +1370,112 @@ impl App {
             Ok(()) => {
                 self.role = role;
                 self.toast(s::TOAST_RELAY_STARTED, ToastKind::Info);
+                self.start_server_sync();
             }
             Err(why) => {
-                // Relay stays off.
+                // Relay stays off, on the band the operator had.
                 self.role = Role::Station;
+                self.set_band(earlier_band);
                 self.toast(&why, ToastKind::Warning);
             }
         }
     }
 
-    fn toast(&mut self, text: &str, kind: ToastKind) {
-        self.events.push((crate::view::utc_clock(), text.to_string()));
+    /// Registers this relay with the relay server and keeps its schedule current.
+    /// Relay mode still runs on the air without it; the Relay screen says why it is off.
+    fn start_server_sync(&mut self) {
+        self.server_sync = None;
+        let Some((lat, lon)) = live::locator_position(&self.locator) else {
+            self.server_note = Some(s::SERVER_NEEDS_LOCATOR);
+            return;
+        };
+        let started = match (Area::from_position(lat, lon), self.engine.as_ref()) {
+            (Ok(area), Some(e)) => e.start_server_sync(ServerSyncOptions {
+                base_url: RELAY_SERVER_URL.to_string(),
+                area,
+                requests: Vec::new(),
+            }),
+            (Err(e), _) => Err(e),
+            (_, None) => Err(s::BLOCK_NO_ENGINE.to_string()),
+        };
+        match started {
+            Ok(sync) => {
+                self.server_sync = Some(sync);
+                self.server_note = None;
+            }
+            Err(why) => {
+                self.server_note = Some(s::SERVER_NOT_STARTED);
+                self.note_event(why);
+            }
+        }
+        self.live_at = None;
+    }
+
+    /// Points the engine's relay paths at the best 17 m relays toward `to`, using the
+    /// grid locators of this station and of the known stations. Does nothing when this
+    /// station or `to` has no locator; the message then waits for `to` directly.
+    fn plan_relay_paths(&mut self, to: &str) {
+        use kahf_prop::route::{Conditions, Node};
+        let Some(me) = live::locator_position(&self.locator) else {
+            return;
+        };
+        let known: Vec<Node> = self
+            .live
+            .stations
+            .iter()
+            .filter_map(|c| live::locator_position(&c.qth).map(|p| Node::new(&c.call, p)))
+            .collect();
+        let Some(dest) = known.iter().find(|n| n.call.eq_ignore_ascii_case(to)) else {
+            return;
+        };
+        let (hour, month) = live::utc_hour_month(live::now_unix());
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        let planned = engine.plan_relay_paths(
+            &Node::new(self.my_call(), me),
+            dest,
+            &known,
+            &Conditions::band_17m(hour, month),
+        );
+        match planned {
+            Ok(paths) if !paths.is_empty() => {
+                self.note_event(format!("{} {to}: {}", s::RELAY_PATHS, paths.join(", ")))
+            }
+            Ok(_) => {}
+            Err(why) => self.note_event(why),
+        }
+    }
+
+    fn stop_server_sync(&mut self) {
+        self.server_sync = None;
+        self.server_note = None;
+    }
+
+    fn set_band(&mut self, b: spectrum::Band) {
+        self.band = b;
+        self.tune = 0.5;
+        spectrum::set_centre_hz(b.centre_hz());
+    }
+
+    /// Adds a line to Last events without a toast.
+    fn note_event(&mut self, text: String) {
+        self.events.push((crate::view::utc_clock(), text));
         if self.events.len() > 8 {
             self.events.remove(0);
         }
+    }
+
+    fn toast(&mut self, text: &str, kind: ToastKind) {
+        crate::applog::log(
+            if kind == ToastKind::Warning {
+                "WARN"
+            } else {
+                "INFO"
+            },
+            text,
+        );
+        self.note_event(text.to_string());
         self.toast = Some(Toast {
             text: text.to_string(),
             kind,
@@ -1480,6 +1703,7 @@ impl App {
                 self.clock = now;
                 self.ticks += 1;
                 self.poll_engine(now);
+                self.refresh_live(now);
                 let live = self
                     .live_spectrum
                     .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
@@ -1531,6 +1755,7 @@ impl App {
             }
             Message::AttachPath(p) => self.attach_path = p,
             Message::RigAddr(a) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig_addr = a;
                 self.restart_engine();
                 self.save();
@@ -1617,8 +1842,13 @@ impl App {
             Message::StationFilter(f) => self.station_filter = f,
             Message::SelectStation(i) => {
                 self.station_sel = Some(i);
-                if let Some(st) = sample::STATIONS.get(i) {
-                    self.target = st.call.to_string();
+                let call = if self.sample {
+                    sample::STATIONS.get(i).map(|st| st.call.to_string())
+                } else {
+                    self.live.stations.get(i).map(|c| c.call.clone())
+                };
+                if let Some(call) = call {
+                    self.target = call;
                 }
             }
             Message::SelectConversation(i) => {
@@ -1704,7 +1934,7 @@ impl App {
             Message::RelayAccept => self.toast(s::TOAST_SCHEDULE_ACCEPTED, ToastKind::Info),
             Message::RelayDecline => self.toast(s::TOAST_SCHEDULE_DECLINED, ToastKind::Info),
             Message::LogSearch(q) => self.log_search = q,
-            Message::LogExport => self.toast(s::LOG_EXPORT_DONE, ToastKind::Warning),
+            Message::LogExport => self.export_log(),
             Message::OpenMap => {
                 if open_in_browser(s::MAP_URL).is_err() {
                     self.toast(s::TOAST_MAP_FAIL, ToastKind::Warning);
@@ -1720,6 +1950,10 @@ impl App {
                 self.restart_engine();
                 self.save();
             }
+            Message::Locator(l) => {
+                self.locator = l.trim().chars().take(6).collect();
+                self.save();
+            }
             Message::RoleChosen(r) => {
                 if r.is_relay() && !self.role.is_relay() {
                     // Starting relay mode always asks, every time.
@@ -1731,6 +1965,7 @@ impl App {
                         if let Some(e) = self.engine.as_ref() {
                             e.stop_relay();
                         }
+                        self.stop_server_sync();
                         self.relay_reset();
                     }
                     self.role = r;
@@ -1748,14 +1983,13 @@ impl App {
                 }
             }
             Message::AudioIn(d) => {
+                self.tests[Probe::AudioIn as usize] = None;
                 self.audio_in = d;
                 self.restart_engine();
                 self.save();
             }
             Message::BandChosen(b) => {
-                self.band = b;
-                spectrum::set_centre_hz(b.centre_hz());
-                self.tune = 0.5;
+                self.set_band(b);
             }
             Message::VolIn(v) => {
                 self.vol_in = v;
@@ -1766,11 +2000,13 @@ impl App {
                 self.save();
             }
             Message::AudioOut(d) => {
+                self.tests[Probe::AudioOut as usize] = None;
                 self.audio_out = d;
                 self.restart_engine();
                 self.save();
             }
             Message::RigChosen(r) => {
+                self.tests[Probe::Rig as usize] = None;
                 self.rig = r;
                 self.restart_engine();
                 self.save();
@@ -1791,10 +2027,84 @@ impl App {
             Message::ShowSample(on) => self.load_sample(on),
             Message::Profile(p) => self.profile = p,
             Message::Level(v) => self.level = v,
-            Message::CheckUpdates => self.toast(s::SET_CHECK_DONE, ToastKind::Info),
+            Message::CheckUpdates => {
+                if self.update_status != s::UPDATE_CHECKING {
+                    self.update_status = s::UPDATE_CHECKING.to_string();
+                    return Task::perform(
+                        async {
+                            std::thread::spawn(|| crate::update::check(env!("CARGO_PKG_VERSION")))
+                                .join()
+                                .unwrap_or_else(|_| Err("the check stopped".into()))
+                        },
+                        Message::UpdateChecked,
+                    );
+                }
+            }
+            Message::TestRig => return self.run_probe(Probe::Rig),
+            Message::TestAudio(p) => return self.run_probe(p),
+            Message::ProbeDone(p, result) => {
+                let tag = if result.is_ok() { "INFO" } else { "WARN" };
+                crate::applog::log(
+                    tag,
+                    &format!("{p:?} test: {}", result.as_ref().unwrap_or_else(|e| e)),
+                );
+                self.tests[p as usize] = Some(TestState::Done(result));
+            }
+            Message::OpenLogs => {
+                let dir = log_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if open_in_browser(&dir.to_string_lossy()).is_err() {
+                    self.toast(s::LOGS_OPEN_FAIL, ToastKind::Warning);
+                }
+            }
+            Message::UpdateChecked(result) => match result {
+                Ok(crate::update::Outcome::UpToDate) => {
+                    self.update_status = s::UPDATE_CURRENT.to_string();
+                }
+                Ok(crate::update::Outcome::Newer(latest)) => {
+                    self.update_status = s::UPDATE_NEWER.replace("{v}", &latest.version);
+                    let text = self.update_status.clone();
+                    self.toast(&text, ToastKind::Info);
+                    if !latest.url.is_empty() {
+                        let _ = open_in_browser(&latest.url);
+                    }
+                }
+                Err(_) => {
+                    self.update_status = s::UPDATE_FAILED.to_string();
+                    self.toast(s::UPDATE_FAILED, ToastKind::Warning);
+                }
+            },
         }
         Task::none()
     }
+}
+
+/// The folder for KAHF's own files. `APPDATA` on Windows, `~/.config/kahf` elsewhere.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    config_dir_from(
+        std::env::var_os("APPDATA"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+        cfg!(windows),
+    )
+}
+
+fn config_dir_from(
+    appdata: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    match (windows, appdata, home) {
+        (true, Some(a), _) => Some(PathBuf::from(a).join("kahf")),
+        (_, _, Some(h)) => Some(PathBuf::from(h).join(".config").join("kahf")),
+        _ => None,
+    }
+}
+
+/// Where the log files are kept, next to the other KAHF files.
+pub(crate) fn log_dir() -> PathBuf {
+    config_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(|| PathBuf::from("kahf-logs"))
 }
 
 /// Where the UI state is remembered between runs.
@@ -1802,15 +2112,15 @@ fn state_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KAHF_UI_STATE") {
         return Some(p.into());
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("kahf").join("ui-state"))
+    config_dir().map(|d| d.join("ui-state"))
 }
 
 fn default_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("KAHF_DATA_DIR") {
         return p.into();
     }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".config").join("kahf").join("data"))
+    config_dir()
+        .map(|d| d.join("data"))
         .unwrap_or_else(|| PathBuf::from("kahf-data"))
 }
 
@@ -1865,6 +2175,19 @@ mod tests {
 
     fn char_key(c: &str, mods: Modifiers) -> Message {
         Message::Key(Key::Character(c.into()), mods)
+    }
+
+    #[test]
+    fn probe_result_is_kept_per_test() {
+        let mut app = ready();
+        let _ = app.update(Message::TestRig);
+        assert_eq!(app.tests[Probe::Rig as usize], Some(TestState::Running));
+        assert!(app.tests[Probe::AudioIn as usize].is_none());
+        let _ = app.update(Message::ProbeDone(Probe::Rig, Err("down".into())));
+        assert_eq!(
+            app.tests[Probe::Rig as usize],
+            Some(TestState::Done(Err("down".into())))
+        );
     }
 
     #[test]
@@ -2025,6 +2348,116 @@ mod tests {
     }
 
     #[test]
+    fn band_list_covers_the_band_plan_and_relay_uses_17m() {
+        for seg in kahf_core::bandplan::KAHF_SEGMENTS {
+            assert!(
+                spectrum::Band::ALL.iter().any(|b| b.to_string() == seg.name),
+                "{} has no band entry",
+                seg.name
+            );
+        }
+        // A start the daemon refuses (no callsign here) leaves the band as it was.
+        let mut app = App::init();
+        app.relay_licence = true;
+        app.relay_terms = true;
+        app.start_relay(Role::Relay);
+        assert!(!app.role.is_relay());
+        assert_eq!(app.band, spectrum::Band::M40);
+
+        let mut app = App::init();
+        app.callsign = "XX0AB".into();
+        app.data_dir = std::env::temp_dir().join(format!("kahf-ui-relay-{}", std::process::id()));
+        app.relay_licence = true;
+        app.relay_terms = true;
+        app.start_relay(Role::Relay);
+        assert!(app.role.is_relay(), "relay did not start: {:?}", app.events);
+        assert_eq!(app.band, spectrum::Band::M17);
+        assert!(spectrum::channels()
+            .iter()
+            .all(|(hz, _)| (18_111_000.0..=18_120_000.0).contains(hz)));
+        assert!(!spectrum::channels().is_empty());
+        drop(app);
+        let _ = std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("kahf-ui-relay-{}", std::process::id())),
+        );
+    }
+
+    #[test]
+    fn server_sync_needs_a_locator() {
+        let mut app = App::init();
+        app.start_server_sync();
+        assert_eq!(app.server_note, Some(s::SERVER_NEEDS_LOCATOR));
+        let _ = app.update(Message::Locator(" kp20le7 ".into()));
+        assert_eq!(app.locator, "kp20le");
+        assert!(app.state().contains(&("locator", "kp20le".to_string())));
+    }
+
+    #[test]
+    fn sends_plan_17m_relay_paths_from_locators() {
+        use kahf_log::contacts::Contact;
+        let contact = |call: &str, qth: &str| Contact {
+            call: call.into(),
+            name: String::new(),
+            qth: qth.into(),
+            notes: String::new(),
+            last_heard: None,
+        };
+        let dir = std::env::temp_dir().join(format!("kahf-ui-plan-{}", std::process::id()));
+        let mut app = App::init();
+        app.callsign = "XX0AB".into();
+        app.data_dir = dir.clone();
+        app.live.stations = vec![
+            contact("XX9ZZ", "FN31"),
+            contact("XX3RL", "IO91"),
+            contact("XX4NO", ""),
+        ];
+        app.ensure_engine().unwrap();
+
+        // Without this station's locator nothing is planned.
+        app.plan_relay_paths("XX9ZZ");
+        assert!(app.engine.as_ref().unwrap().relay_paths().is_empty());
+
+        app.locator = "KP20".into();
+        app.plan_relay_paths("XX9ZZ");
+        // The engine gets what the planner gives for these positions; the station
+        // without a locator is left out.
+        use kahf_prop::route::{first_relays, Conditions, Node};
+        let (hour, month) = live::utc_hour_month(live::now_unix());
+        let pos = |l| live::locator_position(l).unwrap();
+        let expected = first_relays(
+            &Node::new("XX0AB", pos("KP20")),
+            &Node::new("XX9ZZ", pos("FN31")),
+            &[Node::new("XX9ZZ", pos("FN31")), Node::new("XX3RL", pos("IO91"))],
+            &Conditions::band_17m(hour, month),
+        );
+        assert_eq!(app.engine.as_ref().unwrap().relay_paths(), expected);
+        assert!(!app.events.iter().any(|(_, l)| l.contains("XX4NO")));
+        drop(app);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relay_events_are_listed() {
+        let mut app = App::init();
+        let ev = |step| EngineEvent::Relay {
+            from: "XX1AA".into(),
+            to: "XX9ZZ".into(),
+            step,
+        };
+        app.on_engine_event(ev(RelayStep::Sent), Instant::now());
+        app.on_engine_event(ev(RelayStep::Dropped("queue full".into())), Instant::now());
+        let lines: Vec<&str> = app.events.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "Relayed a message from XX1AA to XX9ZZ",
+                "Did not relay a message from XX1AA to XX9ZZ: queue full"
+            ]
+        );
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
     fn segments_are_found_and_outside_is_reported() {
         assert!(spectrum::segment_at(18_115_000.0).is_some());
         let _ = App::init().update(Message::BandChosen(spectrum::Band::M17));
@@ -2052,5 +2485,60 @@ mod tests {
         assert!(app.files.is_empty() && app.thread.is_empty());
         let _ = app.update(Message::ShowSample(true));
         assert!(!app.files.is_empty() && !app.thread.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod config_dir_tests {
+    use super::config_dir_from;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_prefers_appdata() {
+        let d = config_dir_from(Some("C:\\A".into()), Some("C:\\H".into()), true);
+        assert_eq!(d, Some(PathBuf::from("C:\\A").join("kahf")));
+    }
+
+    #[test]
+    fn windows_without_appdata_uses_home() {
+        let d = config_dir_from(None, Some("C:\\H".into()), true);
+        assert_eq!(d, Some(PathBuf::from("C:\\H").join(".config").join("kahf")));
+    }
+
+    #[test]
+    fn unix_uses_home_and_ignores_appdata() {
+        let d = config_dir_from(Some("/a".into()), Some("/h".into()), false);
+        assert_eq!(d, Some(PathBuf::from("/h/.config/kahf")));
+    }
+
+    #[test]
+    fn nothing_set_gives_none() {
+        assert_eq!(config_dir_from(None, None, false), None);
+    }
+}
+
+#[cfg(test)]
+mod smoke {
+    use super::*;
+
+    /// Headless smoke test for CI: every section builds its widget tree and lays out
+    /// in an offscreen window (no GPU, no display) without panicking, and the
+    /// navigation shows that section's label.
+    #[test]
+    fn every_section_renders() {
+        let settings = iced::Settings {
+            default_font: crate::theme::UI_FONT,
+            ..Default::default()
+        };
+        for section in Section::ALL {
+            let mut app = App::init();
+            app.section = section;
+            let mut sim =
+                iced_test::Simulator::with_size(settings.clone(), iced::Size::new(1280.0, 800.0), app.view());
+            assert!(
+                sim.find(section.label()).is_ok(),
+                "{section:?} screen did not render its label"
+            );
+        }
     }
 }

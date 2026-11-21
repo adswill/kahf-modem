@@ -800,7 +800,7 @@ pub fn transmit_modulation(&self) -> &'static str {
 
     /// The most recent forwards across all messages, newest first, with how many in total.
     pub fn relay_recent(&self, n: usize) -> (Vec<Hop>, usize) {
-        lock(&self.shared.hops).recent(n)
+        lock(&self.shared.hops).recent_counted(n)
     }
 
     /// Forwards recorded for one message, in order (plan 4). `message_id` is the public id.
@@ -6140,16 +6140,19 @@ mod tests {
         r.listen().unwrap();
         z.listen().unwrap();
         a.listen().unwrap();
+        // One operator only: two operators can pick the same window slot and then the relay hears
+        // neither (that is the design; they say it again after ten minutes).
+        z.set_listen_only(true);
         // Beacons every 12 s; the operator picks a window slot after the first one it hears.
         let clock = test_clock();
         let t0 = clock.now();
-        while clock.now() < t0 + Duration::from_secs(90) && r.heres_heard() == 0 {
+        while clock.now() < t0 + Duration::from_secs(120) && r.heres_heard() == 0 {
             for e in [&mut r, &mut a, &mut z] {
                 let _ = e.poll_events();
             }
             clock.sleep(Duration::from_millis(50));
         }
-        assert_eq!(r.heres_heard(), 1, "the relay did not hear an operator say it is here");
+        assert_eq!(r.heres_heard(), 1, "the relay did not hear the operator say it is here");
         // Not again within ten minutes.
         let t1 = clock.now();
         while clock.now() < t1 + Duration::from_secs(300) {

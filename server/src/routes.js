@@ -4,7 +4,9 @@
 // Routes:
 //   GET  /           home page (renderHome)
 //   GET  /map        live map (renderMap)
+//   GET  /network, /start, /protocol, /legal   inner pages (renderSite)
 //   GET  /operate.png  the screenshot on the home page
+//   GET  /fonts/display.woff2  the heading typeface
 //   GET  /stations   current station records as JSON
 //   GET  /zones      busy channels per area (busyZones) and channel pools
 //   POST /report     signed reception report
@@ -15,7 +17,6 @@
 //   GET  /release    the current release announcement, or null
 //   POST /release    signed release announcement from the owner's release key
 //   GET  /mesh/ws, POST /mesh/frames, /mesh/poll  signed relay mesh (mesh.js)
-//   GET  /relay/wanted  destination callsigns that have queued messages
 import {
   BUSY_WINDOW_S,
   EXPIRY_MS,
@@ -38,7 +39,8 @@ import {
 } from "./core.js";
 import { FORBIDDEN_KEYS } from "./hub.js";
 import { OPERATE_PNG_BASE64 } from "./web/operate-png.js";
-import { homeScriptSha256, mapScriptSha256, renderHome, renderMap } from "./page.ts";
+import { DISPLAY_FONT_BASE64 } from "./web/display-font.js";
+import { homeScriptSha256, mapScriptSha256, renderHome, renderMap, renderSite, SITE_PATHS } from "./page.ts";
 
 const HOME_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -54,6 +56,7 @@ function mapCsp(scriptSource) {
     `script-src ${scriptSource} https://unpkg.com`,
     "style-src 'unsafe-inline' https://unpkg.com",
     "img-src 'self' data: blob:",
+    "font-src 'self'",
     "connect-src 'self'",
     "worker-src blob:",
     "base-uri 'none'",
@@ -67,7 +70,7 @@ function mapCsp(scriptSource) {
  * that script can call GET /map-data and GET /release on this server only.
  */
 function homeCsp(scriptSource) {
-  return HOME_CSP.replace("img-src 'none'", `script-src ${scriptSource}; img-src 'self'`).replace(
+  return HOME_CSP.replace("img-src 'none'", `script-src ${scriptSource}; img-src 'self'; font-src 'self'`).replace(
     "base-uri",
     "connect-src 'self'; base-uri",
   );
@@ -159,6 +162,28 @@ async function currentStations(store, nowMs) {
 
 async function getHome() {
   return html(renderHome(), homeCsp(await homeScriptSha256()));
+}
+
+/** Inner pages (/network, /start, /protocol, /legal): static HTML under the home page policy. */
+const sitePage = (path) => async () => html(renderSite(path), homeCsp(await homeScriptSha256()));
+
+let displayFont = null;
+
+/** The display face used by the headings. Static, so it may be cached for a long time. */
+function getDisplayFont() {
+  if (!displayFont) {
+    const binary = atob(DISPLAY_FONT_BASE64);
+    displayFont = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) displayFont[i] = binary.charCodeAt(i);
+  }
+  return new Response(displayFont, {
+    headers: {
+      "content-type": "font/woff2",
+      "cache-control": "public, max-age=604800, immutable",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'",
+    },
+  });
 }
 
 let operatePng = null;
@@ -480,7 +505,9 @@ async function getTile({ request, options }, m) {
 const ROUTES = {
   "/": { GET: getHome, HEAD: getHome },
   "/map": { GET: getMap, HEAD: getMap },
+  ...Object.fromEntries(SITE_PATHS.map((p) => [p, { GET: sitePage(p), HEAD: sitePage(p) }])),
   "/operate.png": { GET: getOperatePng, HEAD: getOperatePng },
+  "/fonts/display.woff2": { GET: getDisplayFont, HEAD: getDisplayFont },
   "/map-data": { GET: getMapData },
   "/stations": { GET: getStations },
   "/zones": { GET: getZones },
@@ -500,7 +527,7 @@ const ROUTES = {
  * @param {Request} request
  * @param {{ get: Function, put: Function, remove: Function, listAll: Function, claimOwner: Function, claimRemoval: Function, claimRelay: Function, getRelay: Function, joinArea: Function, leaveArea: Function, bookSchedule: Function }} store
  * @param {number} [nowMs]
- * @param {{ releaseKey?: string, relayRateLimit?: number }} [options] relayRateLimit: backbone calls per relay per minute; releaseKey: base64 Ed25519 key allowed to post releases
+ * @param {{ releaseKey?: string }} [options] releaseKey: base64 Ed25519 key allowed to post releases
  * @returns {Promise<Response>}
  */
 export async function handleRequest(request, store, nowMs = Date.now(), options = {}) {

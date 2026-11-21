@@ -378,7 +378,7 @@ ${devSection()}
 <div class="fine">
 <div>
 <h3>Licence</h3>
-<p>Source-available. Copyright (c) 2026 adswill, all rights reserved. Nothing here grants a licence to copy or redistribute it.</p>
+<p>Free software under the GNU General Public License, version 3 or later. Copyright (c) 2026 adswill. You can use, study, change and share it. Changed versions, and programs built on it, must be shared under the same licence with their source.</p>
 <h3>Your responsibility</h3>
 <p>KAHF is for licensed amateur radio operators. You are responsible for staying inside your licence: bands, modes, power and rules on third-party traffic differ from country to country. KAHF asks you to confirm each transmission. It does not decide for you.</p>
 </div>
@@ -387,33 +387,53 @@ ${devSection()}
 <p>No religious or political content. The project does not carry or promote either, and operators remain responsible for what they send.</p>
 <h3>Map privacy</h3>
 <p>Location sharing on the map is off by default. If you turn it on, you share a point accurate to about 200 m, or a circle of 1 to 100 km with your real position somewhere inside.</p>
+<p><a href="/legal">Licence, privacy and terms</a></p>
 </div>
 </div>
 </section>
 </div>`;
 }
 
-/** The masthead and footer of the home page. */
-export const HOME_HEAD = `<header class="mast">
-<div class="in">
-<a class="brand" href="/">KAHF</a>
-<p class="sub">Radio messages on 17 metres</p>
-<nav aria-label="Main">
-<a href="#lanes">Lanes</a>
+/**
+ * The masthead of the home page and the inner pages. The home page links to its own
+ * sections; an inner page links to the other pages and marks its own.
+ * @param {string} current "home" or an inner page name such as "network"
+ */
+export function homeHead(current) {
+  const cur = (name) => (current === name ? ' aria-current="page"' : "");
+  const nav =
+    current === "home"
+      ? `<a href="#lanes">Lanes</a>
 <a href="#messages">Messages</a>
 <a href="#reach">Range</a>
 <a href="#status">Status</a>
 <a href="#dev">Build</a>
+<a href="/network">Network</a>
+<a href="/protocol">Modem</a>
+<a href="/start">Get started</a>
+<a href="/map">Live map</a>`
+      : `<a href="/">Home</a>
+<a href="/network"${cur("network")}>Network</a>
 <a href="/map">Live map</a>
+<a href="/protocol"${cur("protocol")}>Modem</a>
+<a href="/start"${cur("start")}>Get started</a>
+<a href="/legal"${cur("legal")}>Legal</a>`;
+  return `<header class="mast">
+<div class="in">
+<a class="brand" href="/">KAHF</a>
+<p class="sub">Radio messages on 17 metres</p>
+<nav aria-label="Main">
+${nav}
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>
 </div>
 </header>`;
+}
 
 export const HOME_FOOT = `<footer class="base">
 <div class="in">
-<p>KAHF is pre-release software for licensed amateur radio operators. Copyright (c) 2026 adswill.</p>
-<p class="sp"><a href="https://github.com/adswill/kahf-modem" rel="noopener noreferrer">Source on GitHub</a></p>
-<p><a href="https://ko-fi.com/adswill" rel="noopener noreferrer">Support KAHF on Ko-fi</a></p>
+<p>KAHF is pre-release software for licensed amateur radio operators. Free software under the GNU GPL v3 or later. Copyright (c) 2026 adswill.</p>
+<p class="sp"><a href="/network">Relay network</a> &middot; <a href="/protocol">Modem details</a> &middot; <a href="/start">Get started</a> &middot; <a href="/legal">Licence and privacy</a></p>
+<p><a href="https://github.com/adswill/kahf-modem" rel="noopener noreferrer">Source on GitHub</a> &middot; <a href="https://ko-fi.com/adswill" rel="noopener noreferrer">Support KAHF on Ko-fi</a></p>
 </div>
 </footer>`;

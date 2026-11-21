@@ -114,6 +114,13 @@ pub static KAHF_SEGMENTS: &[Segment] = &[Segment {
     upper_hz: 18_120_000,
 }];
 
+/// Where relays work by default: 17 m, 18.111 to 18.120 MHz (three channels).
+pub const RELAY_SEGMENT: Segment = Segment {
+    name: "17 m, 18.111 to 18.120 MHz",
+    lower_hz: 18_111_000,
+    upper_hz: 18_120_000,
+};
+
 /// Name of the KAHF segment that holds the whole channel, or `None`.
 ///
 /// The channel is `centre_hz` plus or minus half of `width_hz`. Both edges must lie inside

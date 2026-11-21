@@ -9,8 +9,9 @@ import { encodeBase64, radiusDegrees } from "./core.js";
 import { CSS } from "./web/styles.js";
 import { HOME_SCRIPT } from "./web/script.js";
 import { LIVE_MAP_SCRIPT } from "./web/live-map.js";
-import { homeBody, HOME_HEAD, HOME_FOOT } from "./web/home.js";
+import { homeBody, homeHead, HOME_FOOT } from "./web/home.js";
 import { HOME_CSS } from "./web/home-css.js";
+import { SITE_PAGES } from "./web/pages.js";
 
 /**
  * @typedef {import("./types").Location} Location
@@ -246,14 +247,16 @@ const EMPTY_STATE = `<p>No relays or stations have reported in the last 48 hours
  * Wraps a page body in the shared header, footer and script.
  * @param {string} title
  * @param {string} description
- * @param {"home" | "map"} current
+ * @param {string} current the page key: "home", "map" or an inner page name
  * @param {string} body
  * @param {string} script the inline script text for this page
  * @param {boolean} [wide] let the page use the full window width
+ * @param {string} [head] extra markup for the head
+ * @param {string} [beforeScript] markup just before the script
+ * @param {boolean} [ownFrame] the printed-chart look: the home page and the inner pages
  */
 function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "", ownFrame = false) {
-  const homeCurrent = current === "home" ? ' aria-current="page"' : "";
-  const mapCurrent = current === "map" ? ' aria-current="page"' : "";
+  const cur = (name) => (current === name ? ' aria-current="page"' : "");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -265,16 +268,18 @@ function shell(title, description, current, body, script, wide = false, head = "
 <style>${CSS}</style>
 ${ownFrame ? `<style>${HOME_CSS}</style>\n` : ""}${head}
 </head>
-<body data-page="${current}">
+<body data-page="${current}"${ownFrame ? ' class="paper"' : ""}>
 <a class="skip" href="#main">Skip to content</a>
-${ownFrame ? HOME_HEAD : `<header class="top">
+${ownFrame ? homeHead(current) : `<header class="top">
 <div class="wrap${wide ? " wide" : ""}">
 <a class="brand" href="/">KAHF</a>
 <nav aria-label="Main">
-<a href="/"${homeCurrent}>Home</a>
-<a href="/#what">What it does</a>
-<a href="/#how">How it works</a>
-<a href="/map"${mapCurrent}>Live map</a>
+<a href="/"${cur("home")}>Home</a>
+<a href="/network"${cur("network")}>Network</a>
+<a href="/map"${cur("map")}>Live map</a>
+<a href="/protocol"${cur("protocol")}>Modem</a>
+<a href="/start"${cur("start")}>Get started</a>
+<a href="/legal"${cur("legal")}>Legal</a>
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>
 </div>
@@ -284,7 +289,11 @@ ${body}
 </main>
 ${ownFrame ? HOME_FOOT : `<footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
-<p>KAHF is pre-release software for licensed amateur radio operators. Copyright (c) 2026 adswill.</p>
+<div class="cols">
+<div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Free software under the GNU GPL v3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill).</p></div>
+<div><p class="label">Site</p><ul><li><a href="/">Home</a></li><li><a href="/network">Relay network</a></li><li><a href="/map">Live map</a></li></ul></div>
+<div><p class="label">Project</p><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
+</div>
 </div>
 </footer>`}
 ${beforeScript}
@@ -292,6 +301,20 @@ ${beforeScript}
 </body>
 </html>`;
 }
+
+/**
+ * An inner page, by path (for example "/network"), or null when there is none.
+ * @param {string} path
+ * @returns {string | null}
+ */
+export function renderSite(path) {
+  const page = SITE_PAGES[path];
+  if (!page) return null;
+  return shell(page.title, page.description, path.slice(1), page.body(), HOME_SCRIPT, false, "", "", true);
+}
+
+/** The paths of the inner pages. */
+export const SITE_PATHS = Object.keys(SITE_PAGES);
 
 /** The kahf.dev home page. */
 export function renderHome() {

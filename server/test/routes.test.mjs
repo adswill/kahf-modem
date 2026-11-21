@@ -4,7 +4,16 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { canonicalJson, encodeBase64, EXPIRY_MS, MAX_SCHEDULE_REQUESTS } from "../src/core.js";
+import {
+  BAND_CHANNELS,
+  BAND_SEGMENT_KHZ,
+  CHANNEL_WIDTH_KHZ,
+  canonicalJson,
+  channelOf,
+  encodeBase64,
+  EXPIRY_MS,
+  MAX_SCHEDULE_REQUESTS,
+} from "../src/core.js";
 import { fakeStore } from "../tools/fake-store.mjs";
 
 const HOOK = `
@@ -57,13 +66,17 @@ async function sha256Base64(s) {
   return Buffer.from(d).toString("base64");
 }
 
+// Whole-kHz frequency inside channel n (the report validator wants integer kHz).
+const freqOf = (n) => Math.ceil(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * n);
+const LAST = BAND_CHANNELS - 1;
+
 const REPORT = {
   reporter_call: "K1ABC",
   reporter_location: { mode: "precise", latitude: 51.5074, longitude: -0.1278 },
   heard_call: "DL1XYZ",
   heard_location: { mode: "area", latitude: 48.8566, longitude: 2.3522, radius_km: 50 },
   heard_at: "2026-11-17T11:59:00Z",
-  frequency_khz: 14_100,
+  frequency_khz: freqOf(LAST),
   mode: "KAHF",
 };
 
@@ -156,12 +169,13 @@ test("GET /stations refuses POST", async () => {
 
 test("GET /zones: busy channels per area from live records, with the pool split", async () => {
   const store = fakeStore();
-  // 14_100 kHz is channel floor(100 / 2.7) = 37 in the segment.
+  // REPORT is heard on the last channel; K2BUSY on channel 0.
+  assert.equal(channelOf(freqOf(LAST)), LAST);
   await store.put({ ...REPORT, public_key: "k", refreshed_at: NOW });
   await store.put({
     ...REPORT,
     reporter_call: "K2BUSY",
-    frequency_khz: 14_050,
+    frequency_khz: freqOf(0),
     heard_at: "2026-11-17T11:55:00Z",
     public_key: "k",
     refreshed_at: NOW,
@@ -179,10 +193,10 @@ test("GET /zones: busy channels per area from live records, with the pool split"
   const body = await res.json();
   assert.equal(body.busy_window_s, 600);
   // K1ABC at 51.5074, -0.1278 lies in N51W1; K2BUSY too.
-  assert.deepEqual(body.zones, { N51W1: [18, 37] });
+  assert.deepEqual(body.zones, { N51W1: [0, LAST] });
   assert.equal(body.pools.defaultPool, "open");
   assert.equal(body.pools.bandChannels, body.pools.online.length + body.pools.open.length);
-  assert.ok(!body.pools.areas.N51W1.channels.includes(18));
+  assert.ok(!body.pools.areas.N51W1.channels.includes(0));
   assert.equal(body.pools.areas.N51W1.pool, "online");
 });
 
@@ -226,7 +240,7 @@ test("POST /report: bad JSON, oversize body, bad fields and bad signature are re
   assert.match((await topLevel.json()).error, /location/);
 
   const tampered = await signed(key, REPORT);
-  tampered.frequency_khz = 14_200;
+  tampered.frequency_khz = REPORT.frequency_khz - 1;
   const badSig = await handleRequest(post("/report", tampered), store, NOW);
   assert.equal(badSig.status, 401);
   assert.equal(store.recs.size, 0);
@@ -339,8 +353,8 @@ test("POST /schedule returns the planner output for the registered relay", async
   await handleRequest(post("/register", await signed(key, REGISTER)), store, NOW);
 
   const requests = [
-    { channel: 3, duration: 60, direction: "tx" },
-    { channel: 3, duration: 30, direction: "rx", urgent: true },
+    { channel: 1, duration: 60, direction: "tx" },
+    { channel: 1, duration: 30, direction: "rx", urgent: true },
   ];
   const res = await handleRequest(post("/schedule", await signed(key, { relay: "K1ABC", requests })), store, NOW);
   assert.equal(res.status, 200);
@@ -348,8 +362,8 @@ test("POST /schedule returns the planner output for the registered relay", async
   assert.equal(body.relay, "K1ABC");
   assert.equal(body.slots.length, 2);
   // Urgent first, then the other one after it on the same channel and relay.
-  assert.deepEqual(body.slots[0], { channel: 3, start: NOW_S, duration: 30, direction: "rx" });
-  assert.deepEqual(body.slots[1], { channel: 3, start: NOW_S + 30, duration: 60, direction: "tx" });
+  assert.deepEqual(body.slots[0], { channel: 1, start: NOW_S, duration: 30, direction: "rx" });
+  assert.deepEqual(body.slots[1], { channel: 1, start: NOW_S + 30, duration: 60, direction: "tx" });
 });
 
 test("POST /schedule: an unregistered relay gets 404, another key 403, a bad signature 401", async () => {
@@ -423,11 +437,11 @@ test("POST /schedule: a second relay in the same area avoids the first relay's s
   await handleRequest(post("/register", await signed(a, regA)), store, NOW);
   await handleRequest(post("/register", await signed(b, regB)), store, NOW);
 
-  const reqA = { relay: "W0AAA", requests: [{ channel: 80, duration: 60, direction: "tx" }] };
+  const reqA = { relay: "W0AAA", requests: [{ channel: 1, duration: 60, direction: "tx" }] };
   const first = await (await handleRequest(post("/schedule", await signed(a, reqA)), store, NOW)).json();
   assert.equal(first.slots[0].start, NOW_S);
 
-  const reqB = { relay: "W0AAB", requests: [{ channel: 80, duration: 60, direction: "tx" }] };
+  const reqB = { relay: "W0AAB", requests: [{ channel: 1, duration: 60, direction: "tx" }] };
   const second = await (await handleRequest(post("/schedule", await signed(b, reqB)), store, NOW)).json();
   const [s] = second.slots;
   assert.ok(s.start >= NOW_S + 60, `W0AAB starts at ${s.start}, inside W0AAA's slot`);
@@ -436,7 +450,7 @@ test("POST /schedule: a second relay in the same area avoids the first relay's s
   const regC = { area: "N51W3", callsign: "W0AAC" };
   const c = await newKey();
   await handleRequest(post("/register", await signed(c, regC)), store, NOW);
-  const reqC = { relay: "W0AAC", requests: [{ channel: 80, duration: 60, direction: "tx" }] };
+  const reqC = { relay: "W0AAC", requests: [{ channel: 1, duration: 60, direction: "tx" }] };
   const third = await (await handleRequest(post("/schedule", await signed(c, reqC)), store, NOW)).json();
   assert.ok(third.slots[0].start >= s.start + 60, "a relay in another area must not transmit over the others");
 });
@@ -448,13 +462,13 @@ test("POST /schedule: a relay's slots that have already ended are not booked", a
   await handleRequest(post("/register", await signed(a, { area: "N50W3", callsign: "W0AAA" })), store, NOW);
   await handleRequest(post("/register", await signed(b, { area: "N50W3", callsign: "W0AAB" })), store, NOW);
   await handleRequest(
-    post("/schedule", await signed(a, { relay: "W0AAA", requests: [{ channel: 80, duration: 60, direction: "tx" }] })),
+    post("/schedule", await signed(a, { relay: "W0AAA", requests: [{ channel: 1, duration: 60, direction: "tx" }] })),
     store,
     NOW,
   );
   const later = NOW + 61_000;
   const res = await handleRequest(
-    post("/schedule", await signed(b, { relay: "W0AAB", requests: [{ channel: 80, duration: 60, direction: "tx" }] })),
+    post("/schedule", await signed(b, { relay: "W0AAB", requests: [{ channel: 1, duration: 60, direction: "tx" }] })),
     store,
     later,
   );

@@ -1,13 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-radio", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-gui", "crates/kahf-log", "crates/kahf-prop", "crates/kahf-ui"]
+members = ["crates/kahf-core", "crates/kahf-sim", "crates/kahf-cli", "crates/kahf-sdr", "crates/kahf-radio", "crates/kahf-audio", "crates/kahf-daemon", "crates/kahf-log", "crates/kahf-prop", "crates/kahf-net", "crates/kahf-rig", "crates/kahf-export", "crates/kahf-winlink", "crates/kahf-node", "crates/kahf-app-core"]
 
 [workspace.package]
-version = "0.0.1"
+version = "1.0.0"
 edition = "2021"
-license-file = "LICENSE"
+license = "GPL-3.0-or-later"
 
-# The modem's signal processing is heavy: optimise it even in debug builds, so the receive
-# thread keeps up in development and tests (the spectrum must stay at 20 frames a second).
+# The modem's signal processing is heavy: optimise it even in debug builds and tests, so the
+# receive thread keeps up in real time (the spectrum must stay at 25 frames a second, and the
+# audio of a sound card must be decoded as fast as it arrives).
 [profile.dev.package.kahf-core]
 opt-level = 3
+
+[profile.dev.package.kahf-daemon]
+opt-level = 2

@@ -48,7 +48,7 @@ test("area object: a second booking of the same channel is pushed clear of the f
   for (const relay of ["K1AAA", "K1BBB"]) {
     await call(obj, "join", { callsign: relay, nowMs: NOW });
   }
-  const req = (relay) => [{ relay, channel: 20, duration: 30, direction: "tx", urgent: false }];
+  const req = (relay) => [{ relay, channel: 0, duration: 30, direction: "tx", urgent: false }];
   const a = await (await call(obj, "book", { area: "N51W1", relay: "K1AAA", requests: req("K1AAA"), nowMs: NOW })).json();
   const b = await (await call(obj, "book", { area: "N51W1", relay: "K1BBB", requests: req("K1BBB"), nowMs: NOW })).json();
   assert.equal(a.ok, true);

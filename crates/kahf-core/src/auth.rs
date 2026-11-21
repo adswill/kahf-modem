@@ -66,10 +66,11 @@ impl StationKey {
         self.key.sign(&signed_data(callsign, body)).to_bytes()
     }
 
-    /// Plain Ed25519 signature over `data`, with no domain prefix. The kahf.dev server checks
-    /// its requests this way, over the canonical JSON of the request.
-    pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
-        self.key.sign(data).to_bytes()
+    /// Sign `message` as it is, with no domain prefix and no callsign, for
+    /// services that check a plain Ed25519 signature (the kahf.dev server signs
+    /// over canonical JSON). On-air messages use [`StationKey::sign`] instead.
+    pub fn sign_raw(&self, message: &[u8]) -> [u8; 64] {
+        self.key.sign(message).to_bytes()
     }
 
     /// Fingerprint of this station's public key, for comparison in Settings.
@@ -292,5 +293,19 @@ mod tests {
         assert_ne!(ka.to_public(), kb.to_public());
         let _ = fs::remove_dir_all(&a);
         let _ = fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn sign_raw_is_plain_ed25519_over_the_bytes() {
+        let key = StationKey::from_bytes(&[7; 32]);
+        let msg = br#"{"area":"N51W1","callsign":"K1ABC"}"#;
+        let sig = Signature::from_bytes(&key.sign_raw(msg));
+        let public = VerifyingKey::from_bytes(&key.to_public()).unwrap();
+        assert!(public.verify(msg, &sig).is_ok());
+        assert_ne!(
+            key.sign_raw(msg),
+            key.sign("K1ABC", msg),
+            "raw and on-air signatures differ"
+        );
     }
 }

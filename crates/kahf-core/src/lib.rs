@@ -6,6 +6,7 @@ pub mod bandplan;
 pub mod blank;
 pub mod bundle;
 pub mod diversity;
+pub mod burst;
 pub mod extras;
 pub mod frame;
 pub mod harq;
@@ -24,6 +25,7 @@ pub mod narrow;
 #[cfg(test)]
 pub mod sim;
 pub mod marker;
+pub mod msg;
 pub mod outbox;
 pub mod payload_position;
 pub mod payload_presence;

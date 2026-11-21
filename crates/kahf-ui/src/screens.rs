@@ -10,6 +10,7 @@ use iced::{Fill, Length};
 
 use crate::app::{App, FileCmd, Location, Message, Role, TxAction, KINDS, PROFILES};
 use crate::icons::{self, Icon};
+use crate::live;
 use crate::sample::{self, Chat, FileState};
 use crate::strings as s;
 use crate::tech::grid;
@@ -121,12 +122,22 @@ impl App {
 
     /// Stations heard: call, last heard, SNR.
     fn heard_panel(&self) -> El<'_> {
-        let cols = [
-            (s::COL_CALLSIGN, W_CALL),
-            (s::COL_LAST_HEARD, W_WHEN),
-            (s::SNR_LABEL, W_SMALL),
-            (s::COL_LAST_MESSAGE, Fill),
-        ];
+        // Live contacts carry no SNR or last message; their name and note take those places.
+        let cols = if self.sample {
+            [
+                (s::COL_CALLSIGN, W_CALL),
+                (s::COL_LAST_HEARD, W_WHEN),
+                (s::SNR_LABEL, W_SMALL),
+                (s::COL_LAST_MESSAGE, Fill),
+            ]
+        } else {
+            [
+                (s::COL_CALLSIGN, W_CALL),
+                (s::COL_LAST_HEARD, W_WHEN),
+                (s::COL_NAME, W_NAME),
+                (s::COL_NOTE, Fill),
+            ]
+        };
         let mut rows = Column::new();
         if self.sample {
             for (i, st) in sample::STATIONS.iter().enumerate() {
@@ -149,8 +160,26 @@ impl App {
                     Some(Message::SelectStation(i)),
                 ));
             }
-        } else {
+        } else if self.live.stations.is_empty() {
             rows = rows.push(container(muted(s::STATIONS_EMPTY_HINT)).padding(6));
+        } else {
+            for (i, c) in self.live.stations.iter().enumerate() {
+                let heard = c.last_heard.as_deref().map(live::date).unwrap_or_default();
+                rows = rows.push(table_row(
+                    vec![
+                        mono(c.call.clone())
+                            .size(12)
+                            .color(theme::INFO)
+                            .width(cols[0].1)
+                            .into(),
+                        grid::cell(heard, cols[1].1, Some(theme::MUTED)),
+                        grid::cell(c.name.clone(), cols[2].1, None),
+                        grid::cell(c.notes.clone(), cols[3].1, None),
+                    ],
+                    self.station_sel == Some(i),
+                    Some(Message::SelectStation(i)),
+                ));
+            }
         }
         container(
             column![
@@ -409,6 +438,14 @@ impl App {
 
     pub fn screen_stations(&self) -> El<'_> {
         if !self.sample {
+            return self.live_stations();
+        }
+        self.sample_stations()
+    }
+
+    /// Stations from the address book the engine keeps.
+    fn live_stations(&self) -> El<'_> {
+        if self.live.stations.is_empty() {
             return page(
                 s::STATIONS_TITLE,
                 None,
@@ -416,6 +453,45 @@ impl App {
                 empty_state(Icon::Antenna, s::STATIONS_EMPTY_TITLE, s::STATIONS_EMPTY_HINT),
             );
         }
+        let cols = [
+            (s::COL_CALLSIGN, W_CALL),
+            (s::COL_NAME, W_NAME),
+            (s::COL_LAST_HEARD, W_WHEN),
+            (s::COL_QTH, W_NAME),
+            (s::COL_NOTE, Fill),
+        ];
+        let q = self.station_filter.trim().to_lowercase();
+        let mut rows = Column::new();
+        for (i, c) in self.live.stations_matching(&q) {
+            let heard = c.last_heard.as_deref().map(live::date).unwrap_or_default();
+            rows = rows.push(table_row(
+                vec![
+                    mono(c.call.clone()).width(cols[0].1).into(),
+                    cell(c.name.clone(), cols[1].1),
+                    num_cell(heard, cols[2].1),
+                    cell(c.qth.clone(), cols[3].1),
+                    cell(c.notes.clone(), cols[4].1),
+                ],
+                self.station_sel == Some(i),
+                Some(Message::SelectStation(i)),
+            ));
+        }
+        let mut body = column![
+            text_input(s::STATIONS_FILTER, &self.station_filter)
+                .on_input(Message::StationFilter)
+                .padding(8)
+                .style(theme::input)
+                .width(360),
+            table_header(&cols),
+        ]
+        .spacing(8);
+        if self.live.stations_matching(&q).next().is_none() {
+            body = body.push(muted(s::STATIONS_NO_MATCH));
+        }
+        page(s::STATIONS_TITLE, None, false, body.push(scroll(rows)))
+    }
+
+    fn sample_stations(&self) -> El<'_> {
         let cols = [
             (s::COL_CALLSIGN, W_CALL),
             (s::COL_NAME, W_NAME),
@@ -772,12 +848,7 @@ impl App {
             );
         }
         if !self.sample {
-            return page(
-                s::RELAY_TITLE,
-                None,
-                false,
-                empty_state(Icon::Relay, s::RELAY_EMPTY_TITLE, s::RELAY_EMPTY_HINT),
-            );
+            return self.live_relay();
         }
         let sched_cols = [
             (s::COL_CHANNEL, Length::Fixed(160.0)),
@@ -856,6 +927,134 @@ impl App {
         )
     }
 
+    /// Relay schedule, forwards, outbox and counters from the engine.
+    fn live_relay(&self) -> El<'_> {
+        let lv = &self.live;
+        let sched_cols = [
+            (s::COL_CHANNEL, Length::Fixed(160.0)),
+            (s::COL_TIME, W_TIME),
+            (s::COL_DURATION, W_TIME),
+            (s::COL_DIR, Fill),
+        ];
+        let sched: El<'_> = if lv.slots.is_empty() {
+            muted(s::RELAY_NO_SLOTS).into()
+        } else {
+            let mut c = column![table_header(&sched_cols)];
+            for sl in &lv.slots {
+                c = c.push(table_row(
+                    vec![
+                        mono(live::channel(sl.channel_khz)).width(sched_cols[0].1).into(),
+                        num_cell(live::utc_hm(sl.start_unix), sched_cols[1].1),
+                        num_cell(live::duration(sl.duration_s), sched_cols[2].1),
+                        cell(live::direction(sl.direction), sched_cols[3].1),
+                    ],
+                    false,
+                    None,
+                ));
+            }
+            c.into()
+        };
+        let hop_cols = [
+            (s::COL_TIME, W_TIME),
+            (s::COL_RELAY, W_CALL),
+            (s::COL_CHANNEL, Length::Fixed(160.0)),
+            (s::COL_STATE, Fill),
+        ];
+        let hops: El<'_> = if lv.hops.is_empty() {
+            muted(s::RELAY_NO_HOPS).into()
+        } else {
+            let mut c = column![table_header(&hop_cols)];
+            for h in &lv.hops {
+                c = c.push(table_row(
+                    vec![
+                        num_cell(live::utc_hm(h.at_unix), hop_cols[0].1),
+                        mono(h.relay.clone()).width(hop_cols[1].1).into(),
+                        mono(live::channel(h.channel_khz)).width(hop_cols[2].1).into(),
+                        grid::cell(
+                            live::hop_state(h),
+                            hop_cols[3].1,
+                            Some(if h.heard_by_next {
+                                theme::ACCENT
+                            } else {
+                                theme::WARNING
+                            }),
+                        ),
+                    ],
+                    false,
+                    None,
+                ));
+            }
+            c.into()
+        };
+        let outbox: El<'_> = if lv.outbox.is_empty() {
+            muted(s::RELAY_OUTBOX_EMPTY).into()
+        } else {
+            let mut c = column![table_header(&[(s::COL_ITEM, Fill)])];
+            for (_, what) in &lv.outbox {
+                c = c.push(table_row(vec![cell(what.clone(), Fill)], false, None));
+            }
+            c.into()
+        };
+        let stat = |label: &'static str, n: u64| {
+            column![
+                label_caps(label),
+                heading(n.to_string()).font(iced::Font::MONOSPACE)
+            ]
+            .spacing(4)
+        };
+        let stats = row![
+            stat(s::RELAY_SENT_TODAY, lv.stats.sent_today),
+            stat(s::RELAY_SENT_TOTAL, lv.stats.sent_total),
+            stat(s::RELAY_OUTBOX, lv.outbox.len() as u64),
+        ]
+        .spacing(40);
+        let server: El<'_> = match (&lv.server, self.server_note) {
+            (Some(st), _) => {
+                let mut c = column![
+                    key_value(
+                        s::SERVER_STATUS,
+                        if st.registered {
+                            s::SERVER_REGISTERED
+                        } else {
+                            s::SERVER_NOT_REGISTERED
+                        }
+                    ),
+                    key_value(
+                        s::SERVER_SCHEDULE,
+                        match st.last_schedule_unix {
+                            Some(at) => format!("{} slots, received at {}", st.slots, live::utc_hm(at)),
+                            None => s::SERVER_NO_SCHEDULE.to_string(),
+                        }
+                    ),
+                    key_value(s::SERVER_NEXT, live::utc_hm(st.next_attempt_unix)),
+                ]
+                .spacing(5);
+                if let Some(e) = &st.last_error {
+                    c = c.push(key_value(s::SERVER_ERROR, e.clone()));
+                }
+                // Label and value columns stay close together on a wide screen.
+                container(c).max_width(520).into()
+            }
+            (None, Some(note)) => muted(note).into(),
+            (None, None) => muted(s::SERVER_NOT_REGISTERED).into(),
+        };
+        page(
+            s::RELAY_TITLE,
+            None,
+            false,
+            scroll(
+                column![
+                    section_box(s::RELAY_STATS, stats),
+                    section_box(s::RELAY_SERVER, server),
+                    section_box(s::RELAY_SCHEDULE, sched),
+                    section_box(s::RELAY_OUTBOX, outbox),
+                    section_box(s::RELAY_HOPS, hops),
+                ]
+                .spacing(12),
+            ),
+        )
+    }
+
     // ---------------------------------------------------------------- Logbook
 
     pub fn screen_logbook(&self) -> El<'_> {
@@ -863,7 +1062,7 @@ impl App {
             btn(s::LOG_EXPORT, Kind::Secondary).on_press(Message::LogExport),
             s::TIP_EXPORT,
         ));
-        if !self.sample {
+        if !self.sample && self.live.qsos.is_empty() {
             return page(
                 s::LOG_TITLE,
                 export,
@@ -883,21 +1082,43 @@ impl App {
         let q = self.log_search.trim().to_lowercase();
         let mut rows = Column::new();
         let mut shown = 0;
-        for qso in sample::QSOS {
-            if !q.is_empty() && !qso.call.to_lowercase().contains(&q) && !qso.note.to_lowercase().contains(&q)
-            {
+        // (date, time, call, band, sent, received, note), from the sample or the logbook file.
+        let entries: Vec<[String; 7]> = if self.sample {
+            sample::QSOS
+                .iter()
+                .map(|q| [q.date, q.time, q.call, q.band, q.sent, q.received, q.note].map(String::from))
+                .collect()
+        } else {
+            self.live
+                .qsos
+                .iter()
+                .map(|q| {
+                    [
+                        live::date(&q.date),
+                        live::time(&q.time),
+                        q.call.clone(),
+                        q.band.clone(),
+                        q.rst_sent.clone(),
+                        q.rst_rcvd.clone(),
+                        q.comment.clone(),
+                    ]
+                })
+                .collect()
+        };
+        for [date, time, call, band, sent, received, note] in entries {
+            if !q.is_empty() && !call.to_lowercase().contains(&q) && !note.to_lowercase().contains(&q) {
                 continue;
             }
             shown += 1;
             rows = rows.push(table_row(
                 vec![
-                    num_cell(qso.date, cols[0].1),
-                    num_cell(qso.time, cols[1].1),
-                    mono(qso.call).width(cols[2].1).into(),
-                    cell(qso.band, cols[3].1),
-                    num_cell(qso.sent, cols[4].1),
-                    num_cell(qso.received, cols[5].1),
-                    cell(qso.note, cols[6].1),
+                    num_cell(date, cols[0].1),
+                    num_cell(time, cols[1].1),
+                    mono(call).width(cols[2].1).into(),
+                    cell(band, cols[3].1),
+                    num_cell(sent, cols[4].1),
+                    num_cell(received, cols[5].1),
+                    cell(note, cols[6].1),
                 ],
                 false,
                 None,
@@ -915,7 +1136,7 @@ impl App {
         if shown == 0 {
             body = body.push(muted(s::LOG_NO_MATCH));
         }
-        page(s::LOG_TITLE, export, true, body.push(scroll(rows)))
+        page(s::LOG_TITLE, export, self.sample, body.push(scroll(rows)))
     }
 
     // -------------------------------------------------------------------- Map
@@ -935,14 +1156,7 @@ impl App {
                 s::MAP_SUMMARY,
                 column![
                     key_value(s::MAP_LOC_LABEL, self.location.label()),
-                    key_value(
-                        s::MAP_HEARD_LABEL,
-                        if self.sample {
-                            crate::sample::STATIONS.len().to_string()
-                        } else {
-                            "0".to_string()
-                        }
-                    ),
+                    key_value(s::MAP_HEARD_LABEL, self.stations_heard().to_string()),
                     key_value(
                         s::MAP_LINK_LABEL,
                         self.link.clone().unwrap_or_else(|| s::NO_LINK_TEXT.to_string())
@@ -975,6 +1189,19 @@ impl App {
                 s::SET_CALLSIGN_DESC,
                 text_input("", &self.callsign)
                     .on_input(Message::Callsign)
+                    .padding(8)
+                    .style(theme::input)
+                    .width(220),
+            ),
+            setting(
+                s::SET_LOCATOR,
+                if self.locator.is_empty() || live::locator_position(&self.locator).is_some() {
+                    s::SET_LOCATOR_DESC
+                } else {
+                    s::SET_LOCATOR_BAD
+                },
+                text_input("KP20", &self.locator)
+                    .on_input(Message::Locator)
                     .padding(8)
                     .style(theme::input)
                     .width(220),
@@ -1079,10 +1306,20 @@ impl App {
         let updates = column![
             muted(s::SET_UPDATES_DESC),
             key_value(s::SET_VERSION, env!("CARGO_PKG_VERSION")),
-            key_value(s::STATUS_UPDATES, s::UPDATE_NOT_CHECKED),
+            key_value(s::STATUS_UPDATES, self.update_status.as_str()),
             tip(
                 btn(s::SET_CHECK, Kind::Secondary).on_press(Message::CheckUpdates),
                 s::TIP_CHECK
+            ),
+        ]
+        .spacing(10);
+
+        let logs = column![
+            muted(s::SET_LOGS_DESC),
+            key_value(s::SET_LOGS_FOLDER, crate::app::log_dir().display().to_string()),
+            tip(
+                btn(s::SET_LOGS_OPEN, Kind::Secondary).on_press(Message::OpenLogs),
+                s::TIP_LOGS_OPEN
             ),
         ]
         .spacing(10);
@@ -1104,6 +1341,7 @@ impl App {
                     section_box(s::SET_LISTEN, listen),
                     section_box(s::SET_APPEARANCE, appearance),
                     section_box(s::SET_UPDATES, updates),
+                    section_box(s::SET_LOGS, logs),
                 ]
                 .spacing(12)
                 .max_width(720),

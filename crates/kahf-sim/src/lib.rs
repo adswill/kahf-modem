@@ -96,12 +96,20 @@ pub enum Profile {
     FreqOffset,
     ClockOffset,
     Fade,
-    /// ITU-R F.1487 "good" HF channel: two Rayleigh paths 0.5 ms apart, 0.1 Hz Doppler spread.
+    /// Alias of `WattersonGood`, kept for the lane and ladder examples.
     HfGood,
-    /// ITU-R F.1487 "moderate": 1 ms, 0.5 Hz.
+    /// Alias of `WattersonModerate`.
     HfModerate,
-    /// ITU-R F.1487 "poor": 2 ms, 1 Hz.
+    /// Alias of `WattersonPoor`.
     HfPoor,
+    /// ITU-R F.1487 / CCIR 520 Watterson "good" channel: 2 paths, 0.5 ms, 0.1 Hz spread.
+    WattersonGood,
+    /// Watterson "moderate": 1 ms, 0.5 Hz spread.
+    WattersonModerate,
+    /// Watterson "poor": 2 ms, 1 Hz spread.
+    WattersonPoor,
+    /// Watterson "flutter" (high-latitude): 0.5 ms, 10 Hz spread.
+    WattersonFlutter,
 }
 
 /// Apply a named channel profile, then AWGN at `snr_db` (measured against the
@@ -119,9 +127,10 @@ pub fn apply(samples: &[f32], profile: Profile, snr_db: f32, seed: u64) -> Vec<f
         }
         Profile::ClockOffset => clock_offset(samples),
         Profile::Fade => fade(samples),
-        Profile::HfGood => watterson(samples, 0.0005, 0.1, seed),
-        Profile::HfModerate => watterson(samples, 0.001, 0.5, seed),
-        Profile::HfPoor => watterson(samples, 0.002, 1.0, seed),
+        Profile::HfGood | Profile::WattersonGood => watterson(samples, 0.0005, 0.1, seed),
+        Profile::HfModerate | Profile::WattersonModerate => watterson(samples, 0.001, 0.5, seed),
+        Profile::HfPoor | Profile::WattersonPoor => watterson(samples, 0.002, 1.0, seed),
+        Profile::WattersonFlutter => watterson(samples, 0.0005, 10.0, seed),
     };
     awgn(&impaired, snr_db, seed)
 }
@@ -267,29 +276,10 @@ fn watterson(x: &[f32], delay_s: f64, spread_hz: f64, seed: u64) -> Vec<f32> {
 }
 
 fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
-    let n = x.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let big = (2 * n).next_power_of_two();
-    let mut spec = vec![(0.0f64, 0.0f64); big];
-    for (s, &v) in spec.iter_mut().zip(x) {
-        *s = (v as f64, 0.0);
-    }
-    fft(&mut spec, false);
-    // Analytic signal: keep DC and Nyquist, double positive frequencies, drop negative.
-    let half = big / 2;
-    for s in spec.iter_mut().take(half).skip(1) {
-        *s = (s.0 * 2.0, s.1 * 2.0);
-    }
-    for s in spec.iter_mut().skip(half + 1) {
-        *s = (0.0, 0.0);
-    }
-    fft(&mut spec, true);
-    let scale = 1.0 / big as f64;
-    (0..n)
-        .map(|i| {
-            let (zr, zi) = (spec[i].0 * scale, spec[i].1 * scale);
+    let z = analytic(x);
+    z.iter()
+        .enumerate()
+        .map(|(i, &(zr, zi))| {
             let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
             (zr * theta.cos() - zi * theta.sin()) as f32
         })
@@ -673,5 +663,27 @@ mod tests {
             "FER profile={name} snr={snr} dB frames={n} errors={errors} fer={:.4}",
             errors as f64 / n as f64
         );
+    }
+
+    #[test]
+    fn watterson_keeps_length_is_deterministic_and_unit_mean_power() {
+        let n = 80_000usize;
+        let sig: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / SAMPLE_RATE_HZ).sin() as f32)
+            .collect();
+        let sp = sig.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        // Mean over many independent fades is the input power (unit gain channel).
+        let mut acc = 0.0;
+        let runs = 60u64;
+        for seed in 0..runs {
+            let y = apply(&sig, Profile::WattersonModerate, 200.0, seed);
+            assert_eq!(y.len(), n);
+            acc += y.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        }
+        let ratio = acc / runs as f64 / sp;
+        assert!((0.6..1.6).contains(&ratio), "mean power ratio {ratio}");
+        let a = apply(&sig, Profile::WattersonPoor, 10.0, 5);
+        let b = apply(&sig, Profile::WattersonPoor, 10.0, 5);
+        assert_eq!(a, b);
     }
 }

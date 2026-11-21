@@ -50,7 +50,7 @@ test("home page: no downloads block without a release, the twelve lanes and the 
   assert.equal((html.match(/<section\b/g) || []).length, 7);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds|id="download"/i);
   assert.match(html, /No religious or political content/);
-  assert.match(html, /Source-available/);
+  assert.match(html, /General Public License/);
   assert.match(html, /class="skip" href="#main"/);
   // No old modem claims: the page describes KAMI lanes on 17 metres only.
   assert.doesNotMatch(html, /OFDM|153 carriers|\b(80|40|20) ?m\b|14\.1\d|7\.0\d/);
@@ -95,9 +95,18 @@ test("every border-radius is 3 px or less", () => {
   assert.doesNotMatch(CSS, /\brx\s*:/);
 });
 
-test("system fonts only, a serif display face and a mono face for data", () => {
-  assert.doesNotMatch(CSS, /@font-face|fonts\.googleapis|url\(/);
-  assert.match(CSS, /--serif: "Iowan Old Style"/);
+test("one self-hosted display face, system faces for text and data", async () => {
+  assert.equal((CSS.match(/@font-face/g) || []).length, 1);
+  assert.deepEqual([...CSS.matchAll(/url\(([^)]*)\)/g)].map((m) => m[1]), ["/fonts/display.woff2"]);
+  assert.doesNotMatch(CSS, /fonts\.googleapis|https?:/);
+  assert.match(CSS, /--display: "Big Shoulders Display"/);
+  const res = await handleRequest(new Request("https://kahf.test/fonts/display.woff2"), fakeStore(), Date.parse(NOW));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "font/woff2");
+  assert.equal(Buffer.from(await res.arrayBuffer()).subarray(0, 4).toString(), "wOF2");
+  assert.match(res.headers.get("content-security-policy"), /default-src 'none'/);
+  const home = (await handleRequest(new Request("https://kahf.test/"), fakeStore(), Date.parse(NOW))).headers.get("content-security-policy");
+  assert.match(home, /font-src 'self'/);
   assert.match(CSS, /--mono: ui-monospace/);
 });
 
@@ -216,17 +225,17 @@ test("motion is limited to a first-paint fade and one pulse, and stops when redu
 });
 
 test("theme follows the system and keeps a manual choice; focus rings and skip link exist", () => {
-  assert.match(CSS, /prefers-color-scheme: dark/);
-  assert.match(CSS, /:root\[data-theme="dark"\]/);
-  assert.match(CSS, /:root:not\(\[data-theme="light"\]\)/);
+  assert.match(CSS, /prefers-color-scheme: (dark|light)/);
+  assert.match(CSS, /:root\[data-theme="light"\]/);
+  assert.match(CSS, /:root:not\(\[data-theme="dark"\]\)/);
   assert.match(CSS, /:focus-visible/);
   assert.match(HOME_SCRIPT, /try \{[\s\S]*localStorage[\s\S]*\} catch/);
   assert.match(HOME_SCRIPT, /kahf-theme/);
   assert.match(renderHome(), /data-act="theme"/);
 });
 
-test("the colour tokens match the design: paper, ink, one green, one red", () => {
-  for (const c of ["#f4f2ec", "#1d1b15", "#5c5a52", "#d9d5cb", "#1f8a65", "#cf2d56", "#14130f"]) {
+test("the colour tokens match the design: night ground, bone text, amber, one green, one red, and the paper theme", () => {
+  for (const c of ["#0d0e0b", "#ebe8dc", "#9b978a", "#2b2c25", "#f2a93b", "#3dbe90", "#ff6b8b", "#f4f1e8", "#1b1a14", "#1f8a65", "#cf2d56"]) {
     assert.ok(CSS.includes(c), c);
   }
 });
@@ -256,3 +265,24 @@ test("the map page says why it is empty and has a details row", () => {
   assert.match(html, /id="p-info"/);
   assert.match(html, /Click a point on the map/);
 });
+
+test("the inner pages render, are linked from the nav, and follow the same rules as the home page", async () => {
+  const { SITE_PATHS, renderSite } = await import("../src/page.ts");
+  assert.deepEqual([...SITE_PATHS].sort(), ["/legal", "/network", "/protocol", "/start"]);
+  for (const path of SITE_PATHS) {
+    const html = renderSite(path);
+    assert.equal((html.match(/<h1\b/g) || []).length, 1, path);
+    assert.match(html, new RegExp(`<a href="${path}" aria-current="page">`), path);
+    const bare = html.replace(/<script>[\s\S]*?<\/script>/, "").replace(/<style>[\s\S]*?<\/style>/g, "");
+    // The only links off this site are the project source and the support page (in the footer).
+    assert.doesNotMatch(bare.replace(/href="https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)" rel="noopener noreferrer"/g, 'href="#"'), EXTERNAL, path);
+    assert.doesNotMatch(html, EMOJI, path);
+    assert.doesNotMatch(html, /lorem|ipsum|TODO|TBD|coming soon/i, path);
+    const res = await handleRequest(new Request("https://kahf.test" + path), fakeStore(), Date.parse(NOW));
+    assert.equal(res.status, 200, path);
+    assert.match(res.headers.get("content-security-policy"), /default-src 'none'/);
+    assert.equal(await res.text(), html);
+  }
+  assert.equal(renderSite("/nope"), null);
+});
+

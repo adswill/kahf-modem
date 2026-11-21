@@ -80,20 +80,20 @@ const RELAYS = [{ id: "K1AAA", area: "N51W1" }, { id: "K1BBB", area: "N51W1" }];
 test("planner: a request that cannot start inside its budget is left unplaced and not booked", () => {
   const out = planSchedule(
     [{ id: "K1AAA", area: "N51W1" }],
-    [sched("K1AAA", 4, 60), sched("K1AAA", 4, 60, { latency_budget_s: 0 })],
+    [sched("K1AAA", 1, 60), sched("K1AAA", 1, 60, { latency_budget_s: 0 })],
     NOW_S,
   );
   assert.equal(out.slots.K1AAA.length, 1);
   assert.equal(out.slots.K1AAA[0].start, NOW_S);
   assert.deepEqual(out.unplaced, [
-    { index: 1, relay: "K1AAA", channel: 4, direction: "tx", reason: "no free time inside the latency budget" },
+    { index: 1, relay: "K1AAA", channel: 1, direction: "tx", reason: "no free time inside the latency budget" },
   ]);
 });
 
 test("planner: a budget large enough still places the request, later than now", () => {
   const out = planSchedule(
     [{ id: "K1AAA", area: "N51W1" }],
-    [sched("K1AAA", 4, 60), sched("K1AAA", 4, 60, { latency_budget_s: 60 })],
+    [sched("K1AAA", 1, 60), sched("K1AAA", 1, 60, { latency_budget_s: 60 })],
     NOW_S,
   );
   assert.equal(out.unplaced.length, 0);
@@ -101,14 +101,14 @@ test("planner: a budget large enough still places the request, later than now", 
 });
 
 test("planner: no budget means no limit, as before", () => {
-  const out = makeSchedule(RELAYS, [sched("K1AAA", 4, 300), sched("K1BBB", 4, 300)], NOW_S);
+  const out = makeSchedule(RELAYS, [sched("K1AAA", 1, 300), sched("K1BBB", 1, 300)], NOW_S);
   assert.equal(out.K1BBB[0].start, NOW_S + 300);
 });
 
 test("planner: urgent requests are placed before others, so they win the channel", () => {
   const out = planSchedule(
     RELAYS,
-    [sched("K1AAA", 4, 100, { latency_budget_s: 50 }), sched("K1BBB", 4, 100, { urgent: true, latency_budget_s: 0 })],
+    [sched("K1AAA", 1, 100, { latency_budget_s: 50 }), sched("K1BBB", 1, 100, { urgent: true, latency_budget_s: 0 })],
     NOW_S,
   );
   assert.equal(out.slots.K1BBB[0].start, NOW_S);
@@ -119,17 +119,17 @@ test("planner: urgent requests are placed before others, so they win the channel
 test("planner: invalid latency budgets are refused", () => {
   for (const bad of [-1, 1.5, MAX_LATENCY_BUDGET_S + 1, "10", null]) {
     assert.throws(
-      () => makeSchedule(RELAYS, [sched("K1AAA", 4, 10, { latency_budget_s: bad })], NOW_S),
+      () => makeSchedule(RELAYS, [sched("K1AAA", 1, 10, { latency_budget_s: bad })], NOW_S),
       /latency_budget_s/,
       `budget ${String(bad)} should be refused`,
     );
   }
-  assert.doesNotThrow(() => makeSchedule(RELAYS, [sched("K1AAA", 4, 10, { latency_budget_s: MAX_LATENCY_BUDGET_S })], NOW_S));
+  assert.doesNotThrow(() => makeSchedule(RELAYS, [sched("K1AAA", 1, 10, { latency_budget_s: MAX_LATENCY_BUDGET_S })], NOW_S));
 });
 
 test("validateSchedule: latency_budget_s is an allowed request field", () => {
   // Wire requests carry no relay field: the relay is the signed top-level one.
-  const wire = (extra) => ({ channel: 4, duration: 10, direction: "tx", ...extra });
+  const wire = (extra) => ({ channel: 1, duration: 10, direction: "tx", ...extra });
   const ok = validateSchedule({
     public_key: encodeBase64(new Uint8Array(32).fill(7)),
     relay: "K1AAA",
@@ -298,7 +298,7 @@ test("POST /schedule: budget misses come back in unplaced, not as slots", async 
   const s = store();
   const key = await newKey();
   await handleRequest(post("/register", await signed(key, { area: "N51W1", callsign: "K1AAA" })), s, NOW);
-  const wire = (extra) => ({ channel: 4, duration: 60, direction: "tx", ...extra });
+  const wire = (extra) => ({ channel: 1, duration: 60, direction: "tx", ...extra });
   const body = await signed(key, {
     relay: "K1AAA",
     requests: [wire({}), wire({ latency_budget_s: 0 })],

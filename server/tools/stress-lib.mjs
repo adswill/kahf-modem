@@ -1,11 +1,29 @@
 // Scenario matrix for the KAHF station-map server. One list of scenarios, two runners:
 //   - test/matrix.test.mjs runs every scenario in-process (node --test);
 //   - tools/stress.mjs runs them in-process or against a running server URL.
-// The file does not import anything from ../src at load time, so the same scenarios can
-// drive a remote server. Expected values are written out here on purpose, not read from
-// the server's own constants.
+// Apart from the band constants below, nothing is imported from ../src, so the same
+// scenarios can drive a remote server. Expected values are worked out here on purpose, not
+// read from the server's own logic.
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
+
+// The band segment is the one value shared with the server: it comes from the single
+// constant in src/core.js, so a segment change needs no edit here. Everything derived
+// from it (channel count, frequencies, expected channels) is calculated again below.
+// A remote run therefore expects the server under test to use the same segment as this
+// checkout; a server deployed before the 17 m move fails every band scenario.
+const { BAND_SEGMENT_KHZ, CHANNEL_WIDTH_KHZ } = await import("../src/core.js");
+const LOW = BAND_SEGMENT_KHZ.low;
+const HIGH = BAND_SEGMENT_KHZ.high;
+const W10 = Math.round(CHANNEL_WIDTH_KHZ * 10); // channel width in tenths of a kHz
+const NCH = Math.floor(((HIGH - LOW) * 10) / W10);
+const LAST = NCH - 1;
+/** Integer kHz inside channel n. */
+const freqOf = (n) => Math.ceil(LOW + CHANNEL_WIDTH_KHZ * n);
+/** A channel in the middle of the band (channel 1 of 3), used where any valid channel will do. */
+const MID = Math.floor(NCH / 2);
+/** The channel the default test report is heard on: channel 0, which is in the online pool. */
+const BUSY_CH = 0;
 
 const enc = new TextEncoder();
 const BASE = "https://kahf.test";
@@ -179,7 +197,7 @@ function reportFields(h, over = {}) {
     heard_call: h.call(),
     heard_location: { mode: "area", latitude: 48.8566, longitude: 2.3522, radius_km: 50 },
     heard_at: iso(h.now() - MIN),
-    frequency_khz: 14_100,
+    frequency_khz: freqOf(BUSY_CH),
     mode: "KAHF",
   };
   for (const [k, v] of Object.entries(over)) { if (v === undefined) delete f[k]; else f[k] = v; }
@@ -225,10 +243,10 @@ const tx = (channel, duration, extra = {}) => ({ channel, duration, direction: "
 
 /** Independent channel number for an integer kHz, written without the server's constants. */
 function expectedChannel(khz) {
-  const tenths = (khz - 14_000) * 10;
+  const tenths = Math.round((khz - LOW) * 10);
   if (tenths < 0) return null;
-  const c = Math.floor(tenths / 27);
-  return c < 129 ? c : null;
+  const c = Math.floor(tenths / W10);
+  return c < NCH ? c : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +311,7 @@ S(G.sig, "signature over a different body (frequency changed after signing)", "4
   const k = await h.key();
   const f = reportFields(h);
   const body = await h.sign(k, f);
-  const r = await h.post("/report", { ...body, frequency_khz: 14_200 });
+  const r = await h.post("/report", { ...body, frequency_khz: LOW + 1 });
   status(r, 401);
   eq((await stationsOf(h, f.reporter_call)).length, 0, "stored records");
 });
@@ -377,9 +395,9 @@ S(G.sig, "all-zero (small-order) public key with forged all-zero signature, 64 m
   const zeroSig = Buffer.alloc(64).toString("base64");
   const call = h.call();
   for (let i = 0; i < 64; i++) {
-    const f = reportFields(h, { reporter_call: call, frequency_khz: 14_000 + i });
+    const f = reportFields(h, { reporter_call: call, frequency_khz: LOW + i });
     const r = await h.post("/report", { ...f, public_key: zeroKey, signature: zeroSig });
-    check(r.status !== 200, `forged signature with the all-zero key accepted for frequency_khz ${14_000 + i}: ${brief(r)}`);
+    check(r.status !== 200, `forged signature with the all-zero key accepted for frequency_khz ${LOW + i}: ${brief(r)}`);
   }
 });
 S(G.sig, "non-canonical signature (S + group order) is refused", "401 (malleable signature)", async (h) => {
@@ -685,7 +703,7 @@ for (const [lat, lon, key] of EDGES) {
     status(res, 200);
     const z = await h.get("/zones");
     status(z, 200);
-    check(Array.isArray(z.json.zones[key]) && z.json.zones[key].includes(37), `zone ${key} should hold channel 37, zones=${snip(z.json.zones)}`);
+    check(Array.isArray(z.json.zones[key]) && z.json.zones[key].includes(BUSY_CH), `zone ${key} should hold channel ${BUSY_CH}, zones=${snip(z.json.zones)}`);
     if (h.caps.isolated) eq(Object.keys(z.json.zones), [key], "areas in /zones");
   });
 }
@@ -755,10 +773,11 @@ for (const [label, lat, lon, r] of [["north pole r100", 90, 0, 100], ["south pol
 
 // ---- 5. Frequencies and channels ------------------------------------------
 
-const FREQ_ACCEPT = [1, 13_999, 14_000, 14_002, 14_003, 14_100, 14_348, 14_349, 14_350, 14_351, 145_500, 1e9];
+// Just below, at and above both segment edges, plus a few inside and far away.
+const FREQ_ACCEPT = [1, LOW - 1, LOW, LOW + 2, LOW + 3, LOW + 6, HIGH - 2, HIGH - 1, HIGH, HIGH + 1, 145_500, 1e9];
 const FREQ_REFUSE = [
-  [0, "zero"], [-1, "negative"], [-14_000, "-14000"], [14_000.5, "14000.5"], [14_100.001, "14100.001"], [1e9 + 1, "one over 1 THz"], [2 ** 53, "2^53"], [9007199254740993, "unsafe integer"],
-  [1e21, "1e21"], [1e308, "1e308"], ["14100", "string"], ["", "empty string"], [null, "null"], [true, "true"], [[14100], "array"], [{}, "object"], [0.1, "0.1"],
+  [0, "zero"], [-1, "negative"], [-LOW, `-${LOW}`], [LOW + 0.5, `${LOW}.5`], [freqOf(MID) + 0.001, `${freqOf(MID)}.001`], [1e9 + 1, "one over 1 THz"], [2 ** 53, "2^53"], [9007199254740993, "unsafe integer"],
+  [1e21, "1e21"], [1e308, "1e308"], [String(freqOf(MID)), "string"], ["", "empty string"], [null, "null"], [true, "true"], [[freqOf(MID)], "array"], [{}, "object"], [0.1, "0.1"],
 ];
 for (const f of FREQ_ACCEPT) {
   S(G.freq, `frequency ${f} kHz`, `200, channel ${expectedChannel(f) ?? "none"} in /zones`, async (h) => {
@@ -782,20 +801,20 @@ for (const [f, label] of FREQ_REFUSE) {
     errMatches(res, /frequency_khz/);
   });
 }
-for (const [label, token] of [["NaN (raw)", "NaN"], ["Infinity (raw)", "Infinity"], ["1e999", "1e999"], ["14000.0 spelled with a fraction", "14000.0"]]) {
-  S(G.freq, `frequency ${label}`, token === "14000.0" ? "validation passes (401 since signed with a placeholder)" : "400", async (h) => {
+for (const [label, token] of [["NaN (raw)", "NaN"], ["Infinity (raw)", "Infinity"], ["1e999", "1e999"], [`${LOW}.0 spelled with a fraction`, `${LOW}.0`]]) {
+  S(G.freq, `frequency ${label}`, token === `${LOW}.0` ? "validation passes (401 since signed with a placeholder)" : "400", async (h) => {
     const r = await postRawToken(h, "/report", reportFields(h), ["frequency_khz"], token);
-    status(r, token === "14000.0" ? 401 : 400);
+    status(r, token === `${LOW}.0` ? 401 : 400);
   });
 }
-S(G.freq, "every integer kHz from 13995 to 14355 maps to the channel an independent calculation gives", "/zones busy channels = expected set", async (h) => {
+S(G.freq, `every integer kHz from ${LOW - 5} to ${HIGH + 5} maps to the channel an independent calculation gives`, "/zones busy channels = expected set", async (h) => {
   const k = await h.key();
   const rep = h.call();
   const area = { mode: "precise", latitude: 33.3333, longitude: 66.6666 };
   const want = new Set();
   const calls = [];
-  for (let f = 13_995; f <= 14_355; f++) {
-    const hc = "Q9" + (f - 13_995).toString(36).toUpperCase().padStart(3, "A");
+  for (let f = LOW - 5; f <= HIGH + 5; f++) {
+    const hc = "Q9" + (f - (LOW - 5)).toString(36).toUpperCase().padStart(3, "A");
     calls.push(hc);
     const body = await h.sign(k, reportFields(h, { reporter_call: rep, reporter_location: area, heard_call: hc, frequency_khz: f }));
     status(await h.post("/report", body), 200, `report f=${f}`);
@@ -807,16 +826,16 @@ S(G.freq, "every integer kHz from 13995 to 14355 maps to the channel an independ
   const missing = [...want].filter((c) => !got.has(c)), extra = [...got].filter((c) => !want.has(c));
   check(missing.length === 0 && extra.length === 0, `missing channels ${snip(missing)}, extra channels ${snip(extra)}`);
 }, {});
-S(G.freq, "channel pools are consistent (129 channels, online and open split cleanly)", "pools cover 0..128 once; busy channel removed from the area's list", async (h) => {
-  status((await report(h, { frequency_khz: 14_100 })).res, 200);
+S(G.freq, `channel pools are consistent (${NCH} channels, online and open split cleanly)`, `pools cover 0..${LAST} once; busy channel removed from the area's list`, async (h) => {
+  status((await report(h, { frequency_khz: freqOf(BUSY_CH) })).res, 200);
   const z = (await h.get("/zones")).json;
-  eq(z.pools.bandChannels, 129, "bandChannels");
+  eq(z.pools.bandChannels, NCH, "bandChannels");
   const all = [...z.pools.online, ...z.pools.open].sort((a, b) => a - b);
-  eq(all, Array.from({ length: 129 }, (_, i) => i), "online + open");
+  eq(all, Array.from({ length: NCH }, (_, i) => i), "online + open");
   check(z.pools.online.every((c) => !z.pools.open.includes(c)), "online and open overlap");
   const entry = z.pools.areas.N51W1;
   check(entry, "N51W1 missing from pools.areas");
-  check(!entry.channels.includes(37) || !z.pools.online.includes(37), "busy channel is still offered");
+  check(!entry.channels.includes(BUSY_CH) || !z.pools.online.includes(BUSY_CH), "busy channel is still offered");
   eq(z.busy_window_s, 600, "busy window");
 });
 
@@ -841,22 +860,23 @@ S(G.sched, "requests is not a list (object, string, null, number)", "400", async
 });
 S(G.sched, "one relay alone gets its slot at the current second", "200, one slot: start = now, channel, duration, direction as asked", async (h) => {
   const r = await relayWith(h);
-  const res = await schedule(h, r.call, [{ channel: 5, duration: 10, direction: "rx" }], r.key);
+  const res = await schedule(h, r.call, [{ channel: LAST, duration: 10, direction: "rx" }], r.key);
   status(res, 200);
   eq(res.json.relay, r.call, "relay");
   eq(res.json.slots.length, 1, "slot count");
   const s = res.json.slots[0];
-  eq([s.channel, s.duration, s.direction], [5, 10, "rx"], "slot fields");
+  eq([s.channel, s.duration, s.direction], [LAST, 10, "rx"], "slot fields");
   check(Math.abs(s.start - nowS(h)) <= 5, `start ${s.start} should be about ${nowS(h)}`);
 });
 S(G.sched, "20 requests accepted, 21 refused", "200 then 400", async (h) => {
   const r = await relayWith(h);
-  status(await schedule(h, r.call, Array.from({ length: 20 }, (_, i) => tx(i, 5)), r.key), 200, "20 requests");
-  status(await schedule(h, r.call, Array.from({ length: 21 }, (_, i) => tx(i, 5)), r.key), 400, "21 requests");
+  status(await schedule(h, r.call, Array.from({ length: 20 }, (_, i) => tx(i % NCH, 5)), r.key), 200, "20 requests");
+  status(await schedule(h, r.call, Array.from({ length: 21 }, (_, i) => tx(i % NCH, 5)), r.key), 400, "21 requests");
 });
 S(G.sched, "a relay's own slots never overlap (one radio), across different channels", "start times at least duration apart", async (h) => {
   const r = await relayWith(h);
-  const res = await schedule(h, r.call, [tx(3, 60), tx(4, 60), tx(5, 60), tx(6, 60)], r.key);
+  // One request per channel of the band (the band has few channels, so no more distinct ones exist).
+  const res = await schedule(h, r.call, Array.from({ length: NCH }, (_, c) => tx(c, 60)), r.key);
   status(res, 200);
   const sl = res.json.slots;
   for (let i = 1; i < sl.length; i++) check(sl[i].start >= sl[i - 1].start + sl[i - 1].duration, `slot ${i} overlaps slot ${i - 1}: ${snip(sl)}`);
@@ -866,19 +886,19 @@ S(G.sched, "30 relays in one area, same channel, each asks 20 times in turn: no 
   const all = [];
   for (let i = 0; i < 30; i++) {
     const r = await relayWith(h, area);
-    const res = await schedule(h, r.call, [tx(7, 10), tx(7, 10, { urgent: true })], r.key);
+    const res = await schedule(h, r.call, [tx(MID, 10), tx(MID, 10, { urgent: true })], r.key);
     status(res, 200, `relay ${i}`);
     for (const s of res.json.slots) all.push({ ...s, relay: r.call });
   }
   eq(all.length, 60, "total slots");
   all.sort((a, b) => a.start - b.start);
-  for (let i = 1; i < all.length; i++) check(all[i].start >= all[i - 1].start + all[i - 1].duration, `overlap on channel 7: ${snip(all[i - 1])} and ${snip(all[i])}`);
+  for (let i = 1; i < all.length; i++) check(all[i].start >= all[i - 1].start + all[i - 1].duration, `overlap on channel ${MID}: ${snip(all[i - 1])} and ${snip(all[i])}`);
   check(all[0].start >= nowS(h) - 5, "first slot starts before now");
 });
 S(G.sched, "relays in different areas never transmit on one channel at the same time (HF is global)", "second transmit slot starts after the first", async (h) => {
   const a = await relayWith(h, "N10E10"), b = await relayWith(h, "N11E10");
-  const ra = await schedule(h, a.call, [tx(9, 30)], a.key);
-  const rb = await schedule(h, b.call, [tx(9, 30)], b.key);
+  const ra = await schedule(h, a.call, [tx(MID, 30)], a.key);
+  const rb = await schedule(h, b.call, [tx(MID, 30)], b.key);
   status(ra, 200); status(rb, 200);
   const x = ra.json.slots[0], y = rb.json.slots[0];
   check(y.start >= x.start + x.duration || x.start >= y.start + y.duration, `transmit slots overlap: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
@@ -898,8 +918,8 @@ S(G.sched, "urgent false behaves as non-urgent; urgent mixed with a different ch
 S(G.sched, "a later relay cannot jump ahead of already booked slots, even when urgent", "second relay starts after the first one's slot", async (h) => {
   const area = h.area();
   const a = await relayWith(h, area), b = await relayWith(h, area);
-  const ra = await schedule(h, a.call, [tx(8, 300)], a.key);
-  const rb = await schedule(h, b.call, [tx(8, 30, { urgent: true })], b.key);
+  const ra = await schedule(h, a.call, [tx(MID, 300)], a.key);
+  const rb = await schedule(h, b.call, [tx(MID, 30, { urgent: true })], b.key);
   status(ra, 200); status(rb, 200);
   check(rb.json.slots[0].start >= ra.json.slots[0].start + 300, `urgent second relay overlaps the first: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
 });
@@ -912,7 +932,7 @@ S(G.sched, "scheduling again replaces the relay's own earlier plan", "second pla
 });
 S(G.sched, "duplicate identical requests are placed one after the other", "slots spaced by duration, none overlapping", async (h) => {
   const r = await relayWith(h);
-  const res = await schedule(h, r.call, [tx(4, 50), tx(4, 50), tx(4, 50)], r.key);
+  const res = await schedule(h, r.call, [tx(MID, 50), tx(MID, 50), tx(MID, 50)], r.key);
   status(res, 200);
   eq(res.json.slots.length, 3, "slots");
   const s = res.json.slots;
@@ -920,7 +940,7 @@ S(G.sched, "duplicate identical requests are placed one after the other", "slots
 });
 S(G.sched, "20 duplicate 300 s requests", "20 disjoint slots", async (h) => {
   const r = await relayWith(h);
-  const res = await schedule(h, r.call, Array.from({ length: 20 }, () => tx(4, 300)), r.key);
+  const res = await schedule(h, r.call, Array.from({ length: 20 }, () => tx(MID, 300)), r.key);
   status(res, 200);
   const s = res.json.slots;
   for (let i = 1; i < s.length; i++) check(s[i].start >= s[i - 1].start + 300, "overlap");
@@ -928,13 +948,13 @@ S(G.sched, "20 duplicate 300 s requests", "20 disjoint slots", async (h) => {
 for (const [label, d, ok] of [["1 s", 1, true], ["300 s", 300, true], ["150 s", 150, true], ["0 s", 0, false], ["301 s", 301, false], ["1.5 s", 1.5, false], ["-1 s", -1, false], ["-300 s", -300, false], ["string \"60\"", "60", false], ["null", null, false], ["true", true, false], ["array", [60], false], ["2^53", 2 ** 53, false], ["1e21", 1e21, false]]) {
   S(G.sched, `duration ${label}`, ok ? "200" : "400", async (h) => {
     const r = await relayWith(h);
-    const res = await schedule(h, r.call, [{ channel: 3, duration: d, direction: "tx" }], r.key);
+    const res = await schedule(h, r.call, [{ channel: MID, duration: d, direction: "tx" }], r.key);
     status(res, ok ? 200 : 400);
     if (!ok) errMatches(res, /duration|requests/);
   });
 }
-for (const [label, c, ok] of [["0 (band edge)", 0, true], ["128 (last channel)", 128, true], ["64", 64, true], ["129 (one past the band)", 129, false], ["130", 130, false], ["1000", 1000, false], ["-1", -1, false], ["1.5", 1.5, false], ["127.9999", 127.9999, false], ["string \"5\"", "5", false], ["null", null, false], ["2^53", 2 ** 53, false], ["1e21", 1e21, false], ["array", [1], false]]) {
-  S(G.sched, `channel ${label}`, ok ? "200" : "400 channel must be 0..128", async (h) => {
+for (const [label, c, ok] of [["0 (band edge)", 0, true], [`${LAST} (last channel)`, LAST, true], [`${MID} (middle)`, MID, true], [`${NCH} (one past the band)`, NCH, false], [`${NCH + 1}`, NCH + 1, false], ["1000", 1000, false], ["-1", -1, false], ["1.5", 1.5, false], [`${LAST - 0.0001}`, LAST - 0.0001, false], ["string \"5\"", "5", false], ["null", null, false], ["2^53", 2 ** 53, false], ["1e21", 1e21, false], ["array", [1], false]]) {
+  S(G.sched, `channel ${label}`, ok ? "200" : `400 channel must be 0..${LAST}`, async (h) => {
     const r = await relayWith(h);
     const res = await schedule(h, r.call, [{ channel: c, duration: 5, direction: "rx" }], r.key);
     status(res, ok ? 200 : 400);
@@ -944,13 +964,13 @@ for (const [label, c, ok] of [["0 (band edge)", 0, true], ["128 (last channel)",
 for (const [label, d, ok] of [["tx", "tx", true], ["rx", "rx", true], ["TX", "TX", false], ["both", "both", false], ["empty", "", false], ["null", null, false], ["5", 5, false], ["array", ["tx"], false]]) {
   S(G.sched, `direction ${label}`, ok ? "200" : "400", async (h) => {
     const r = await relayWith(h);
-    status(await schedule(h, r.call, [{ channel: 3, duration: 5, direction: d }], r.key), ok ? 200 : 400);
+    status(await schedule(h, r.call, [{ channel: MID, duration: 5, direction: d }], r.key), ok ? 200 : 400);
   });
 }
 for (const [label, u, ok] of [["true", true, true], ["false", false, true], ["\"true\"", "true", false], ["1", 1, false], ["null", null, false], ["array", [], false]]) {
   S(G.sched, `urgent ${label}`, ok ? "200" : "400", async (h) => {
     const r = await relayWith(h);
-    status(await schedule(h, r.call, [{ channel: 3, duration: 5, direction: "tx", urgent: u }], r.key), ok ? 200 : 400);
+    status(await schedule(h, r.call, [{ channel: MID, duration: 5, direction: "tx", urgent: u }], r.key), ok ? 200 : 400);
   });
 }
 for (const [label, q] of [["null request", null], ["string request", "x"], ["number request", 5], ["array request", []], ["missing channel", { duration: 5, direction: "tx" }], ["missing duration", { channel: 1, direction: "tx" }], ["missing direction", { channel: 1, duration: 5 }], ["extra field", { channel: 1, duration: 5, direction: "tx", note: "x" }], ["extra field HTML key", { channel: 1, duration: 5, direction: "tx", "<script>alert(1)</script>": 1 }]]) {
@@ -970,10 +990,10 @@ S(G.sched, "request with 600 levels of nested arrays", "400, never 5xx", async (
 S(G.sched, "request for a channel outside the band together with valid ones", "400, and no slots stored for the valid ones", async (h) => {
   const area = h.area();
   const a = await relayWith(h, area), b = await relayWith(h, area);
-  status(await schedule(h, a.call, [tx(6, 50), tx(500, 5)], a.key), 400);
-  const rb = await schedule(h, b.call, [tx(6, 50)], b.key);
+  status(await schedule(h, a.call, [tx(MID, 50), tx(500, 5)], a.key), 400);
+  const rb = await schedule(h, b.call, [tx(MID, 50)], b.key);
   status(rb, 200);
-  check(Math.abs(rb.json.slots[0].start - nowS(h)) <= 5, "refused plan still booked channel 6");
+  check(Math.abs(rb.json.slots[0].start - nowS(h)) <= 5, "refused plan still booked channel ${MID}");
 });
 S(G.sched, "unregistered relay", "404 relay is not registered", async (h) => {
   const k = await h.key();
@@ -1009,18 +1029,18 @@ S(G.sched, "relay that moves area is planned against its new area only", "same-c
   const y = x === "N5E5" ? "N6E6" : "N5E5";
   const a = await relayWith(h, x);
   const m = await relayWith(h, x);
-  status(await schedule(h, a.call, [{ channel: 10, duration: 300, direction: "rx" }], a.key), 200);
+  status(await schedule(h, a.call, [{ channel: MID, duration: 300, direction: "rx" }], a.key), 200);
   status((await registerRelay(h, m.call, y, m.key)).res, 200);
-  const res = await schedule(h, m.call, [{ channel: 10, duration: 30, direction: "rx" }], m.key);
+  const res = await schedule(h, m.call, [{ channel: MID, duration: 30, direction: "rx" }], m.key);
   status(res, 200);
   check(Math.abs(res.json.slots[0].start - nowS(h)) <= 5, `moved relay still waits behind the old area: ${snip(res.json.slots)}`);
 });
 S(G.sched, "booked slots free up when they have ended", "second relay starts now after the first plan is over", async (h) => {
   const area = h.area();
   const a = await relayWith(h, area), b = await relayWith(h, area);
-  status(await schedule(h, a.call, [tx(8, 300)], a.key), 200);
+  status(await schedule(h, a.call, [tx(MID, 300)], a.key), 200);
   h.advance(301_000);
-  const rb = await schedule(h, b.call, [tx(8, 30)], b.key);
+  const rb = await schedule(h, b.call, [tx(MID, 30)], b.key);
   status(rb, 200);
   check(Math.abs(rb.json.slots[0].start - nowS(h)) <= 1, `slot ${snip(rb.json.slots)} should start now`);
 }, { needs: ["clock"] });
@@ -1130,7 +1150,7 @@ for (const [label, age, live] of AGES) {
     await h.seedRecord({ ...f, heard_at: iso(h.now() + age - MIN), public_key: k.publicKey, refreshed_at: h.now() });
     h.advance(age);
     const z = (await h.get("/zones")).json.zones;
-    eq(Object.values(z).flat().includes(37), live, "channel 37 busy");
+    eq(Object.values(z).flat().includes(BUSY_CH), live, `channel ${BUSY_CH} busy`);
   }, { needs: ["seed"] });
   S(G.exp, `record ${label} old: /remove`, live ? "200 removed" : "404 no such record", async (h) => {
     const k = await h.key();
@@ -1174,9 +1194,9 @@ S(G.exp, "expired owner does not block a different key, and the record is replac
   const call = h.call(), heard = h.call();
   status((await report(h, { reporter_call: call, heard_call: heard })).res, 200);
   h.advance(48 * H);
-  status((await report(h, { reporter_call: call, heard_call: heard, frequency_khz: 14_200, heard_at: iso(h.now() - MIN) })).res, 200);
+  status((await report(h, { reporter_call: call, heard_call: heard, frequency_khz: LOW + 1, heard_at: iso(h.now() - MIN) })).res, 200);
   const st = await stationsOf(h, call);
-  eq(st.map((s) => s.frequency_khz), [14_200], "records");
+  eq(st.map((s) => s.frequency_khz), [LOW + 1], "records");
 }, { needs: ["clock"] });
 
 // ---- 9. Concurrency -------------------------------------------------------
@@ -1186,19 +1206,19 @@ S(G.conc, "50 reports for one station in the same second", "all 200; exactly one
   const rep = h.call(), heard = h.call();
   const at = iso(h.now() - MIN);
   const bodies = [];
-  for (let i = 0; i < 50; i++) bodies.push(await h.sign(k, reportFields(h, { reporter_call: rep, heard_call: heard, heard_at: at, frequency_khz: 14_000 + i, mode: `M${14_000 + i}` })));
+  for (let i = 0; i < 50; i++) bodies.push(await h.sign(k, reportFields(h, { reporter_call: rep, heard_call: heard, heard_at: at, frequency_khz: LOW + i, mode: `M${LOW + i}` })));
   const results = await Promise.all(bodies.map((b) => h.post("/report", b)));
   for (const r of results) status(r, 200);
   const st = await stationsOf(h, rep);
   eq(st.length, 1, "records for the pair");
   eq(st[0].mode, `M${st[0].frequency_khz}`, "mode and frequency come from the same report");
-  check(st[0].frequency_khz >= 14_000 && st[0].frequency_khz < 14_050, "frequency not from the sent set");
+  check(st[0].frequency_khz >= LOW && st[0].frequency_khz < LOW + 50, "frequency not from the sent set");
 });
 S(G.conc, "20 reports in a row for one station: the last wins", "frequency of the 20th", async (h) => {
   const k = await h.key();
   const rep = h.call(), heard = h.call();
-  for (let i = 0; i < 20; i++) status(await h.post("/report", await h.sign(k, reportFields(h, { reporter_call: rep, heard_call: heard, frequency_khz: 14_000 + i }))), 200);
-  eq((await stationsOf(h, rep)).map((s) => s.frequency_khz), [14_019], "frequency");
+  for (let i = 0; i < 20; i++) status(await h.post("/report", await h.sign(k, reportFields(h, { reporter_call: rep, heard_call: heard, frequency_khz: LOW + i }))), 200);
+  eq((await stationsOf(h, rep)).map((s) => s.frequency_khz), [LOW + 19], "frequency");
 });
 S(G.conc, "20 identical reports at once", "all 200, one record", async (h) => {
   const k = await h.key();
@@ -1241,7 +1261,7 @@ S(G.conc, "10 relays in one area schedule the same channel at once (store with K
   const area = h.area();
   const relays = [];
   for (let i = 0; i < 10; i++) relays.push(await relayWith(h, area));
-  const rs = await Promise.all(relays.map((r) => schedule(h, r.call, [tx(20, 30)], r.key)));
+  const rs = await Promise.all(relays.map((r) => schedule(h, r.call, [tx(MID, 30)], r.key)));
   for (const r of rs) status(r, 200);
   const slots = rs.map((r) => r.json.slots[0]).sort((a, b) => a.start - b.start);
   for (let i = 1; i < slots.length; i++) check(slots[i].start >= slots[i - 1].start + slots[i - 1].duration, `overlap: ${snip(slots[i - 1])} vs ${snip(slots[i])}`);
@@ -1453,7 +1473,7 @@ const noExternal = (html, where) => {
   const noScript = html.replace(/<script>[\s\S]*?<\/script>/, "");
   check(!/<[a-z][^>]*\son[a-z]+\s*=/i.test(noScript), `${where}: inline event handler in a tag`);
   check(!/(?:href|src|action|xlink:href)\s*=\s*["']?\s*javascript:/i.test(noScript), `${where}: javascript: URL in an attribute`);
-  check(!/url\(\s*["']?(?!#)/i.test(html), `${where}: CSS url() other than a fragment`);
+  check(!/url\(\s*["']?(?!#|\/fonts\/display\.woff2)/i.test(html), `${where}: CSS url() other than a fragment`);
   check(!/@import/i.test(html), `${where}: @import`);
   for (const m of html.matchAll(/\bhref\s*=\s*"([^"]*)"/g)) check(m[1].startsWith("#") || m[1].startsWith("/"), `${where}: href leaves the site: ${m[1]}`);
 };

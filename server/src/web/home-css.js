@@ -1,32 +1,53 @@
-// Styles for the kahf.dev home page only (the map page keeps the shared sheet in styles.js).
+// Styles for the kahf.dev home page and the inner pages (body.paper). The map page keeps the shared sheet in styles.js.
 // The home page is a printed chart: a plotting sheet with a neatline, a graticule, range
 // rings, great-circle passages, and a tide-table style ruler of the twelve lanes. Pale
 // chart blues, navy ink, one chart-magenta for what is active. System fonts only, no
 // images, no external files. Flat colour: no gradients, shadows or filters anywhere.
 export const HOME_CSS = String.raw`
-body[data-page="home"] {
+body.paper {
   --paper: #f5f3ea; --sea: #dbe9ec; --sea-2: #c3dbe1; --ink: #0f2438; --ink-2: #455d70;
   --rule: #98b1bd; --mag: #a8186f; --mag-ink: #8c125c; --night: #11334f; --land: #e8dfbf;
   --bg: var(--paper); --fg: var(--ink); --muted: var(--ink-2); --line: var(--rule); --focus: var(--mag);
+  --amber: var(--mag); --amber-ink: var(--mag-ink); --fill: var(--sea); --live: var(--night); --live-ink: var(--night); --alert: var(--mag); --alert-ink: var(--mag-ink);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   background: var(--paper); color: var(--ink); accent-color: var(--mag);
   font: 17px/1.6 var(--sans); scrollbar-color: var(--rule) var(--paper);
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) body[data-page="home"] {
+  :root:not([data-theme="light"]) body.paper {
     --paper: #0c1b29; --sea: #12293b; --sea-2: #1a3a52; --ink: #dbe8ee; --ink-2: #93aab8;
     --rule: #34526a; --mag: #ff86c8; --mag-ink: #ff9ed3; --night: #04101b; --land: #1b3042;
   }
 }
-:root[data-theme="dark"] body[data-page="home"] {
+:root[data-theme="dark"] body.paper {
   --paper: #0c1b29; --sea: #12293b; --sea-2: #1a3a52; --ink: #dbe8ee; --ink-2: #93aab8;
   --rule: #34526a; --mag: #ff86c8; --mag-ink: #ff9ed3; --night: #04101b; --land: #1b3042;
 }
-body[data-page="home"] ::selection { background: var(--mag); color: var(--paper); }
-body[data-page="home"] a { color: var(--ink); text-decoration-color: var(--mag); text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
-body[data-page="home"] a:hover { color: var(--mag-ink); }
-body[data-page="home"] :focus-visible { outline: 2px solid var(--mag); outline-offset: 3px; }
-body[data-page="home"] .skip { background: var(--ink); color: var(--paper); }
+body.paper ::selection { background: var(--mag); color: var(--paper); }
+body.paper a { color: var(--ink); text-decoration-color: var(--mag); text-decoration-thickness: 1.5px; text-underline-offset: 4px; }
+body.paper a:hover { color: var(--mag-ink); }
+body.paper :focus-visible { outline: 2px solid var(--mag); outline-offset: 3px; }
+body.paper .skip { background: var(--ink); color: var(--paper); }
+
+body.paper h1, body.paper h2 { text-transform: none; }
+
+/* inner pages (network, start, modem, legal): the shared content classes from styles.js, set in the chart look */
+body.paper .wrap { max-width: 1240px; }
+body.paper .pagehead { padding: 52px 0 6px; }
+body.paper .pagehead h1 { font: 400 clamp(38px, 5.4vw, 66px)/1.04 var(--serif); letter-spacing: -0.02em; text-transform: none; margin: 0 0 20px; max-width: 14em; }
+body.paper h1 em, body.paper h2 em { font-style: italic; color: var(--mag-ink); }
+body.paper .sec { border-top: 1px solid var(--rule); padding: 48px 0; }
+body.paper .sec.tight { padding: 32px 0; }
+body.paper .sec h2, body.paper .pagehead + .sec h2 { font: 400 clamp(26px, 3.2vw, 36px)/1.15 var(--serif); letter-spacing: -0.01em; text-transform: none; max-width: 22em; margin: 0 0 20px; }
+body.paper .sec h3 { font: 700 16px/1.3 var(--sans); }
+body.paper .lede { color: var(--ink); }
+body.paper .cta a { border: 1.5px solid var(--ink); color: var(--ink); text-decoration: none; }
+body.paper .cta a:hover { border-color: var(--mag); color: var(--mag-ink); }
+body.paper .cta a.primary { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+body.paper .cta a.primary:hover { background: var(--mag); border-color: var(--mag); color: var(--paper); }
+body.paper .ledger { border-top: 2px solid var(--ink); }
+body.paper .steps li::before, body.paper .ledger dd.v { color: var(--ink); }
+body.paper .callout { background: var(--sea); border: 1px solid var(--ink); }
 
 /* masthead: the title block of the sheet */
 .mast { border-bottom: 2px solid var(--ink); }

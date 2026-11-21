@@ -120,6 +120,7 @@ pub const STATIONS_TITLE: &str = "Stations";
 pub const STATIONS_FILTER: &str = "Filter by callsign or name";
 pub const COL_CALLSIGN: &str = "Callsign";
 pub const COL_NAME: &str = "Name";
+pub const COL_QTH: &str = "Location";
 pub const COL_LAST_HEARD: &str = "Last heard";
 pub const COL_TIMES: &str = "Times heard";
 pub const COL_LAST_MESSAGE: &str = "Last message";
@@ -189,8 +190,31 @@ pub const COL_TIME: &str = "Time (UTC)";
 pub const COL_DURATION: &str = "Duration";
 pub const COL_DIR: &str = "Direction";
 pub const COL_FROM_TO: &str = "From and to";
-pub const RELAY_EMPTY_TITLE: &str = "No relay schedule yet";
-pub const RELAY_EMPTY_HINT: &str = "A schedule from the server appears here for you to accept.";
+pub const RELAY_OUTBOX: &str = "Waiting to send";
+pub const RELAY_SERVER: &str = "Relay server";
+pub const SERVER_STATUS: &str = "Status";
+pub const SERVER_REGISTERED: &str = "Registered";
+pub const SERVER_NOT_REGISTERED: &str = "Not registered yet";
+pub const SERVER_SCHEDULE: &str = "Schedule";
+pub const SERVER_NO_SCHEDULE: &str = "None received yet";
+pub const SERVER_NEXT: &str = "Next contact (UTC)";
+pub const SERVER_ERROR: &str = "Last problem";
+pub const SERVER_NEEDS_LOCATOR: &str =
+    "Set your grid locator in Settings, then start relay mode again to register with the relay server.";
+pub const SERVER_NOT_STARTED: &str =
+    "The relay server could not be reached from this station. See Last events.";
+pub const RELAY_EV_HELD: &str = "Holding a message from";
+pub const RELAY_EV_SENT: &str = "Relayed a message from";
+pub const RELAY_EV_DROPPED: &str = "Did not relay a message from";
+pub const RELAY_EV_TO: &str = "to";
+pub const RELAY_PATHS: &str = "17 m relays toward";
+pub const RELAY_NO_SLOTS: &str = "No slots yet. Relay sends only inside an accepted slot.";
+pub const RELAY_NO_HOPS: &str = "No messages forwarded yet.";
+pub const RELAY_OUTBOX_EMPTY: &str = "Nothing is waiting.";
+pub const COL_RELAY: &str = "Relay";
+pub const COL_ITEM: &str = "Item";
+pub const DIR_RECEIVE: &str = "Listen";
+pub const DIR_TRANSMIT: &str = "Send";
 
 // Logbook
 pub const LOG_TITLE: &str = "Logbook";
@@ -204,7 +228,9 @@ pub const COL_NOTE: &str = "Note";
 pub const LOG_EMPTY_TITLE: &str = "No contacts logged";
 pub const LOG_EMPTY_HINT: &str = "Each completed link is added here.";
 pub const LOG_NO_MATCH: &str = "No contact matches the search.";
-pub const LOG_EXPORT_DONE: &str = "Export is not connected to the engine yet. Nothing was written.";
+pub const LOG_EXPORT_DONE: &str = "Logbook exported to logbook.adi in the data folder.";
+pub const LOG_EXPORT_EMPTY: &str = "The logbook is empty. Nothing was written.";
+pub const LOG_EXPORT_FAIL: &str = "The logbook could not be exported.";
 
 // Map
 pub const MAP_TITLE: &str = "Map";
@@ -222,6 +248,10 @@ pub const SET_STATION: &str = "Station";
 pub const SET_STATION_DESC: &str = "Who you are on air.";
 pub const SET_CALLSIGN: &str = "Callsign";
 pub const SET_CALLSIGN_DESC: &str = "Sent with every transmission.";
+pub const SET_LOCATOR: &str = "Grid locator";
+pub const SET_LOCATOR_DESC: &str =
+    "Your Maidenhead square, such as KP20. A relay tells the relay server which area it serves.";
+pub const SET_LOCATOR_BAD: &str = "Use four or six characters, such as KP20 or KP20le.";
 pub const SET_FINGERPRINT: &str = "Key fingerprint";
 pub const SET_FINGERPRINT_DESC: &str = "Other stations use this to check your signed messages.";
 pub const SET_FINGERPRINT_NONE: &str = "No key created yet";
@@ -308,7 +338,10 @@ pub const SET_UPDATES: &str = "Updates";
 pub const SET_UPDATES_DESC: &str = "KAHF never updates itself without asking.";
 pub const SET_VERSION: &str = "Version";
 pub const SET_CHECK: &str = "Check for updates";
-pub const SET_CHECK_DONE: &str = "Update checks are not connected yet.";
+pub const UPDATE_CHECKING: &str = "Checking...";
+pub const UPDATE_CURRENT: &str = "You have the newest version.";
+pub const UPDATE_FAILED: &str = "Could not check for updates. Try again later.";
+pub const UPDATE_NEWER: &str = "Version {v} is available. Opening the download page.";
 pub const UPDATE_NOT_CHECKED: &str = "Not checked";
 
 // Toasts
@@ -458,7 +491,7 @@ pub const SETUP_REVISIT: &str = "Open";
 pub const SETUP_SETTINGS_HEADING: &str = "Setup";
 pub const SETUP_SETTINGS_DESC: &str = "The five setup steps. Open one to change it.";
 pub const SETUP_RUN_ALL: &str = "Run the full setup";
-pub const STEP_CALL: &str = "Your callsign";
+pub const STEP_CALL: &str = "Your callsign and grid locator";
 pub const STEP_RADIO: &str = "Choose your radio";
 pub const STEP_SDR: &str = "Choose your SDR";
 pub const STEP_AUDIO: &str = "Choose audio input and output";
@@ -530,3 +563,16 @@ pub const LINK_CONNECTING: &str = "Connecting";
 pub const INPUT_LEVEL_SHORT: &str = "Level";
 pub const MONITOR_HEADING: &str = "Receive and transmit";
 pub const SNR_HISTORY_HEADING: &str = "SNR, last 60 s";
+
+// Connection tests and logs
+pub const TEST_BUTTON: &str = "Test";
+pub const TEST_RUNNING: &str = "Testing...";
+pub const TIP_TEST_RIG: &str = "Ask rigctld for the radio's frequency. Nothing is sent to the radio.";
+pub const TIP_TEST_AUDIO_IN: &str = "Listen to the input for a moment and report its level.";
+pub const TIP_TEST_AUDIO_OUT: &str = "Open the output and play silence. Nothing is transmitted.";
+pub const SET_LOGS: &str = "Logs";
+pub const SET_LOGS_DESC: &str = "KAHF keeps a short log. Look it over before you attach it to a report: it can name callsigns and devices.";
+pub const SET_LOGS_FOLDER: &str = "Folder";
+pub const SET_LOGS_OPEN: &str = "Open log folder";
+pub const TIP_LOGS_OPEN: &str = "Show the log files in your file manager.";
+pub const LOGS_OPEN_FAIL: &str = "Could not open the log folder.";

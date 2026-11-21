@@ -86,7 +86,7 @@ impl HopLog {
     }
 
     /// The newest `n` hops, newest first, and the total number recorded.
-    pub fn recent(&self, n: usize) -> (Vec<Hop>, usize) {
+    pub fn recent_counted(&self, n: usize) -> (Vec<Hop>, usize) {
         (self.hops.iter().rev().take(n).cloned().collect(), self.hops.len())
     }
 
@@ -97,6 +97,11 @@ impl HopLog {
             .filter(|h| h.message_id == message_id)
             .cloned()
             .collect()
+    }
+
+    /// The last `limit` hops of any message, newest first.
+    pub fn recent(&self, limit: usize) -> Vec<Hop> {
+        self.hops.iter().rev().take(limit).cloned().collect()
     }
 }
 
@@ -328,6 +333,17 @@ mod tests {
         assert_eq!(chain[0].relay, "A");
         assert_eq!(chain[1].relay, "C");
         assert!(log.chain_for(99).is_empty());
+    }
+
+    #[test]
+    fn hop_log_recent_is_newest_first_and_capped() {
+        let mut log = HopLog::new();
+        assert!(log.recent(5).is_empty());
+        log.record(hop(1, "A", 10));
+        log.record(hop(2, "B", 11));
+        log.record(hop(1, "C", 12));
+        let recent: Vec<_> = log.recent(2).into_iter().map(|h| h.relay).collect();
+        assert_eq!(recent, ["C", "B"]);
     }
 
     #[test]

@@ -98,7 +98,9 @@ calls are not checked against each other's earlier slots.
 All channel numbers come from one constant, `BAND_SEGMENT_KHZ` in
 `src/core.js` (lower edge included, upper edge excluded), and the channel width
 `CHANNEL_WIDTH_KHZ` (2.7 kHz). `BAND_CHANNELS` is derived from them. The segment
-values are a working choice and must be confirmed before deployment.
+is the 17 m relay segment, 18.111 to 18.120 MHz, which holds 3 channels
+(centres 18112.35, 18115.05 and 18117.75 kHz). The segment values are a working
+choice and must be confirmed before deployment.
 
 ### POST /report
 
@@ -138,6 +140,14 @@ values are a working choice and must be confirmed before deployment.
 `signed_at` is covered by the signature and must be within 5 minutes of the server time (past or future). A removal can be used once; replaying it returns `409`.
 
 Responses: `200 {"ok":true,"removed":true}`, `400`, `401`, `409` (replayed), `403` (the record belongs to another key), `404` (no such record).
+
+## Relay client
+
+`crates/kahf-net` is the station side of `/register` and `/schedule`, and
+`Engine::start_server_sync` in `kahf-daemon` runs it while relay mode is on.
+Its channel grid (`ChannelGrid::RELAY_17M`) must match `BAND_SEGMENT_KHZ`
+here. `test/client-fixture.test.mjs` checks that these routes accept the bodies
+the Rust client makes (`test/fixtures/rust-client.json`).
 
 ## Signing
 

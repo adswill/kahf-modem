@@ -30,6 +30,8 @@
 
 use std::f64::consts::PI;
 
+pub mod route;
+
 /// Mean Earth radius in kilometres (haversine model).
 const EARTH_RADIUS_KM: f64 = 6371.0;
 /// Maximum single-hop ground range assumed by the model, in kilometres.
