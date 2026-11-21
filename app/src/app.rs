@@ -221,8 +221,11 @@ pub struct Ui {
     pub server: Option<ServerCheck>,
     pub help_topic: String,
     pub voice_clip: Option<VoiceClip>,
-    pub playing: Option<String>,
-    pub map_sel: Option<String>,
+    /// The voice note playing: message id, when it started, how long it is.
+    pub playing: Option<(String, Instant, f64)>,
+    pub rec_start: Option<Instant>,
+    pub find: String,
+    pub map: crate::ui::map::MapState,
     pub tour_step: usize,
     pub support_nudge: bool,
 }
@@ -268,7 +271,9 @@ impl Ui {
             help_topic: String::new(),
             voice_clip: None,
             playing: None,
-            map_sel: None,
+            rec_start: None,
+            find: String::new(),
+            map: Default::default(),
             tour_step: 0,
             support_nudge: false,
         }
@@ -330,6 +335,10 @@ impl Kahf {
         Kahf { m, ui, bridge, dirty_since: None, last_poll: Instant::now() }
     }
 
+    pub fn shared(&self) -> Arc<Shared> {
+        self.bridge.shared.clone()
+    }
+
     pub fn data_dir(&self) -> PathBuf {
         self.bridge.shared.data_dir().to_path_buf()
     }
@@ -371,6 +380,13 @@ impl Kahf {
         changed |= !jobs.is_empty();
         for job in jobs {
             job(self);
+        }
+        if self.ui.playing.as_ref().is_some_and(|(_, t, secs)| t.elapsed().as_secs_f64() > secs + 0.3) {
+            self.ui.playing = None;
+        }
+        if self.ui.rec_start.is_some_and(|t| t.elapsed() >= Duration::from_secs(30)) {
+            let to = callsign::normalise(&self.ui.peer);
+            self.finish_recording(to);
         }
         for t in std::mem::take(&mut self.m.toasts) {
             show_toast(&t.text, t.kind);
@@ -821,18 +837,25 @@ impl Kahf {
             return;
         }
         self.spawn(core::voice_record, |k, r| match r {
-            Ok(()) => k.m.recording = true,
+            Ok(()) => {
+                k.m.recording = true;
+                k.ui.rec_start = Some(Instant::now());
+            }
             Err(e) => k.warn(format!("Could not record: {e}. Check the microphone in Settings, under Radio.")),
         });
     }
 
-    /// Stops recording and keeps the clip, ready to send.
-    pub fn stop_recording(&mut self) {
+    /// Stops recording and sends the clip to `to`.
+    pub fn finish_recording(&mut self, to: String) {
         self.m.recording = false;
         self.m.record_level = 0.0;
-        self.spawn(core::voice_stop, |k, r| match r {
-            Ok(Some(v)) => k.ui.voice_clip = parse::<VoiceClip>(v).ok(),
-            Ok(None) => {}
+        self.ui.rec_start = None;
+        self.spawn(core::voice_stop, move |k, r| match r {
+            Ok(Some(v)) => match parse::<VoiceClip>(v) {
+                Ok(clip) => k.send_voice(&to, clip),
+                Err(e) => k.warn(e),
+            },
+            Ok(None) => k.toast("That was too short to send.", ToastKind::Info),
             Err(e) => k.warn(e),
         });
     }
@@ -840,22 +863,28 @@ impl Kahf {
     pub fn cancel_recording(&mut self) {
         self.m.recording = false;
         self.m.record_level = 0.0;
-        self.ui.voice_clip = None;
+        self.ui.rec_start = None;
         self.spawn(|s| core::voice_cancel(s), |_, _| {});
     }
 
-    pub fn play_voice(&mut self, path: String) {
-        self.ui.playing = Some(path.clone());
+    /// Plays or stops a voice note.
+    pub fn toggle_play(&mut self, id: &str, path: Option<String>, seconds: f64) {
+        if self.ui.playing.as_ref().is_some_and(|p| p.0 == id) {
+            self.ui.playing = None;
+            self.spawn(|s| core::voice_stop_play(s), |_, _| {});
+            return;
+        }
+        let Some(path) = path else {
+            self.warn("This voice note is not saved on this computer, so it cannot be played.");
+            return;
+        };
+        self.ui.playing = Some((id.to_string(), Instant::now(), seconds));
         self.spawn(move |s| core::voice_play(s, path), |k, r| {
             if let Err(e) = r {
-                k.warn(e);
+                k.ui.playing = None;
+                k.warn(format!("Could not play it: {e}"));
             }
         });
-    }
-
-    pub fn stop_playback(&mut self) {
-        self.ui.playing = None;
-        self.spawn(|s| core::voice_stop_play(s), |_, _| {});
     }
 
     /// Opens the system's file chooser; `done` gets the files chosen.

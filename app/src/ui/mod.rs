@@ -1,9 +1,15 @@
 //! The window: the front panel on top, the sections on the left, the page, the status bar.
 
+pub mod chats;
 pub mod hardware;
+pub mod logbook;
+pub mod mail;
+pub mod map;
 pub mod kit;
 pub mod radio;
+pub mod relay;
 pub mod setup;
+pub mod stations;
 pub mod widgets;
 pub mod welcome;
 
@@ -56,7 +62,12 @@ fn shell(k: &Kahf) -> V {
 fn page(k: &Kahf) -> V {
     match k.m.page {
         Page::Radio => radio::view(k),
-        other => col![heading(other.label())].pad(20.0).into(),
+        Page::Chats => chats::view(k),
+        Page::Mail => mail::view(k),
+        Page::Stations => stations::view(k),
+        Page::Relay => relay::view(k),
+        Page::Logbook => logbook::view(k),
+        _ => col![].into(),
     }
 }
 

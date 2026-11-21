@@ -73,3 +73,42 @@ pub fn lit(label: &str, on: bool, bad: bool) -> V {
         (true, true) => t.danger().into(),
     }
 }
+
+/// A one-line text box that writes into the state.
+pub fn edit(value: &str, hint: &str, set: impl Fn(&mut Kahf, String) + Send + Sync + 'static) -> V {
+    input(value.to_string()).hint(hint).act(move |k: &mut Kahf, v: String| set(k, v)).into()
+}
+
+/// The warning and estimate shown before files are sent.
+pub fn file_notice(k: &Kahf, files: &[crate::types::PickedFile]) -> V {
+    use crate::util::fmt::*;
+    if files.is_empty() {
+        return col![].into();
+    }
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    let over = total > FILE_LIMIT_BYTES;
+    let bps = k.m.estimate_bps();
+    let line = if over {
+        format!("{} to send. That is over the {} limit. Radio is slow, so larger files are not accepted.", size_words(total), size_words(FILE_LIMIT_BYTES))
+    } else {
+        format!(
+            "{} to send. At the current speed ({}) it takes {}. On a weak signal it can take up to {}.",
+            size_words(total),
+            speed_words(bps),
+            duration_words(transfer_seconds(total, bps)),
+            duration_words(transfer_seconds(total, 41.0))
+        )
+    };
+    col![
+        if over { text(line).caption().danger() } else { text(line).caption() }.fill_w(),
+        caption("Files go straight to the other station and cannot be passed on through relays, so you must be in direct range of them. Keep KAHF open and the radio connected until it finishes.")
+            .dim()
+            .fill_w(),
+    ]
+    .gap(4.0)
+    .pad(10.0)
+    .round(8.0)
+    .outline()
+    .fill_w()
+    .into()
+}
