@@ -73,6 +73,11 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl Shared {
+    /// Where settings, the logbook and received files live.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// A fresh app state that reports engine events through `emit`.
     pub fn new(emit: Emitter, data_dir: PathBuf) -> Self {
         Shared {

@@ -65,13 +65,11 @@ pub enum ToastKind {
     Warn,
 }
 
+/// A message for the person, shown by the window as a toast.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Toast {
-    pub id: u64,
     pub text: String,
     pub kind: ToastKind,
-    /// Unix milliseconds when it goes away.
-    pub until: i64,
 }
 
 /// One step of the "getting started" list.
@@ -117,7 +115,7 @@ pub struct Saved {
 const KEEP_MESSAGES: usize = 500;
 const KEEP_MAIL: usize = 300;
 const KEEP_HEARD: usize = 80;
-const TOAST_MS: i64 = 5_200;
+const WATERFALL_ROWS: usize = 90;
 
 /// Turns what the engine said into advice.
 pub fn explain_start_error(raw: &str) -> String {
@@ -143,6 +141,8 @@ pub struct Model {
     pub metrics: Option<Metrics>,
     pub log: Vec<(i64, String)>,
     pub spectrum: Vec<f32>,
+    /// The last few seconds of spectrum, newest first, for the waterfall.
+    pub waterfall: std::collections::VecDeque<Vec<f32>>,
     pub transmitting: bool,
     pub receiving: bool,
     pub toasts: Vec<Toast>,
@@ -163,7 +163,6 @@ pub struct Model {
     pub pending_files: Option<PendingFiles>,
     pub ready: bool,
     last_signal_ms: i64,
-    next_toast: u64,
     next_id: u64,
 }
 
@@ -179,6 +178,7 @@ impl Default for Model {
             metrics: None,
             log: Vec::new(),
             spectrum: Vec::new(),
+            waterfall: std::collections::VecDeque::new(),
             transmitting: false,
             receiving: false,
             toasts: Vec::new(),
@@ -197,7 +197,6 @@ impl Default for Model {
             pending_files: None,
             ready: false,
             last_signal_ms: 0,
-            next_toast: 0,
             next_id: 0,
         }
     }
@@ -354,16 +353,9 @@ impl Model {
         self.settings_open = true;
     }
 
-    pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind, now_ms: i64) {
-        self.next_toast += 1;
-        self.toasts.push(Toast { id: self.next_toast, text: text.into(), kind, until: now_ms + TOAST_MS });
-    }
-
-    /// Drops the toasts whose time is up. Returns true when one went.
-    pub fn expire_toasts(&mut self, now_ms: i64) -> bool {
-        let before = self.toasts.len();
-        self.toasts.retain(|t| t.until > now_ms);
-        self.toasts.len() != before
+    /// Queues a toast; the window shows it and takes it off the queue.
+    pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind, _now_ms: i64) {
+        self.toasts.push(Toast { text: text.into(), kind });
     }
 
     pub fn add_out(&mut self, m: Msg) {
@@ -539,6 +531,8 @@ impl Model {
             EngineEvent::Metrics { metrics } => self.metrics = Some(metrics),
             EngineEvent::Spectrum { bins } => {
                 self.update_signal(&bins, now_ms);
+                self.waterfall.push_front(bins.clone());
+                self.waterfall.truncate(WATERFALL_ROWS);
                 self.spectrum = bins;
             }
             EngineEvent::Level { level } => self.record_level = level,
@@ -774,15 +768,6 @@ mod tests {
         assert_eq!(m.status().title, "Sending");
         m.engine_error = "boom".into();
         assert_eq!(m.status().title, "Radio not running");
-    }
-
-    #[test]
-    fn toasts_expire() {
-        let mut m = Model::default();
-        m.toast("hi", ToastKind::Info, 0);
-        assert!(!m.expire_toasts(5_000));
-        assert!(m.expire_toasts(5_300));
-        assert!(m.toasts.is_empty());
     }
 
     #[test]
