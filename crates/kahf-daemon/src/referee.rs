@@ -365,8 +365,9 @@ impl Worker {
                 // Sent: the grant comes in slot 3. None by the end of it: the request was lost.
                 if now > slot0_ms + (GRANT_SLOT + 1) * SLOT_MS + 400 {
                     self.refs.cw = (self.refs.cw * 2).min(rf::BACKOFF_MAX);
-                    let wait = self.dg_jitter(0, EPOCH_MS * self.refs.cw as u64 / 4).as_millis() as u64;
-                    self.refs.quiet_until_ms = now + wait / EPOCH_MS * EPOCH_MS;
+                    // Stay quiet for a random number of whole epochs, up to `cw` (1 s of jitter stands for one epoch).
+                    let epochs = self.dg_jitter(0, 1_000 * self.refs.cw as u64).as_millis() as u64 / 1_000;
+                    self.refs.quiet_until_ms = now + epochs * EPOCH_MS;
                     self.refs.op = Op::Idle;
                 }
                 RefGate::Wait
