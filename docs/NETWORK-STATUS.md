@@ -199,8 +199,9 @@ app shows it. An operator that hears a relay says "I am here" in a window slot a
 (`Kind::Here`); the relay counts these (`heres_heard`) and passes only a 24 bit hash on to the mesh.
 Decision (recorded because the owner was away): two operators may pick the same window slot and then the
 relay hears neither. That is by design (they repeat after ten minutes), so the test uses one operator.
-Not done: the resend-storm check, deliver-first routing in the engine (direct first, relay only when direct
-fails), and keeping mail and voice notes on the direct link only. Not measured on air: everything here runs on
+Deliver-first (relay delivers straight to the destination, pages other relays only on failure) lives in the server
+router (`router.js`) and in the engine's relay forward; the engine does not page other relays itself. Not done: the
+resend-storm check on the new datagram path, and a test that mail and voice notes stay on the direct link. Not measured on air: everything here runs on
 the virtual clock and in-memory buses.
 
 ## Merge with origin/main (2026-11-21, session F)
@@ -220,3 +221,7 @@ Decisions, taken because the owner was away, and why:
   counters; delivery states and the Ko-fi button exist.
 Open: the server still has a three-channel band constant from main (used by its stress tools only); the relay switch
 in the app enables one lane for 24 h, not all relay lanes; relay slots/server sync are no longer shown.
+
+Alloy UI layout issue (found 2026-11-21, not fixed here, it belongs in the Alloy library): a wrapped paragraph does not
+add its extra lines to the layout height, so the next widget draws over it (seen on the Relay intro text). Without
+`fill_w()` the text does not wrap and runs off the right edge of the 420 px side panel instead. Pictures: docs/screens.

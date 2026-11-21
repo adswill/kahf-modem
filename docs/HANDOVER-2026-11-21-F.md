@@ -12,7 +12,7 @@ Main moved on without this branch (Alloy UI app, messaging layer, new modem ladd
 
 ## Definition of done
 TRUE: lanes and 17 m only; transmit gate refuses everything while `plan_verified` is false; lane sensing; bundle chat with delivery states; relay referee (few operators); mesh server code and tests; guides and site; Alloy app shows lanes, gate notice, referee counters.
-FALSE / NOT DONE: anything verified on air; deployed mesh server; resend-storm check, deliver-first routing, mail and voice on the direct link only (WP8); bonded waveform, hopping and diversity on air (WP9); relay crash and two-relay tests; clash-domain colouring; HF fading sweep of lane bursts; soak and security review (WP12); main's ladder bursts in the engine; relay slots in the app.
+FALSE / NOT DONE: anything verified on air; deployed mesh server; resend-storm check and a mail/voice-stay-direct test (WP8), the engine paging other relays; bonded waveform, hopping and diversity on air (WP9); relay crash and two-relay tests; clash-domain colouring; HF fading sweep of lane bursts; soak and security review (WP12); main's ladder bursts in the engine; relay slots in the app.
 ONLY THE OWNER CAN: set `plan_verified` true after checking the band plan; deploy the server and handle the signing key; tag a release; transmit on air.
 
 ## Next
