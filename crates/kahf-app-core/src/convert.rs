@@ -390,7 +390,12 @@ mod tests {
     #[test]
     fn relay_events_are_logged() {
         let out = event_json(
-            &Event::Relay { call: "A1AAA".into(), online: true, time_s: 0, load: 0 },
+            &Event::Relay {
+                call: "A1AAA".into(),
+                online: true,
+                time_s: 0,
+                load: 0,
+            },
             &ctx(&[], Path::new("/x")),
         );
         assert!(out[0]["text"].as_str().unwrap().contains("on the air"));

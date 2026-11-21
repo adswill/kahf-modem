@@ -11,7 +11,10 @@ use kahf_core::{ldpc, narrow};
 struct Rng(u64);
 impl Rng {
     fn u(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
     }
     fn gauss(&mut self) -> f32 {
@@ -64,8 +67,15 @@ fn trial(sh: Shape, pitch: f64, snr_db: f64, neighbours_db: Option<f64>, seed: u
         *v += sigma * rng.gauss();
     }
     let rx = narrow::from_lane(&audio, 1500.0);
-    let Some((start, hz, tau)) = kami::find_preamble(&rx) else { return false };
-    let Some((_, llr)) = kami::demodulate_at(&rx, start, hz, tau, ldpc::N, &[sh]).into_iter().next() else { return false };
+    let Some((start, hz, tau)) = kami::find_preamble(&rx) else {
+        return false;
+    };
+    let Some((_, llr)) = kami::demodulate_at(&rx, start, hz, tau, ldpc::N, &[sh])
+        .into_iter()
+        .next()
+    else {
+        return false;
+    };
     ldpc::decode(&llr, 50).as_deref() == Some(sent.as_slice())
 }
 
@@ -76,14 +86,23 @@ fn loss(sh: Shape, pitch: f64, snr: f64, nb: Option<f64>, trials: u64) -> f64 {
 
 /// Lowest SNR (1 dB steps) with at most 10 percent loss.
 fn need(sh: Shape, pitch: f64, nb: Option<f64>, trials: u64) -> Option<f64> {
-    (-20..=30).map(|s| s as f64).find(|s| loss(sh, pitch, *s, nb, trials) <= 0.10)
+    (-20..=30)
+        .map(|s| s as f64)
+        .find(|s| loss(sh, pitch, *s, nb, trials) <= 0.10)
 }
 
 fn main() {
     let trials = 30;
-    let modes: [(&str, Shape); 3] = [("KAMI-1c", Shape { wb: 0, lb: 3 }), ("KAMI-1a", Shape { wb: 0, lb: 1 }), ("KAMI-8", Shape::walsh(3))];
+    let modes: [(&str, Shape); 3] = [
+        ("KAMI-1c", Shape { wb: 0, lb: 3 }),
+        ("KAMI-1a", Shape { wb: 0, lb: 1 }),
+        ("KAMI-8", Shape::walsh(3)),
+    ];
     println!("SNR (dB, whole 8 kHz audio) for 10 percent frame loss, {trials} frames per point");
-    println!("{:<8} {:>6} {:>10} {:>16} {:>8}", "mode", "pitch", "alone", "neighbours +30", "price");
+    println!(
+        "{:<8} {:>6} {:>10} {:>16} {:>8}",
+        "mode", "pitch", "alone", "neighbours +30", "price"
+    );
     for pitch in [700.0, 800.0] {
         for (name, sh) in modes {
             let alone = need(sh, pitch, None, trials);
@@ -92,7 +111,12 @@ fn main() {
                 (Some(a), Some(b)) => format!("{:+.0} dB", b - a),
                 _ => "n/a".into(),
             };
-            println!("{name:<8} {pitch:>6.0} {:>10} {:>16} {:>8}", fmt(alone), fmt(near), price);
+            println!(
+                "{name:<8} {pitch:>6.0} {:>10} {:>16} {:>8}",
+                fmt(alone),
+                fmt(near),
+                price
+            );
         }
     }
 }

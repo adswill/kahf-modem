@@ -209,7 +209,10 @@ fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
     }
     fft(&mut spec, true);
     let scale = 1.0 / big as f64;
-    spec.into_iter().take(n).map(|(r, i)| (r * scale, i * scale)).collect()
+    spec.into_iter()
+        .take(n)
+        .map(|(r, i)| (r * scale, i * scale))
+        .collect()
 }
 
 /// A complex fading process of `len` samples at 8 kHz with a Gaussian Doppler spectrum of
@@ -222,7 +225,9 @@ fn fading_process(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> 
     // Filter impulse response h(t) ~ exp(-2 pi^2 sigma_f^2 t^2), out to four time constants.
     let tau = 1.0 / (2.0 * PI * sigma_f);
     let half = (4.0 * tau * LOW_HZ).ceil() as isize;
-    let taps: Vec<f64> = (-half..=half).map(|k| (-((k as f64 / LOW_HZ) / tau).powi(2) / 2.0).exp()).collect();
+    let taps: Vec<f64> = (-half..=half)
+        .map(|k| (-((k as f64 / LOW_HZ) / tau).powi(2) / 2.0).exp())
+        .collect();
     let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
     let n_low = (len as f64 / step).ceil() as usize + 2;
     let noise: Vec<(f64, f64)> = (0..n_low + 2 * half as usize)
@@ -243,7 +248,10 @@ fn fading_process(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> 
             let pos = n as f64 / step;
             let i = pos.floor() as usize;
             let f = pos - i as f64;
-            (low[i].0 * (1.0 - f) + low[i + 1].0 * f, low[i].1 * (1.0 - f) + low[i + 1].1 * f)
+            (
+                low[i].0 * (1.0 - f) + low[i + 1].0 * f,
+                low[i].1 * (1.0 - f) + low[i + 1].1 * f,
+            )
         })
         .collect()
 }
@@ -263,7 +271,10 @@ fn watterson(x: &[f32], delay_s: f64, spread_hz: f64, seed: u64) -> Vec<f32> {
     let s = 1.0 / 2f64.sqrt();
     (0..n)
         .map(|i| {
-            let p1 = (g1[i].0 * a[i].0 - g1[i].1 * a[i].1, g1[i].0 * a[i].1 + g1[i].1 * a[i].0);
+            let p1 = (
+                g1[i].0 * a[i].0 - g1[i].1 * a[i].1,
+                g1[i].0 * a[i].1 + g1[i].1 * a[i].0,
+            );
             let p2 = if i >= d {
                 let b = a[i - d];
                 (g2[i].0 * b.0 - g2[i].1 * b.1, g2[i].0 * b.1 + g2[i].1 * b.0)
@@ -384,8 +395,16 @@ pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64
 }
 
 /// As `run_point_profile`, for any modulation (the frame carries that modulation's id).
-pub fn run_point_mod(m: phy::Modulation, profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
-    run_point_with(m, frames, seed, |tx, trial_seed| apply(tx, profile, snr_db, trial_seed))
+pub fn run_point_mod(
+    m: phy::Modulation,
+    profile: Profile,
+    snr_db: f32,
+    frames: usize,
+    seed: u64,
+) -> (usize, usize) {
+    run_point_with(m, frames, seed, |tx, trial_seed| {
+        apply(tx, profile, snr_db, trial_seed)
+    })
 }
 
 /// The most general sweep: `channel` turns each transmitted frame into what the receiver gets.
@@ -445,24 +464,35 @@ mod tests {
     /// good SNR. Before the receiver had an equalizer this lost more than 70 percent of the frames.
     #[test]
     fn kami_32_survives_an_hf_echo() {
-        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 5, |tx, s| hf_channel(tx, 0.001, 0.05, 30.0, s));
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 5, |tx, s| {
+            hf_channel(tx, 0.001, 0.05, 30.0, s)
+        });
         assert!(err * 10 <= n, "{err} of {n} frames lost through a 1 ms echo");
-        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 6, |tx, s| hf_channel(tx, 0.002, 0.05, 30.0, s));
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 6, |tx, s| {
+            hf_channel(tx, 0.002, 0.05, 30.0, s)
+        });
         assert!(err * 10 <= n, "{err} of {n} frames lost through a 2 ms echo");
     }
 
     #[test]
     fn the_hf_channel_keeps_mean_power_and_fades() {
         let n = 8000 * 120;
-        let tone: Vec<f32> = (0..n).map(|i| (2.0 * std::f64::consts::PI * 1500.0 * i as f64 / 8000.0).sin() as f32).collect();
+        let tone: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 1500.0 * i as f64 / 8000.0).sin() as f32)
+            .collect();
         let p_in: f64 = tone.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
         let out = watterson(&tone, 0.001, 0.5, 3);
         let p_out: f64 = out.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
         let db = 10.0 * (p_out / p_in).log10();
         assert!(db.abs() < 3.0, "mean power changed by {db:.1} dB");
         // Power in one-second blocks must vary: that is the fading.
-        let blocks: Vec<f64> = out.chunks(8000).map(|c| c.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / 8000.0).collect();
-        let (lo, hi) = blocks.iter().fold((f64::MAX, 0.0f64), |(l, h), &b| (l.min(b), h.max(b)));
+        let blocks: Vec<f64> = out
+            .chunks(8000)
+            .map(|c| c.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / 8000.0)
+            .collect();
+        let (lo, hi) = blocks
+            .iter()
+            .fold((f64::MAX, 0.0f64), |(l, h), &b| (l.min(b), h.max(b)));
         assert!(10.0 * (hi / lo).log10() > 6.0, "no fading: {lo:.3} to {hi:.3}");
     }
 

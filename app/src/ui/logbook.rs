@@ -52,9 +52,10 @@ pub fn view(k: &Kahf) -> V {
         c = c.push(note(format!("A data file could not be read: {e}"), true));
     }
     if total == 0 {
-        c = c.push(
-            para("Nothing logged yet. Contacts appear here, newest first, as soon as KAHF logs them.", 100),
-        );
+        c = c.push(para(
+            "Nothing logged yet. Contacts appear here, newest first, as soon as KAHF logs them.",
+            100,
+        ));
     } else if rows.is_empty() {
         c = c.push(text(format!("No contact matches \"{}\".", k.ui.book_filter.trim())).dim());
     } else {

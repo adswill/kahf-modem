@@ -85,7 +85,9 @@ impl DgState {
 
     /// The first message being sent: its destination and how many chunks are not acknowledged.
     pub(crate) fn first_send(&self) -> Option<(u32, usize)> {
-        self.sends.first().map(|s| (s.dest_h, s.acked.iter().filter(|a| !**a).count()))
+        self.sends
+            .first()
+            .map(|s| (s.dest_h, s.acked.iter().filter(|a| !**a).count()))
     }
 
     #[cfg(test)]
@@ -144,7 +146,11 @@ impl Worker {
     fn dg_drop_rerouted(&mut self) {
         let routes: Vec<Option<String>> = self.dg.sends.iter().map(|s| self.route_peer_of(s.oid)).collect();
         let mut keep = routes.iter();
-        self.dg.sends.retain(|s| keep.next().and_then(|r| r.as_ref()).is_some_and(|p| p.eq_ignore_ascii_case(&s.peer)));
+        self.dg.sends.retain(|s| {
+            keep.next()
+                .and_then(|r| r.as_ref())
+                .is_some_and(|p| p.eq_ignore_ascii_case(&s.peer))
+        });
     }
 
     /// Takes chats from the outbox, up to `DG_PARALLEL`, when the station is free to send them.
@@ -152,7 +158,11 @@ impl Worker {
         if !self.transmit_allowed() || !self.relay_slot_open() {
             return;
         }
-        if !matches!(self.link_state, LinkState::Idle) || self.tx.is_some() || !self.bursts.is_empty() || !self.control.is_empty() {
+        if !matches!(self.link_state, LinkState::Idle)
+            || self.tx.is_some()
+            || !self.bursts.is_empty()
+            || !self.control.is_empty()
+        {
             return;
         }
         if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
@@ -170,11 +180,20 @@ impl Worker {
                 .collect();
             let (via, queued) = (&self.via, &self.queued);
             let wanted = |oid: u64, item: &OutItem| {
-                let peer = via.get(&oid).cloned().or_else(|| queued.get(&oid).map(|(d, _)| d.clone()));
-                is_dg_item(item) && !taken.contains(&oid) && peer.is_some_and(|p| !cooling.contains(&p.to_uppercase()))
+                let peer = via
+                    .get(&oid)
+                    .cloned()
+                    .or_else(|| queued.get(&oid).map(|(d, _)| d.clone()));
+                is_dg_item(item)
+                    && !taken.contains(&oid)
+                    && peer.is_some_and(|p| !cooling.contains(&p.to_uppercase()))
             };
-            let Some((oid, item)) = self.outbox.next_matching(now, wanted) else { break };
-            let Some(peer) = self.route_peer_of(oid) else { break };
+            let Some((oid, item)) = self.outbox.next_matching(now, wanted) else {
+                break;
+            };
+            let Some(peer) = self.route_peer_of(oid) else {
+                break;
+            };
             let Some((msg, private)) = decode_item(&item.payload) else {
                 self.outbox.cancel(oid);
                 self.log("dropped an unreadable outbox item");
@@ -218,7 +237,10 @@ impl Worker {
         let seed = if self.clock.is_virtual() {
             fnv(&self.callsign)
         } else {
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1)
         } ^ ((self.dg.seq as u64) << 32 | tries as u64)
             ^ self.now_ms();
         let top = (base_ms << tries.min(5)).min(16_000) as f32;
@@ -243,7 +265,9 @@ impl Worker {
             RefGate::Wait => return,
             RefGate::Go { max_air_s } => max_air = Some(max_air_s),
         }
-        let Some(first) = self.dg.sends.first().map(|s| s.oid) else { return };
+        let Some(first) = self.dg.sends.first().map(|s| s.oid) else {
+            return;
+        };
         // A send opens the radio when nothing else has (listening starts it too).
         if let Err(e) = self.ensure_radio() {
             self.log(e);
@@ -280,7 +304,13 @@ impl Worker {
         let frames: Result<Vec<Vec<u8>>, String> = burst
             .iter()
             .enumerate()
-            .filter_map(|(pos, (oid, ci))| self.dg.sends.iter().find(|s| s.oid == *oid).map(|s| (pos, s, *ci)))
+            .filter_map(|(pos, (oid, ci))| {
+                self.dg
+                    .sends
+                    .iter()
+                    .find(|s| s.oid == *oid)
+                    .map(|s| (pos, s, *ci))
+            })
             .map(|(pos, s, ci)| {
                 let mut body = vec![s.seq];
                 body.extend_from_slice(&s.chunks[ci]);
@@ -305,11 +335,19 @@ impl Worker {
                 self.dg.burst = burst;
                 self.dg.answered.clear();
                 self.push_burst(&frames);
-                let air = burst_len_for(MODULATIONS[self.tx_level as usize], n) as f64 / RATE as f64 * self.slow() as f64;
+                let air = burst_len_for(MODULATIONS[self.tx_level as usize], n) as f64 / RATE as f64
+                    * self.slow() as f64;
                 // Own transmit time (it may wait behind another burst), then every answer in turn.
                 let peers = self.dg_burst_peers().len() as u32;
-                let referee_wait = if max_air.is_some() { Duration::from_secs(36) } else { Duration::ZERO };
-                let wait = referee_wait + Duration::from_secs_f64(air + 1.0) + DG_ACK_WAIT * self.slow() + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
+                let referee_wait = if max_air.is_some() {
+                    Duration::from_secs(36)
+                } else {
+                    Duration::ZERO
+                };
+                let wait = referee_wait
+                    + Duration::from_secs_f64(air + 1.0)
+                    + DG_ACK_WAIT * self.slow()
+                    + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * peers;
                 self.dg.deadline = Some(self.clock.now() + wait);
                 if max_air.is_some() {
                     self.ref_data_sent();
@@ -341,7 +379,11 @@ impl Worker {
     fn dg_retry(&mut self) {
         self.dg.deadline = None;
         self.ref_op_reset();
-        let silent: Vec<u32> = self.dg_burst_peers().into_iter().filter(|p| !self.dg.answered.contains(p)).collect();
+        let silent: Vec<u32> = self
+            .dg_burst_peers()
+            .into_iter()
+            .filter(|p| !self.dg.answered.contains(p))
+            .collect();
         let mut gave_up: Vec<DgSend> = Vec::new();
         for s in self.dg.sends.iter_mut().filter(|s| silent.contains(&s.peer_h)) {
             s.tries += 1;
@@ -359,7 +401,9 @@ impl Worker {
         for s in gave_up {
             let key = s.peer.to_uppercase();
             let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
-            let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(900));
+            let pause = AUTO_RETRY_BASE
+                .saturating_mul(1 << (fails - 1).min(5))
+                .min(Duration::from_secs(900));
             self.auto_fails.insert(key, (fails, self.clock.now() + pause));
             self.fail_item(s.oid, format!("{} did not answer", s.peer));
         }
@@ -376,7 +420,14 @@ impl Worker {
             return;
         }
         let seq = f.body[1];
-        let Some(si) = self.dg.sends.iter().position(|s| s.peer_h == f.header.source && s.seq == seq) else { return };
+        let Some(si) = self
+            .dg
+            .sends
+            .iter()
+            .position(|s| s.peer_h == f.header.source && s.seq == seq)
+        else {
+            return;
+        };
         let oid = self.dg.sends[si].oid;
         for pos in bundle::acked(f) {
             if let Some((o, ci)) = self.dg.burst.get(pos as usize).copied() {
@@ -397,8 +448,16 @@ impl Worker {
             self.auto_fails.remove(&s.peer.to_uppercase());
             let public = self.tags.get(&s.oid).map(|t| t.0).unwrap_or(s.oid);
             // The one that answered is the destination itself, or a relay on the way to it.
-            let state = if s.dest_h == f.header.source { Delivery::Delivered } else { Delivery::AtRelay };
-            self.emit(Event::Delivery { id: public, state, note: String::new() });
+            let state = if s.dest_h == f.header.source {
+                Delivery::Delivered
+            } else {
+                Delivery::AtRelay
+            };
+            self.emit(Event::Delivery {
+                id: public,
+                state,
+                note: String::new(),
+            });
             self.outbox.done(s.oid);
             self.bb_item_done(s.oid, true);
             self.record_forward(public);
@@ -406,17 +465,29 @@ impl Worker {
             self.ref_op_reset();
         }
         // Everyone in the burst answered: the next burst may go at once.
-        if self.dg_burst_peers().iter().all(|p| self.dg.answered.contains(p)) || self.dg.burst.iter().all(|(o, _)| !self.dg.sends.iter().any(|s| s.oid == *o)) {
+        if self.dg_burst_peers().iter().all(|p| self.dg.answered.contains(p))
+            || self
+                .dg
+                .burst
+                .iter()
+                .all(|(o, _)| !self.dg.sends.iter().any(|s| s.oid == *o))
+        {
             self.dg.deadline = None;
         }
     }
 
     /// A frame with a bundle tag (0x30 to 0x37) was decoded.
     pub(crate) fn dg_on_frame(&mut self, payload: &[u8], snr: Option<f32>) {
-        let Some(frame) = bundle::Frame::decode(payload) else { return };
+        let Some(frame) = bundle::Frame::decode(payload) else {
+            return;
+        };
         let h = frame.header;
         // Everyone listens to the header of every codeword: the answer order needs the list.
-        let burst = self.dg.rx_burst.get_or_insert(RxBurst { headers: Vec::new(), mine: Vec::new(), snr });
+        let burst = self.dg.rx_burst.get_or_insert(RxBurst {
+            headers: Vec::new(),
+            mine: Vec::new(),
+            snr,
+        });
         burst.headers.push(h);
         burst.snr = snr.or(burst.snr);
         if !frame.is_for(self.dg.my) {
@@ -431,13 +502,17 @@ impl Worker {
     }
 
     fn dg_on_message(&mut self, f: &bundle::Frame) {
-        let Some((seq, chunk)) = f.body.split_first() else { return };
+        let Some((seq, chunk)) = f.body.split_first() else {
+            return;
+        };
         let key = (f.header.source, *seq);
         if let Some(b) = self.dg.rx_burst.as_mut() {
             b.mine.push((key.0, key.1, f.header.index));
         }
         let now = self.clock.now();
-        self.dg.done.retain(|(_, at)| now.duration_since(*at) < DG_REMEMBER);
+        self.dg
+            .done
+            .retain(|(_, at)| now.duration_since(*at) < DG_REMEMBER);
         if self.dg.done.iter().any(|(k, _)| *k == key) {
             return; // already delivered: acknowledged again, not shown again
         }
@@ -455,7 +530,10 @@ impl Worker {
                 self.dg.done.push_back((key, now));
                 let from = sender_of(&signed.message).to_string();
                 self.note_heard_recent(&from, self.link.own_snr_db());
-                self.emit(Event::Heard { call: from, snr_db: self.link.own_snr_db() });
+                self.emit(Event::Heard {
+                    call: from,
+                    snr_db: self.link.own_snr_db(),
+                });
                 self.on_signed(signed);
             }
             Ok(None) => {}
@@ -480,21 +558,37 @@ impl Worker {
         // The MAC already waits one short gap after the burst for an answer; each station ahead
         // in the list adds the length of its answer and one answer gap. (MESH-SPEC 8.3 gives 300 ms
         // only: that holds when an answer is much shorter than a burst with its preamble is today.)
-        let due = self.clock.now() + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * slot as u32;
-        let snr_byte = b.snr.map_or(0u8, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8);
+        let due = self.clock.now()
+            + (self.dg_ack_air() + Duration::from_millis(bundle::ANSWER_GAP_MS)) * slot as u32;
+        let snr_byte = b
+            .snr
+            .map_or(0u8, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8);
         let mut seen: Vec<(u32, u8)> = Vec::new();
         for (src, seq, _) in &b.mine {
             if seen.contains(&(*src, *seq)) {
                 continue;
             }
             seen.push((*src, *seq));
-            let got: Vec<u8> = b.mine.iter().filter(|(s, q, _)| s == src && q == seq).map(|(_, _, i)| *i).collect();
+            let got: Vec<u8> = b
+                .mine
+                .iter()
+                .filter(|(s, q, _)| s == src && q == seq)
+                .map(|(_, _, i)| *i)
+                .collect();
             let mut map = 0u8;
             for i in &got {
                 map |= 1 << i;
             }
             let ack = bundle::Frame {
-                header: Header { kind: Kind::Ack, flags: 0, hops: 0, next_hop: *src, source: self.dg.my, index: 0, count: 1 },
+                header: Header {
+                    kind: Kind::Ack,
+                    flags: 0,
+                    hops: 0,
+                    next_hop: *src,
+                    source: self.dg.my,
+                    index: 0,
+                    count: 1,
+                },
                 body: vec![map, *seq, snr_byte],
             };
             if let Ok(p) = ack.encode() {
@@ -510,7 +604,9 @@ impl Worker {
 
     /// How long one acknowledgement is on the air at the present speed (one codeword and its preamble).
     fn dg_ack_air(&self) -> Duration {
-        Duration::from_secs_f64(burst_len_for(MODULATIONS[self.tx_level as usize], 1) as f64 / RATE as f64 * self.slow() as f64)
+        Duration::from_secs_f64(
+            burst_len_for(MODULATIONS[self.tx_level as usize], 1) as f64 / RATE as f64 * self.slow() as f64,
+        )
     }
 
     /// Puts acknowledgements whose time has come on the control queue (sent as answers).

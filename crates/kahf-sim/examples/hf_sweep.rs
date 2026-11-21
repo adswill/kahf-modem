@@ -7,12 +7,22 @@ use kahf_sim::{run_point_mod, Profile};
 fn main() {
     let frames: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(60);
     let modes = [
-        ("KAMI-256", M::Kami256), ("KAMI-64", M::Kami64), ("KAMI-32", M::Kami32), ("KAMI-16", M::Kami16),
-        ("KAMI-8", M::Kami8), ("KAMI-4", M::Kami4), ("KAMI-1a", M::Kami1a), ("KAMI-1b", M::Kami1b),
-        ("KAMI-1c", M::Kami1c), ("KAMI-1d", M::Kami1d),
+        ("KAMI-256", M::Kami256),
+        ("KAMI-64", M::Kami64),
+        ("KAMI-32", M::Kami32),
+        ("KAMI-16", M::Kami16),
+        ("KAMI-8", M::Kami8),
+        ("KAMI-4", M::Kami4),
+        ("KAMI-1a", M::Kami1a),
+        ("KAMI-1b", M::Kami1b),
+        ("KAMI-1c", M::Kami1c),
+        ("KAMI-1d", M::Kami1d),
     ];
     let profiles = [
-        ("AWGN", Profile::Awgn), ("HF good", Profile::HfGood), ("HF moderate", Profile::HfModerate), ("HF poor", Profile::HfPoor),
+        ("AWGN", Profile::Awgn),
+        ("HF good", Profile::HfGood),
+        ("HF moderate", Profile::HfModerate),
+        ("HF poor", Profile::HfPoor),
     ];
     print!("{:10}", "mode");
     for (n, _) in &profiles {

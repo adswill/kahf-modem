@@ -172,15 +172,24 @@ mod tests {
     fn near_edges_are_detected() {
         assert_eq!(
             check(18_069_500, Region::Region1),
-            Check::NearEdge { band: "17m", margin_hz: 1_500 }
+            Check::NearEdge {
+                band: "17m",
+                margin_hz: 1_500
+            }
         );
         assert_eq!(
             check(18_166_000, Region::Region1),
-            Check::NearEdge { band: "17m", margin_hz: 2_000 }
+            Check::NearEdge {
+                band: "17m",
+                margin_hz: 2_000
+            }
         );
         assert_eq!(
             check(18_073_000, Region::Region1),
-            Check::NearEdge { band: "17m", margin_hz: 5_000 }
+            Check::NearEdge {
+                band: "17m",
+                margin_hz: 5_000
+            }
         );
     }
 

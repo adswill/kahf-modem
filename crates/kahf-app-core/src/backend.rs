@@ -300,7 +300,12 @@ pub fn map_share(state: &Shared) -> Res<String> {
     if v["location"]["lat"].as_f64().is_none() {
         return Err("Enter your position in Settings first.".into());
     }
-    let running = state.engine.lock().map_err(|e| e.to_string())?.as_ref().is_some_and(Engine::relay_running);
+    let running = state
+        .engine
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .is_some_and(Engine::relay_running);
     if running {
         Ok("This relay announces itself on the air and links to the kahf.dev mesh.".into())
     } else {
@@ -330,7 +335,9 @@ pub fn engine_set_relay(state: &Shared, on: bool, licence_held: bool, terms_acce
         Ok(())
     })?;
     if let Ok(mut g) = state.sync_note.lock() {
-        *g = Some("Relay is set to link to the kahf.dev mesh. Without internet it works on the radio only.".into());
+        *g = Some(
+            "Relay is set to link to the kahf.dev mesh. Without internet it works on the radio only.".into(),
+        );
     }
     Ok(())
 }

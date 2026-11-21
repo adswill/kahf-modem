@@ -10,10 +10,10 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::process::{Command, Stdio};
 
 use kahf_core::auth::StationKey;
 use serde_json::{json, Map, Value};
@@ -59,8 +59,10 @@ pub fn canonical(v: &Value) -> String {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
             keys.sort();
-            let parts: Vec<String> =
-                keys.iter().map(|k| format!("{}:{}", Value::String((*k).clone()), canonical(&m[*k]))).collect();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{}:{}", Value::String((*k).clone()), canonical(&m[*k])))
+                .collect();
             format!("{{{}}}", parts.join(","))
         }
         Value::Array(a) => format!("[{}]", a.iter().map(canonical).collect::<Vec<_>>().join(",")),
@@ -80,8 +82,16 @@ pub fn b64_encode(bytes: &[u8]) -> String {
         let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
         out.push(B64[(n >> 18) as usize & 63] as char);
         out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -112,16 +122,25 @@ pub const PROJECT_PUBLIC_KEY_B64: &str = "F52kG5qSH4UDBdMsflIWctLs49hpyaYFQV94Ic
 
 /// The project public key as bytes.
 pub fn project_public_key() -> [u8; 32] {
-    b64_decode(PROJECT_PUBLIC_KEY_B64).and_then(|v| <[u8; 32]>::try_from(v).ok()).unwrap_or([0; 32])
+    b64_decode(PROJECT_PUBLIC_KEY_B64)
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .unwrap_or([0; 32])
 }
 
 fn now_s() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Backbone {
     pub fn new(server: &str, relay: &str, key: StationKey) -> Self {
-        Backbone { server: server.trim_end_matches('/').to_string(), relay: relay.to_uppercase(), key }
+        Backbone {
+            server: server.trim_end_matches('/').to_string(),
+            relay: relay.to_uppercase(),
+            key,
+        }
     }
 
     fn signed_body(&self, kind: &str, extra: &str, mut fields: Map<String, Value>) -> Value {
@@ -159,16 +178,37 @@ impl Backbone {
     fn post_body(&self, path: &str, body: &Value) -> Result<Value, String> {
         let url = format!("{}{}", self.server, path);
         let mut child = Command::new("curl")
-            .args(["-sS", "-m", "20", "-X", "POST", "-H", "content-type: application/json", "--data-binary", "@-", "-w", "\n%{http_code}", &url])
+            .args([
+                "-sS",
+                "-m",
+                "20",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                "@-",
+                "-w",
+                "\n%{http_code}",
+                &url,
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("curl did not start: {e}"))?;
-        child.stdin.take().ok_or("curl has no input")?.write_all(body.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        child
+            .stdin
+            .take()
+            .ok_or("curl has no input")?
+            .write_all(body.to_string().as_bytes())
+            .map_err(|e| e.to_string())?;
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(format!("no connection to the server: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(format!(
+                "no connection to the server: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         let (payload, code) = text.rsplit_once('\n').unwrap_or(("", &text));
@@ -201,7 +241,11 @@ impl Backbone {
         if list.is_empty() {
             return Ok(());
         }
-        let frames: Vec<Value> = list.iter().take(40).map(|(h, snr)| json!({ "t": "heard", "dest": h, "snr": snr, "lane": 0 })).collect();
+        let frames: Vec<Value> = list
+            .iter()
+            .take(40)
+            .map(|(h, snr)| json!({ "t": "heard", "dest": h, "snr": snr, "lane": 0 }))
+            .collect();
         self.post_frames(frames).map(|_| ())
     }
 
@@ -230,7 +274,10 @@ impl Backbone {
 
     /// How many messages queued here, so the planner can give the relay air time.
     pub fn queue(&self, items: usize, bytes: usize) -> Result<(), String> {
-        self.post_frames(vec![json!({ "t": "queue", "items": items, "bytes": bytes, "urgency": 0 })]).map(|_| ())
+        self.post_frames(vec![
+            json!({ "t": "queue", "items": items, "bytes": bytes, "urgency": 0 }),
+        ])
+        .map(|_| ())
     }
 }
 
@@ -266,9 +313,15 @@ pub fn parse_frames(frames: &[Value]) -> Pulled {
     for f in frames {
         match f["t"].as_str() {
             Some("deliver") => {
-                let Some(blob) = f["blob"].as_str().and_then(b64_decode) else { continue };
-                let Ok(v) = serde_json::from_slice::<Value>(&blob) else { continue };
-                let Some(body) = v["body"].as_str().and_then(b64_decode) else { continue };
+                let Some(blob) = f["blob"].as_str().and_then(b64_decode) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_slice::<Value>(&blob) else {
+                    continue;
+                };
+                let Some(body) = v["body"].as_str().and_then(b64_decode) else {
+                    continue;
+                };
                 out.messages.push(Queued {
                     id: text(f, "id"),
                     origin: text(&v, "origin"),
@@ -306,7 +359,13 @@ pub fn message_id(origin: &str, stream: &[u8], now_s: u64) -> String {
 /// Percent-encodes a query value (base64 uses + / =).
 fn pct(s: &str) -> String {
     s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
         .collect()
 }
 
@@ -314,7 +373,9 @@ impl Backbone {
     /// The signed WebSocket address: `ws(s)://host/mesh/ws?relay=..&ts=..&key=..&sig=..`.
     pub fn ws_url(&self) -> String {
         let ts = now_s();
-        let sig = self.key.sign_raw(format!("mesh1|{}|{ts}|ws", self.relay).as_bytes());
+        let sig = self
+            .key
+            .sign_raw(format!("mesh1|{}|{ts}|ws", self.relay).as_bytes());
         let base = if let Some(rest) = self.server.strip_prefix("https://") {
             format!("wss://{rest}")
         } else if let Some(rest) = self.server.strip_prefix("http://") {
@@ -322,7 +383,12 @@ impl Backbone {
         } else {
             self.server.clone()
         };
-        format!("{base}/mesh/ws?relay={}&ts={ts}&key={}&sig={}", pct(&self.relay), pct(&b64_encode(&self.key.to_public())), pct(&b64_encode(&sig)))
+        format!(
+            "{base}/mesh/ws?relay={}&ts={ts}&key={}&sig={}",
+            pct(&self.relay),
+            pct(&b64_encode(&self.key.to_public())),
+            pct(&b64_encode(&sig))
+        )
     }
 }
 
@@ -360,7 +426,9 @@ impl Ws {
     }
 
     fn send(&mut self, v: &Value) -> Result<(), String> {
-        self.socket.send(tungstenite::Message::text(v.to_string())).map_err(|e| e.to_string())
+        self.socket
+            .send(tungstenite::Message::text(v.to_string()))
+            .map_err(|e| e.to_string())
     }
 
     /// The next frame, `Ok(None)` when nothing arrived within the wait, `Err` when the socket is gone.
@@ -369,7 +437,14 @@ impl Ws {
             Ok(tungstenite::Message::Text(t)) => Ok(serde_json::from_str(t.as_str()).ok()),
             Ok(tungstenite::Message::Close(_)) => Err("closed".into()),
             Ok(_) => Ok(None),
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(None),
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -471,7 +546,11 @@ impl BbHandle {
                                 }
                                 Some("plan") => push(
                                     &out,
-                                    BbResult::Plan(f["epoch"].as_u64().unwrap_or(0), f["plan"].as_str().unwrap_or("").into(), f["sig"].as_str().unwrap_or("").into()),
+                                    BbResult::Plan(
+                                        f["epoch"].as_u64().unwrap_or(0),
+                                        f["plan"].as_str().unwrap_or("").into(),
+                                        f["sig"].as_str().unwrap_or("").into(),
+                                    ),
                                 ),
                                 Some("unknown") => {
                                     if let Some(q) = f["id"].as_str().and_then(|id| awaiting.remove(id)) {
@@ -542,7 +621,9 @@ impl BbHandle {
                     next_connect = Instant::now() + backoff;
                 }
                 match job {
-                    BbJob::Heard(list) => report(&out, &mut last_error, bb.heard(&list), "reporting stations"),
+                    BbJob::Heard(list) => {
+                        report(&out, &mut last_error, bb.heard(&list), "reporting stations")
+                    }
                     BbJob::Submit(q, _created, _ttl) => {
                         let mut r = Err(String::new());
                         for attempt in 0..3 {
@@ -564,8 +645,18 @@ impl BbHandle {
                             }
                         }
                     }
-                    BbJob::HeardHash(list) => report(&out, &mut last_error, bb.heard_hashes(&list), "reporting stations"),
-                    BbJob::Queue(items, bytes) => report(&out, &mut last_error, bb.queue(items, bytes), "reporting the queue"),
+                    BbJob::HeardHash(list) => report(
+                        &out,
+                        &mut last_error,
+                        bb.heard_hashes(&list),
+                        "reporting stations",
+                    ),
+                    BbJob::Queue(items, bytes) => report(
+                        &out,
+                        &mut last_error,
+                        bb.queue(items, bytes),
+                        "reporting the queue",
+                    ),
                     BbJob::Pull => match bb.pull() {
                         Ok(p) => {
                             if !p.messages.is_empty() || !p.receipts.is_empty() {
@@ -575,7 +666,12 @@ impl BbHandle {
                         }
                         Err(e) => report(&out, &mut last_error, Err(e), "collecting messages"),
                     },
-                    BbJob::Receipt(id, ok, why) => report(&out, &mut last_error, bb.receipt(&id, ok, &why), "sending a receipt"),
+                    BbJob::Receipt(id, ok, why) => report(
+                        &out,
+                        &mut last_error,
+                        bb.receipt(&id, ok, &why),
+                        "sending a receipt",
+                    ),
                 }
             }
         });
@@ -587,7 +683,10 @@ impl BbHandle {
     }
 
     pub fn take_results(&self) -> Vec<BbResult> {
-        self.results.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default()
+        self.results
+            .lock()
+            .map(|mut r| std::mem::take(&mut *r))
+            .unwrap_or_default()
     }
 }
 
@@ -605,8 +704,22 @@ mod tests {
             x ^= x << 17;
             x
         };
-        let keys = ["t", "id", "dest", "size", "from", "blob", "status", "reason", "plan", "sig", "epoch", "via"];
-        let types = ["deliver", "receipt", "plan", "found", "dup", "unknown", "routed", "suspended", "slow", "error", "x"];
+        let keys = [
+            "t", "id", "dest", "size", "from", "blob", "status", "reason", "plan", "sig", "epoch", "via",
+        ];
+        let types = [
+            "deliver",
+            "receipt",
+            "plan",
+            "found",
+            "dup",
+            "unknown",
+            "routed",
+            "suspended",
+            "slow",
+            "error",
+            "x",
+        ];
         for _ in 0..3000 {
             let mut frames = Vec::new();
             for _ in 0..(next() % 5) {
@@ -652,7 +765,8 @@ mod tests {
         let r1 = Backbone::new(&url, "R1AAA", StationKey::generate());
         let r2 = Backbone::new(&url, "R2BBB", StationKey::generate());
         for (r, area) in [(&r1, "N51W1"), (&r2, "N50E8")] {
-            r.post_body("/register", &register_body(r, area)).expect("register");
+            r.post_body("/register", &register_body(r, area))
+                .expect("register");
         }
         // Both relays call once so the mesh counts them online; R2 hears Dave, R1 takes Alice's message for him.
         r2.heard(&[("D1AVE".into(), Some(9), now_s())]).expect("heard 2");
@@ -676,9 +790,17 @@ mod tests {
         let back = r1.pull().expect("pull receipts");
         assert_eq!(back.receipts.len(), 1);
         assert_eq!(back.receipts[0].status, "delivered");
-        assert_eq!(back.receipts[0].dest, kahf_core::bundle::h24("D1AVE").to_string(), "the receipt names the destination by hash");
+        assert_eq!(
+            back.receipts[0].dest,
+            kahf_core::bundle::h24("D1AVE").to_string(),
+            "the receipt names the destination by hash"
+        );
         // A destination nobody hears is reported as unrouted, so the relay can use the radio.
-        let lost = Queued { id: "K1ALF-9".into(), dest: "NOBODY1".into(), ..q.clone() };
+        let lost = Queued {
+            id: "K1ALF-9".into(),
+            dest: "NOBODY1".into(),
+            ..q.clone()
+        };
         assert_eq!(r1.submit(&lost).expect("submit unknown"), Submitted::Unrouted);
     }
 
@@ -691,7 +813,8 @@ mod tests {
         let url = std::env::var("KAHF_BB_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".into());
         let mk = |call: &str, area: &str| {
             let b = Backbone::new(&url, call, StationKey::generate());
-            b.post_body("/register", &register_body(&b, area)).expect("register");
+            b.post_body("/register", &register_body(&b, area))
+                .expect("register");
             b
         };
         let (a, b) = (mk("P1AAA", "N51W1"), mk("P2BBB", "N50E8"));
@@ -700,7 +823,11 @@ mod tests {
         let mut up = 0;
         for _ in 0..100 {
             for h in [&ha, &hb] {
-                up += h.take_results().iter().filter(|r| matches!(r, BbResult::Log(t) if t.contains("Push link"))).count();
+                up += h
+                    .take_results()
+                    .iter()
+                    .filter(|r| matches!(r, BbResult::Log(t) if t.contains("Push link")))
+                    .count();
             }
             if up >= 2 {
                 break;
@@ -740,7 +867,10 @@ mod tests {
         hb.send(BbJob::Receipt(q.id.clone(), true, String::new()));
         let mut receipt = false;
         while t1.elapsed() < Duration::from_secs(2) && !receipt {
-            receipt = ha.take_results().iter().any(|r| matches!(r, BbResult::Pulled(p) if p.receipts.iter().any(|x| x.id == q.id)));
+            receipt = ha
+                .take_results()
+                .iter()
+                .any(|r| matches!(r, BbResult::Pulled(p) if p.receipts.iter().any(|x| x.id == q.id)));
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(receipt, "no receipt came back");
@@ -749,7 +879,10 @@ mod tests {
     #[test]
     fn canonical_json_matches_what_the_server_checks() {
         let v = json!({ "b": [1, 2.5, "x"], "a": { "z": null, "y": true }, "n": 14100.0 });
-        assert_eq!(canonical(&v), r#"{"a":{"y":true,"z":null},"b":[1,2.5,"x"],"n":14100}"#);
+        assert_eq!(
+            canonical(&v),
+            r#"{"a":{"y":true,"z":null},"b":[1,2.5,"x"],"n":14100}"#
+        );
     }
 
     #[test]
@@ -771,7 +904,10 @@ mod tests {
         let sig = b64_decode(body["signature"].as_str().unwrap()).unwrap();
         assert_eq!(sig.len(), 64);
         let text = format!("mesh1|DL0NET|{}|poll", body["ts"].as_u64().unwrap());
-        assert!(kahf_core::auth::verify_raw(&public, text.as_bytes(), &sig.try_into().unwrap()), "the signature does not verify");
+        assert!(
+            kahf_core::auth::verify_raw(&public, text.as_bytes(), &sig.try_into().unwrap()),
+            "the signature does not verify"
+        );
         assert_eq!(b.server, "https://kahf.dev");
     }
 

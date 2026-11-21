@@ -45,10 +45,20 @@ struct RelayView {
 enum Op {
     Idle,
     /// A request is planned (or sent) for window slot time `at_ms` of epoch `epoch`.
-    Asking { at_ms: u64, epoch: u64, slot0_ms: u64, sent: bool },
-    Granted { start_ms: u64, end_ms: u64 },
+    Asking {
+        at_ms: u64,
+        epoch: u64,
+        slot0_ms: u64,
+        sent: bool,
+    },
+    Granted {
+        start_ms: u64,
+        end_ms: u64,
+    },
     /// The data went out; the answer comes in a later beacon.
-    Await { until_ms: u64 },
+    Await {
+        until_ms: u64,
+    },
 }
 
 pub(crate) struct RefState {
@@ -103,7 +113,9 @@ pub(crate) enum RefGate {
     Csma,
     Wait,
     /// Send now, at most `max_air_s` of audio.
-    Go { max_air_s: f64 },
+    Go {
+        max_air_s: f64,
+    },
 }
 
 impl Worker {
@@ -111,7 +123,9 @@ impl Worker {
     pub(crate) fn is_ref_relay(&self) -> bool {
         self.lanes.is_some()
             && self.shared.flags.relay_running.load(Ordering::SeqCst)
-            && lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station)
+            && lock(&self.shared.relay)
+                .as_ref()
+                .is_some_and(|r| r.role != Role::Station)
     }
 
     /// The relay in charge of the lane (an operator's view): its callsign while its beacon is fresh.
@@ -120,7 +134,11 @@ impl Worker {
             return None;
         }
         let now = self.now_ms();
-        self.refs.relay.as_ref().filter(|r| now.saturating_sub(r.heard_ms) < BEACON_FRESH_MS).map(|r| r.call.clone())
+        self.refs
+            .relay
+            .as_ref()
+            .filter(|r| now.saturating_sub(r.heard_ms) < BEACON_FRESH_MS)
+            .map(|r| r.call.clone())
     }
 
     fn ref_utc_ms(&self) -> u64 {
@@ -223,12 +241,21 @@ impl Worker {
         if tx_refusal(&self.shared.flags).is_some() || !self.dg.is_idle() {
             return;
         }
-        let Some(rel) = self.refs.relay.clone().filter(|_| self.ref_relay_call().is_some()) else {
+        let Some(rel) = self
+            .refs
+            .relay
+            .clone()
+            .filter(|_| self.ref_relay_call().is_some())
+        else {
             self.refs.here_at_ms = None;
             return;
         };
         let now = self.now_ms();
-        if self.refs.last_here_ms.is_some_and(|t| now.saturating_sub(t) < EVERY_MS) {
+        if self
+            .refs
+            .last_here_ms
+            .is_some_and(|t| now.saturating_sub(t) < EVERY_MS)
+        {
             return;
         }
         match self.refs.here_at_ms {
@@ -249,9 +276,20 @@ impl Worker {
                 if now > at + SEND_LATE_MS {
                     return;
                 }
-                let snr = self.link.own_snr_db().map_or(0u8, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8);
+                let snr = self
+                    .link
+                    .own_snr_db()
+                    .map_or(0u8, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8);
                 let frame = Frame {
-                    header: bundle::Header { kind: Kind::Here, flags: 0, hops: 0, next_hop: rel.h, source: self.dg.my, index: 0, count: 1 },
+                    header: bundle::Header {
+                        kind: Kind::Here,
+                        flags: 0,
+                        hops: 0,
+                        next_hop: rel.h,
+                        source: self.dg.my,
+                        index: 0,
+                        count: 1,
+                    },
                     body: vec![snr],
                 }
                 .encode();
@@ -269,10 +307,13 @@ impl Worker {
     pub(crate) fn ref_on_frame(&mut self, f: &Frame) {
         match f.header.kind {
             Kind::Beacon if !self.is_ref_relay() => {
-                let Some((_, _, epoch, call)) = rf::decode_beacon(f) else { return };
+                let Some((_, _, epoch, call)) = rf::decode_beacon(f) else {
+                    return;
+                };
                 // The beacon's first codeword decoded a moment ago: its burst began that long
                 // before. Lead silence, the lane burst of one codeword and the decode delay.
-                let one = burst_len_for(self.kami_mode.unwrap_or(REF_MODE), 1) as f64 / RATE as f64 * self.slow() as f64;
+                let one = burst_len_for(self.kami_mode.unwrap_or(REF_MODE), 1) as f64 / RATE as f64
+                    * self.slow() as f64;
                 let back_ms = ((LEAD_SILENCE as f64 / RATE as f64 + one + 0.15) * 1000.0) as u64 + SEND_AT_MS;
                 let now = self.now_ms();
                 self.refs.relay = Some(RelayView {
@@ -298,17 +339,32 @@ impl Worker {
                 }
             }
             Kind::Here if self.is_ref_relay() => {
-                let snr = f.body.first().filter(|b| **b > 0).map_or(0, |b| (*b as f32 / 2.0 - 30.0).round() as i32);
+                let snr = f
+                    .body
+                    .first()
+                    .filter(|b| **b > 0)
+                    .map_or(0, |b| (*b as f32 / 2.0 - 30.0).round() as i32);
                 self.shared.flags.ref_counts[3].fetch_add(1, Ordering::Relaxed);
                 self.refs.here_seen.retain(|(h, _)| *h != f.header.source);
                 self.refs.here_seen.push((f.header.source, snr));
             }
             Kind::Grant if !self.is_ref_relay() => {
-                let Some((_, count, abs)) = rf::decode_grant(f) else { return };
-                if let Op::Asking { epoch, slot0_ms, sent: true, .. } = self.refs.op {
+                let Some((_, count, abs)) = rf::decode_grant(f) else {
+                    return;
+                };
+                if let Op::Asking {
+                    epoch,
+                    slot0_ms,
+                    sent: true,
+                    ..
+                } = self.refs.op
+                {
                     let from_epoch = (abs as i64 - (epoch * rf::SLOTS) as i64).max(0) as u64;
                     let start_ms = slot0_ms + from_epoch * SLOT_MS + SEND_AT_MS;
-                    self.refs.op = Op::Granted { start_ms, end_ms: start_ms - SEND_AT_MS + count as u64 * SLOT_MS };
+                    self.refs.op = Op::Granted {
+                        start_ms,
+                        end_ms: start_ms - SEND_AT_MS + count as u64 * SLOT_MS,
+                    };
                     self.refs.cw = 1;
                 }
             }
@@ -321,7 +377,12 @@ impl Worker {
         if self.is_ref_relay() {
             return self.ref_relay_gate();
         }
-        let Some(rel) = self.refs.relay.clone().filter(|_| self.ref_relay_call().is_some()) else {
+        let Some(rel) = self
+            .refs
+            .relay
+            .clone()
+            .filter(|_| self.ref_relay_call().is_some())
+        else {
             self.refs.op = Op::Idle;
             return RefGate::Csma;
         };
@@ -338,14 +399,24 @@ impl Worker {
                     let slot0 = rel.slot0_ms + k * EPOCH_MS;
                     let at = slot0 + r * SLOT_MS + SEND_AT_MS;
                     if at > now + 300 {
-                        self.refs.op = Op::Asking { at_ms: at, epoch: rel.epoch + k, slot0_ms: slot0, sent: false };
+                        self.refs.op = Op::Asking {
+                            at_ms: at,
+                            epoch: rel.epoch + k,
+                            slot0_ms: slot0,
+                            sent: false,
+                        };
                         break;
                     }
                     k += 1;
                 }
                 RefGate::Wait
             }
-            Op::Asking { at_ms, epoch, slot0_ms, sent } => {
+            Op::Asking {
+                at_ms,
+                epoch,
+                slot0_ms,
+                sent,
+            } => {
                 if !sent {
                     if now < at_ms {
                         return RefGate::Wait;
@@ -358,7 +429,12 @@ impl Worker {
                     let req = rf::encode_request(self.dg.my, rel.h, dest, slots, 0);
                     let ok = self.ref_send(&[req]);
                     if ok {
-                        self.refs.op = Op::Asking { at_ms, epoch, slot0_ms, sent: true };
+                        self.refs.op = Op::Asking {
+                            at_ms,
+                            epoch,
+                            slot0_ms,
+                            sent: true,
+                        };
                     }
                     return RefGate::Wait;
                 }
@@ -379,7 +455,9 @@ impl Worker {
                     self.refs.op = Op::Idle; // the slot is gone
                     RefGate::Wait
                 } else {
-                    RefGate::Go { max_air_s: (end_ms - now) as f64 / 1000.0 - 0.2 }
+                    RefGate::Go {
+                        max_air_s: (end_ms - now) as f64 / 1000.0 - 0.2,
+                    }
                 }
             }
             Op::Await { until_ms } => {
@@ -394,7 +472,9 @@ impl Worker {
     /// The data went out in the granted slots: the answer will come with a later beacon.
     pub(crate) fn ref_data_sent(&mut self) {
         if !self.is_ref_relay() {
-            self.refs.op = Op::Await { until_ms: self.now_ms() + 3 * EPOCH_MS };
+            self.refs.op = Op::Await {
+                until_ms: self.now_ms() + 3 * EPOCH_MS,
+            };
         }
     }
 
@@ -405,7 +485,9 @@ impl Worker {
 
     /// What the next request says: the destination and the data slots the first burst needs.
     fn ref_request_content(&mut self) -> (u32, u8) {
-        let Some(s) = self.dg.first_send() else { return (0, 1) };
+        let Some(s) = self.dg.first_send() else {
+            return (0, 1);
+        };
         let (dest_h, left) = s;
         let n = left.min(bundle::BUNDLE_MAX);
         let slots = (self.burst_secs(n) / (SLOT_MS as f64 / 1000.0)).ceil() as u64;
@@ -427,9 +509,17 @@ impl Worker {
         // Only the first data slot, and only when the next one is free too: the station that
         // receives the downlink answers right after it, and that answer needs air of its own
         // (it would otherwise land in a granted slot, or on the next beacon).
-        if slot != rf::FIRST_DATA_SLOT || self.refs.granted.iter().any(|(a, b)| abs + 1 >= *a && abs + 1 < *b) {
+        if slot != rf::FIRST_DATA_SLOT
+            || self
+                .refs
+                .granted
+                .iter()
+                .any(|(a, b)| abs + 1 >= *a && abs + 1 < *b)
+        {
             return RefGate::Wait;
         }
-        RefGate::Go { max_air_s: self.ref_air_for(1) - in_slot as f64 / 1000.0 }
+        RefGate::Go {
+            max_air_s: self.ref_air_for(1) - in_slot as f64 / 1000.0,
+        }
     }
 }

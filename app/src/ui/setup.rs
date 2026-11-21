@@ -89,7 +89,10 @@ fn who(k: &Kahf) -> V {
     let ok = callsign::valid(&call) && msg.is_none();
     let mut c = col![
         heading("Who are you on the air?"),
-        para("Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.", 100),
+        para(
+            "Every radio amateur has a callsign, like KA1ABC. It is how other stations know it is you.",
+            100
+        ),
         choice(
             st.have_licence,
             "I have an amateur radio licence",

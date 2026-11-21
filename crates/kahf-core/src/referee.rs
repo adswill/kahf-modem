@@ -28,7 +28,10 @@ pub const GRANTS_MAX: usize = bundle::BUNDLE_MAX;
 struct Rng(u64);
 impl Rng {
     fn below(&mut self, n: u64) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) % n.max(1)
     }
 }
@@ -37,18 +40,40 @@ impl Rng {
 pub fn encode_request(me: u32, relay: u32, dest: u32, slots: u8, urgency: u8) -> Vec<u8> {
     let mut body = dest.to_be_bytes()[1..].to_vec();
     body.extend([slots, urgency]);
-    Frame { header: Header { kind: Kind::Request, flags: 0, hops: 0, next_hop: relay, source: me, index: 0, count: 1 }, body }
-        .encode()
-        .expect("request fits")
+    Frame {
+        header: Header {
+            kind: Kind::Request,
+            flags: 0,
+            hops: 0,
+            next_hop: relay,
+            source: me,
+            index: 0,
+            count: 1,
+        },
+        body,
+    }
+    .encode()
+    .expect("request fits")
 }
 
 /// A grant: data slots `first..first + count` counted from the start of epoch `epoch`.
 pub fn encode_grant(relay: u32, to: u32, lane: u8, abs_slot: u64, count: u8, index: u8, of: u8) -> Vec<u8> {
     let mut body = vec![lane, count];
     body.extend((abs_slot as u32).to_be_bytes());
-    Frame { header: Header { kind: Kind::Grant, flags: 0, hops: 0, next_hop: to, source: relay, index, count: of }, body }
-        .encode()
-        .expect("grant fits")
+    Frame {
+        header: Header {
+            kind: Kind::Grant,
+            flags: 0,
+            hops: 0,
+            next_hop: to,
+            source: relay,
+            index,
+            count: of,
+        },
+        body,
+    }
+    .encode()
+    .expect("grant fits")
 }
 
 /// A beacon: the relay's callsign hash is the source; the body is the operator window (slots),
@@ -57,10 +82,27 @@ pub fn encode_grant(relay: u32, to: u32, lane: u8, abs_slot: u64, count: u8, ind
 pub fn encode_beacon(relay_call: &str, window: u8, load: u8, epoch: u64) -> Vec<u8> {
     let mut body = vec![window, load];
     body.extend((epoch as u32).to_be_bytes());
-    body.extend(relay_call.trim().to_uppercase().bytes().take(bundle::BODY_MAX - 6));
-    Frame { header: Header { kind: Kind::Beacon, flags: 0, hops: 0, next_hop: 0, source: bundle::h24(relay_call), index: 0, count: 1 }, body }
-        .encode()
-        .expect("beacon fits")
+    body.extend(
+        relay_call
+            .trim()
+            .to_uppercase()
+            .bytes()
+            .take(bundle::BODY_MAX - 6),
+    );
+    Frame {
+        header: Header {
+            kind: Kind::Beacon,
+            flags: 0,
+            hops: 0,
+            next_hop: 0,
+            source: bundle::h24(relay_call),
+            index: 0,
+            count: 1,
+        },
+        body,
+    }
+    .encode()
+    .expect("beacon fits")
 }
 
 /// `(window, load, epoch, relay callsign)` of a beacon frame.
@@ -77,14 +119,24 @@ pub fn decode_beacon(f: &Frame) -> Option<(u8, u8, u64, String)> {
 
 /// `(destination hash, data slots, urgency)` of a request frame.
 pub fn decode_request(f: &Frame) -> Option<(u32, u8, u8)> {
-    (f.header.kind == Kind::Request && f.body.len() >= 5)
-        .then(|| (u32::from_be_bytes([0, f.body[0], f.body[1], f.body[2]]), f.body[3], f.body[4]))
+    (f.header.kind == Kind::Request && f.body.len() >= 5).then(|| {
+        (
+            u32::from_be_bytes([0, f.body[0], f.body[1], f.body[2]]),
+            f.body[3],
+            f.body[4],
+        )
+    })
 }
 
 /// `(lane, slots, first absolute slot)` of a grant frame.
 pub fn decode_grant(f: &Frame) -> Option<(u8, u8, u64)> {
-    (f.header.kind == Kind::Grant && f.body.len() >= 6)
-        .then(|| (f.body[0], f.body[1], u32::from_be_bytes([f.body[2], f.body[3], f.body[4], f.body[5]]) as u64))
+    (f.header.kind == Kind::Grant && f.body.len() >= 6).then(|| {
+        (
+            f.body[0],
+            f.body[1],
+            u32::from_be_bytes([f.body[2], f.body[3], f.body[4], f.body[5]]) as u64,
+        )
+    })
 }
 
 /// Epoch slots 0 to 3 belong to the relay and the request window; slots 4 and 5 carry data.
@@ -99,7 +151,11 @@ pub fn next_data_slot(cursor: u64, count: u8) -> u64 {
         if s >= FIRST_DATA_SLOT && s + count <= SLOTS {
             return a;
         }
-        a = if s < FIRST_DATA_SLOT { a - s + FIRST_DATA_SLOT } else { a - s + SLOTS + FIRST_DATA_SLOT };
+        a = if s < FIRST_DATA_SLOT {
+            a - s + FIRST_DATA_SLOT
+        } else {
+            a - s + SLOTS + FIRST_DATA_SLOT
+        };
     }
 }
 
@@ -157,7 +213,15 @@ impl Cell {
             ops: messages
                 .iter()
                 .enumerate()
-                .map(|(i, q)| Operator { id: 100 + i as u32, queue: q.clone(), granted: vec![], wait_until: 0, cw: 1, asked: None, deaf_pct })
+                .map(|(i, q)| Operator {
+                    id: 100 + i as u32,
+                    queue: q.clone(),
+                    granted: vec![],
+                    wait_until: 0,
+                    cw: 1,
+                    asked: None,
+                    deaf_pct,
+                })
                 .collect(),
             rng: Rng(seed),
             cursor: 0,
@@ -178,7 +242,15 @@ impl Cell {
         // Slot 0: the beacon names the window; every operator hears it (or misses it).
         let w = (WINDOW_MIN + self.load / 32).min(WINDOW_MAX);
         let beacon = Frame {
-            header: Header { kind: Kind::Beacon, flags: 0, hops: 0, next_hop: 0, source: self.relay, index: 0, count: 1 },
+            header: Header {
+                kind: Kind::Beacon,
+                flags: 0,
+                hops: 0,
+                next_hop: 0,
+                source: self.relay,
+                index: 0,
+                count: 1,
+            },
             body: vec![w, self.load],
         }
         .encode()
@@ -211,7 +283,11 @@ impl Cell {
         // Slots 1..=W: requests. A slot with exactly one request is decoded; two or more collide.
         let mut decoded: Vec<usize> = Vec::new();
         for slot in 1..=w as u64 {
-            let here: Vec<usize> = asking.iter().filter(|(_, s)| *s == slot).map(|(i, _)| *i).collect();
+            let here: Vec<usize> = asking
+                .iter()
+                .filter(|(_, s)| *s == slot)
+                .map(|(i, _)| *i)
+                .collect();
             for &i in &here {
                 self.stats.calling.push((base + slot, self.ops[i].id));
                 self.stats.requests += 1;
@@ -230,7 +306,13 @@ impl Cell {
         let n = decoded.len().min(GRANTS_MAX);
         for (k, &i) in decoded.iter().take(n).enumerate() {
             let me = self.ops[i].id;
-            let req = encode_request(me, self.relay, self.ops[i].queue[0].dest, self.ops[i].queue[0].slots, 0);
+            let req = encode_request(
+                me,
+                self.relay,
+                self.ops[i].queue[0].dest,
+                self.ops[i].queue[0].slots,
+                0,
+            );
             let rf = Frame::decode(&req).expect("request decodes");
             debug_assert!(rf.is_for(self.relay));
             let count = self.ops[i].queue[0].slots;
@@ -242,7 +324,9 @@ impl Cell {
         }
         for gf in &grant_frames {
             let f = Frame::decode(gf).expect("grant decodes");
-            let Some(i) = self.ops.iter().position(|o| f.is_for(o.id)) else { continue };
+            let Some(i) = self.ops.iter().position(|o| f.is_for(o.id)) else {
+                continue;
+            };
             self.stats.grants += 1;
             if self.rng.below(100) < self.ops[i].deaf_pct {
                 // Missed the grant: those data slots go unused; the operator will ask again.
@@ -284,7 +368,16 @@ mod tests {
 
     fn load(ops: usize, per: usize, seed: u64) -> Vec<Vec<Message>> {
         let mut r = Rng(seed);
-        (0..ops).map(|_| (0..per).map(|_| Message { dest: h24("ZZ9ZZZ"), slots: 1 + r.below(3) as u8 }).collect()).collect()
+        (0..ops)
+            .map(|_| {
+                (0..per)
+                    .map(|_| Message {
+                        dest: h24("ZZ9ZZZ"),
+                        slots: 1 + r.below(3) as u8,
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn run(cell: &mut Cell, max_epochs: u64) -> u64 {
@@ -303,7 +396,10 @@ mod tests {
         // Data: no two operators ever send in the same slot of the relay lane.
         let mut seen = HashSet::new();
         for (slot, op) in &s.data {
-            assert!(seen.insert(*slot), "two operators in data slot {slot} (one is {op})");
+            assert!(
+                seen.insert(*slot),
+                "two operators in data slot {slot} (one is {op})"
+            );
         }
         // Calling lane: beacons and grants are the relay's alone; operators send only in window slots.
         for (slot, who) in &s.calling {
@@ -311,7 +407,10 @@ mod tests {
             if *who == cell.relay {
                 continue;
             }
-            assert!(in_epoch >= 1 && in_epoch <= WINDOW_MAX as u64, "operator {who} sent in slot {in_epoch}");
+            assert!(
+                in_epoch >= 1 && in_epoch <= WINDOW_MAX as u64,
+                "operator {who} sent in slot {in_epoch}"
+            );
         }
     }
 
@@ -320,7 +419,11 @@ mod tests {
         for seed in 1..=20 {
             let mut cell = Cell::new(seed, h24("RELAY1"), &load(10, 3, seed), 0);
             let epochs = run(&mut cell, 400);
-            assert!(cell.done(), "seed {seed}: {} of 30 delivered in {epochs} epochs", cell.stats.delivered);
+            assert!(
+                cell.done(),
+                "seed {seed}: {} of 30 delivered in {epochs} epochs",
+                cell.stats.delivered
+            );
             check(&cell);
             // Each message got exactly its slots.
             assert_eq!(cell.stats.delivered, 30);
@@ -337,8 +440,14 @@ mod tests {
             collisions += cell.stats.collisions;
             assert!(cell.done());
         }
-        assert!(collisions > 0, "ten operators on 2 to 4 slots must collide now and then");
-        assert!(worst < 120, "backoff should clear 20 messages within {worst} epochs");
+        assert!(
+            collisions > 0,
+            "ten operators on 2 to 4 slots must collide now and then"
+        );
+        assert!(
+            worst < 120,
+            "backoff should clear 20 messages within {worst} epochs"
+        );
     }
 
     #[test]

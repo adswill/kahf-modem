@@ -91,7 +91,10 @@ pub const LADDER: [(Modulation, f32); 11] = [
 /// Modulation for a measured awgn SNR (dB, per real sample, as in `kahf-cli bler`): the first
 /// rung of `LADDER` whose floor the SNR reaches.
 pub fn choose_modulation(snr_db: f32) -> Modulation {
-    LADDER.iter().find(|&&(_, floor)| snr_db >= floor).map_or(Modulation::Kami256, |&(m, _)| m)
+    LADDER
+        .iter()
+        .find(|&&(_, floor)| snr_db >= floor)
+        .map_or(Modulation::Kami256, |&(m, _)| m)
 }
 
 const FS: f64 = 8000.0;

@@ -96,7 +96,11 @@ impl Mac {
     /// The channel was busy when this station wanted it: it will need a back-off.
     fn defer(&mut self, class: Class) {
         if class != Class::Answer && self.backoff_ms.is_none() {
-            let cw = if class == Class::Urgent { CW_URGENT } else { self.cw };
+            let cw = if class == Class::Urgent {
+                CW_URGENT
+            } else {
+                self.cw
+            };
             self.draw(cw);
         }
     }
@@ -117,12 +121,20 @@ impl Mac {
     /// Our transmission starts now and ends at `end`.
     pub fn on_tx_start(&mut self, now: u64, end: u64) {
         self.tx_until = Some(end);
-        let joins = self.train_start.is_some() && self.tx_log.back().is_some_and(|&(_, e)| now.saturating_sub(e) < TRAIN_JOIN_MS);
+        let joins = self.train_start.is_some()
+            && self
+                .tx_log
+                .back()
+                .is_some_and(|&(_, e)| now.saturating_sub(e) < TRAIN_JOIN_MS);
         if !joins {
             self.train_start = Some(now);
         }
         self.tx_log.push_back((now, end));
-        while self.tx_log.front().is_some_and(|&(_, e)| e + SHARE_WINDOW_MS < now) {
+        while self
+            .tx_log
+            .front()
+            .is_some_and(|&(_, e)| e + SHARE_WINDOW_MS < now)
+        {
             self.tx_log.pop_front();
         }
     }
@@ -199,7 +211,8 @@ impl Mac {
         // Fair share and train limit apply to ordinary traffic only.
         if let Some(start) = self.train_start {
             let last_end = self.tx_log.back().map(|&(_, e)| e).unwrap_or(start);
-            if now.saturating_sub(last_end) < TRAIN_JOIN_MS && last_end.saturating_sub(start) >= TRAIN_MAX_MS {
+            if now.saturating_sub(last_end) < TRAIN_JOIN_MS && last_end.saturating_sub(start) >= TRAIN_MAX_MS
+            {
                 return Some(TRAIN_GAP_MS - now.saturating_sub(last_end).min(TRAIN_GAP_MS - 1));
             }
         }
@@ -304,7 +317,11 @@ mod tests {
         }
         let w = m.check(t, Class::Data);
         assert!(w.is_some(), "a 20 s train was not cut");
-        assert_eq!(m.check(t, Class::Urgent), None, "urgent must ignore the train limit");
+        assert_eq!(
+            m.check(t, Class::Urgent),
+            None,
+            "urgent must ignore the train limit"
+        );
     }
 
     #[test]
@@ -317,7 +334,10 @@ mod tests {
         m.on_rx_start(60_000);
         m.on_rx_end(61_000);
         m.backoff_ms = Some(0);
-        assert!(m.check(65_000, Class::Data).is_some(), "over its share and still allowed");
+        assert!(
+            m.check(65_000, Class::Data).is_some(),
+            "over its share and still allowed"
+        );
         // Alone on the channel there is no cap.
         let mut alone = Mac::new(7);
         alone.on_tx_start(10_000, 50_000);

@@ -212,7 +212,10 @@ mod tests {
         let msg = br#"{"area":"N51W1","callsign":"G4ABC"}"#;
         let sig = Signature::from_bytes(&key.sign_raw(msg));
         let public = VerifyingKey::from_bytes(&key.to_public()).unwrap();
-        assert!(public.verify(msg, &sig).is_ok(), "the server checks plain Ed25519");
+        assert!(
+            public.verify(msg, &sig).is_ok(),
+            "the server checks plain Ed25519"
+        );
         assert!(public.verify(&signed_data("G4ABC", msg), &sig).is_err());
     }
 

@@ -30,7 +30,11 @@ fn lowpass(cut_hz: f64, fs: f64, taps: usize) -> Vec<f64> {
     let h: Vec<f64> = (0..taps)
         .map(|i| {
             let x = i as f64 - m;
-            let sinc = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
+            let sinc = if x == 0.0 {
+                2.0 * fc
+            } else {
+                (2.0 * PI * fc * x).sin() / (PI * x)
+            };
             let w = 0.42 - 0.5 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos()
                 + 0.08 * (4.0 * PI * i as f64 / (taps - 1) as f64).cos();
             sinc * w
@@ -74,7 +78,10 @@ fn mix(x: &[C], hz: f64, fs: f64) -> Vec<C> {
 pub fn to_lane(kami: &[f32], centre_hz: f64) -> Vec<f32> {
     // Read at 1600 Hz: the carrier is 300 Hz. Quadrature mix to baseband and low-pass.
     let x: Vec<C> = kami.iter().map(|v| C(*v as f64 * 2.0, 0.0)).collect();
-    let bb = filt(&mix(&x, -SLOW_CARRIER, FS / SLOW as f64), &lowpass(CUTOFF_HZ, FS / SLOW as f64, 301));
+    let bb = filt(
+        &mix(&x, -SLOW_CARRIER, FS / SLOW as f64),
+        &lowpass(CUTOFF_HZ, FS / SLOW as f64, 301),
+    );
     // Up to 8 kHz: zero-stuff by five and low-pass (gain five restores the level).
     let mut up = vec![C(0.0, 0.0); bb.len() * SLOW];
     for (i, c) in bb.iter().enumerate() {
@@ -90,7 +97,10 @@ pub fn from_lane(audio: &[f32], centre_hz: f64) -> Vec<f32> {
     let x: Vec<C> = audio.iter().map(|v| C(*v as f64, 0.0)).collect();
     let bb = filt(&mix(&x, -centre_hz, FS), &lowpass(CUTOFF_HZ, FS, 801));
     let low: Vec<C> = bb.iter().step_by(SLOW).copied().collect();
-    mix(&low, SLOW_CARRIER, FS / SLOW as f64).iter().map(|c| c.0 as f32).collect()
+    mix(&low, SLOW_CARRIER, FS / SLOW as f64)
+        .iter()
+        .map(|c| c.0 as f32)
+        .collect()
 }
 
 /// The lane receiver as a stream: audio comes in as it arrives from the sound card, the KAMI
@@ -112,7 +122,14 @@ const RX_TAPS: usize = 801;
 
 impl LaneRx {
     pub fn new(centre_hz: f64) -> Self {
-        LaneRx { centre: centre_hz, taps: lowpass(CUTOFF_HZ, FS, RX_TAPS), buf: Default::default(), base: 0, n_in: 0, n_out: 0 }
+        LaneRx {
+            centre: centre_hz,
+            taps: lowpass(CUTOFF_HZ, FS, RX_TAPS),
+            buf: Default::default(),
+            base: 0,
+            n_in: 0,
+            n_out: 0,
+        }
     }
 
     /// Forgets everything heard so far (after our own transmission, the audio is thrown away).
@@ -189,7 +206,9 @@ mod tests {
     use crate::ldpc;
 
     fn info(seed: u8) -> Vec<u8> {
-        (0..ldpc::K).map(|i| ((i as u32 * 7 + seed as u32 * 13 + (i as u32 >> 3)) & 1) as u8).collect()
+        (0..ldpc::K)
+            .map(|i| ((i as u32 * 7 + seed as u32 * 13 + (i as u32 >> 3)) & 1) as u8)
+            .collect()
     }
 
     /// Send `info` through the lane at `centre`, decode it again.
@@ -200,7 +219,9 @@ mod tests {
         audio.extend(vec![0f32; 4000]);
         let rx = from_lane(&audio, centre);
         let (start, hz, tau) = kami::find_preamble(&rx)?;
-        let (_, llr) = kami::demodulate_at(&rx, start, hz, tau, ldpc::N, &[sh]).into_iter().next()?;
+        let (_, llr) = kami::demodulate_at(&rx, start, hz, tau, ldpc::N, &[sh])
+            .into_iter()
+            .next()?;
         ldpc::decode(&llr, 50)
     }
 
@@ -221,13 +242,25 @@ mod tests {
             at = end;
             size = (size * 7 + 91) % 1500 + 1;
         }
-        assert!(whole.len() - got.len() <= RX_TAPS / SLOW / 2 + 2, "{} vs {}", got.len(), whole.len());
-        let worst = got.iter().zip(&whole).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(
+            whole.len() - got.len() <= RX_TAPS / SLOW / 2 + 2,
+            "{} vs {}",
+            got.len(),
+            whole.len()
+        );
+        let worst = got
+            .iter()
+            .zip(&whole)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         assert!(worst < 1e-3, "streaming differs by {worst}");
         // And a frame is found and decoded in the streamed samples.
         let (start, hz, tau) = kami::find_preamble(&got).expect("no preamble in the stream");
         let sh = Shape::walsh(5);
-        let (_, llr) = kami::demodulate_at(&got, start, hz, tau, ldpc::N, &[sh]).into_iter().next().unwrap();
+        let (_, llr) = kami::demodulate_at(&got, start, hz, tau, ldpc::N, &[sh])
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(ldpc::decode(&llr, 50), Some(info(9)));
     }
 
@@ -244,7 +277,12 @@ mod tests {
         for centre in [1500.0, 2200.0, 800.0] {
             for sh in [Shape { wb: 0, lb: 3 }, Shape::walsh(5)] {
                 let i = info(3);
-                assert_eq!(round_trip(sh, centre, &i), Some(i), "centre {centre} wb {}", sh.wb);
+                assert_eq!(
+                    round_trip(sh, centre, &i),
+                    Some(i),
+                    "centre {centre} wb {}",
+                    sh.wb
+                );
             }
         }
     }
@@ -257,8 +295,12 @@ mod tests {
         let mid = &lane[lane.len() / 4..lane.len() * 3 / 4];
         let freqs: Vec<f64> = (0..=240).map(|k| 1500.0 - 1200.0 + 10.0 * k as f64).collect();
         let db = psd_db(&mid[..mid.len().min(16000)], &freqs);
-        let inside: Vec<f64> =
-            freqs.iter().zip(&db).filter(|(f, _)| (**f - 1500.0).abs() > 240.0 && **f > 0.0).map(|(_, d)| *d).collect();
+        let inside: Vec<f64> = freqs
+            .iter()
+            .zip(&db)
+            .filter(|(f, _)| (**f - 1500.0).abs() > 240.0 && **f > 0.0)
+            .map(|(_, d)| *d)
+            .collect();
         let worst = inside.iter().cloned().fold(f64::MIN, f64::max);
         assert!(worst < -26.0, "outside +-240 Hz the level reaches {worst:.1} dB");
     }

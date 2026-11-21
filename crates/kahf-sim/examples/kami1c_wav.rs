@@ -42,7 +42,9 @@ fn main() {
     while audio.len() < FS * 15 {
         let bits: Vec<u8> = (0..648)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((s >> 33) & 1) as u8
             })
             .collect();
@@ -63,7 +65,11 @@ fn main() {
                 continue;
             }
             let x = c - k as f64;
-            let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            let sinc = if x.abs() < 1e-9 {
+                1.0
+            } else {
+                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+            };
             let w = 0.5 + 0.5 * (std::f64::consts::PI * x / half as f64).cos();
             acc += low[k as usize] as f64 * sinc * w;
         }
@@ -79,7 +85,11 @@ fn main() {
         .map(|i| {
             let k = i as i32 - mid as i32;
             let w = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
-            if k % 2 == 0 { 0.0 } else { w * 2.0 / (std::f32::consts::PI * k as f32) }
+            if k % 2 == 0 {
+                0.0
+            } else {
+                w * 2.0 / (std::f32::consts::PI * k as f32)
+            }
         })
         .collect();
     let mut iq = Vec::with_capacity(audio.len() * 2);
@@ -99,5 +109,8 @@ fn main() {
     let mono: Vec<i16> = audio.iter().map(|v| (v * g * 32767.0) as i16).collect();
     wav(&format!("{dir}/{name}-iq-48k.wav"), 2, &iq);
     wav(&format!("{dir}/{name}-audio-48k.wav"), 1, &mono);
-    eprintln!("wrote {dir}/{name}-iq-48k.wav and {name}-audio-48k.wav ({:.1} s)", audio.len() as f32 / RATE as f32);
+    eprintln!(
+        "wrote {dir}/{name}-iq-48k.wav and {name}-audio-48k.wav ({:.1} s)",
+        audio.len() as f32 / RATE as f32
+    );
 }

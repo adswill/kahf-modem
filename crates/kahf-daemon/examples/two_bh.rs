@@ -36,9 +36,18 @@ fn main() {
             for ev in e.poll_events() {
                 if let kahf_daemon::Event::Spectrum(b) = &ev {
                     let m = b.iter().cloned().fold(f32::MIN, f32::max);
-                    if m > -60.0 { println!("[{:5.1}s] {n}: spectrum peak {m:.0} dB", t.elapsed().as_secs_f32()); }
+                    if m > -60.0 {
+                        println!(
+                            "[{:5.1}s] {n}: spectrum peak {m:.0} dB",
+                            t.elapsed().as_secs_f32()
+                        );
+                    }
                 } else {
-                    println!("[{:5.1}s] {n}: {ev:?} pending={}", t.elapsed().as_secs_f32(), e.outbox_pending().len());
+                    println!(
+                        "[{:5.1}s] {n}: {ev:?} pending={}",
+                        t.elapsed().as_secs_f32(),
+                        e.outbox_pending().len()
+                    );
                 }
             }
         }

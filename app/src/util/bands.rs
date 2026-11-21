@@ -40,14 +40,22 @@ pub fn channels() -> Vec<Channel> {
                     (format!("X{spare}"), "spare lane")
                 }
             };
-            Channel { index: l.k as usize, name, khz: l.dial_hz as f64 / 1000.0, what }
+            Channel {
+                index: l.k as usize,
+                name,
+                khz: l.dial_hz as f64 / 1000.0,
+                what,
+            }
         })
         .collect()
 }
 
 /// Where a new station starts: calling lane C1.
 pub fn default_khz() -> f64 {
-    channels().iter().find(|c| c.name == "C1").map_or(18_113.44, |c| c.khz)
+    channels()
+        .iter()
+        .find(|c| c.name == "C1")
+        .map_or(18_113.44, |c| c.khz)
 }
 
 /// Index of the lane the dial frequency belongs to, if it is one of them.

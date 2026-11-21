@@ -80,7 +80,9 @@ pub struct Net {
 impl Net {
     /// `n` stations that all hear each other at `snr_db`.
     pub fn full(n: usize, snr_db: f32, seed: u64) -> Net {
-        let hear = (0..n).map(|a| (0..n).map(|b| (a != b).then_some(snr_db)).collect()).collect();
+        let hear = (0..n)
+            .map(|a| (0..n).map(|b| (a != b).then_some(snr_db)).collect())
+            .collect();
         Net::with(n, hear, seed)
     }
 
@@ -88,7 +90,11 @@ impl Net {
     pub fn with(n: usize, hear: Vec<Vec<Option<f32>>>, seed: u64) -> Net {
         let st = (0..n)
             .map(|i| {
-                let call = format!("K{}{}", (b'A' + (i / 26) as u8) as char, (b'A' + (i % 26) as u8) as char) + "1AA";
+                let call = format!(
+                    "K{}{}",
+                    (b'A' + (i / 26) as u8) as char,
+                    (b'A' + (i % 26) as u8) as char
+                ) + "1AA";
                 let mut link = Link::new(&call);
                 link.set_air_ms(burst_ms(1));
                 Station {
@@ -107,7 +113,19 @@ impl Net {
                 }
             })
             .collect();
-        Net { now: 0, st, hear, active: Vec::new(), recent: VecDeque::new(), fade_loss: 0.0, rng: seed | 1, collisions: 0, bursts: 0, no_mac: false, trace: false }
+        Net {
+            now: 0,
+            st,
+            hear,
+            active: Vec::new(),
+            recent: VecDeque::new(),
+            fade_loss: 0.0,
+            rng: seed | 1,
+            collisions: 0,
+            bursts: 0,
+            no_mac: false,
+            trace: false,
+        }
     }
 
     fn rand01(&mut self) -> f32 {
@@ -146,7 +164,14 @@ impl Net {
         for f in frames {
             let before = self.st[j].link.describe();
             let acts = self.st[j].link.on_receive(f);
-            if self.trace { println!("      st{j} rx tag {} : {} -> {}", f[0], before, self.st[j].link.describe()); }
+            if self.trace {
+                println!(
+                    "      st{j} rx tag {} : {} -> {}",
+                    f[0],
+                    before,
+                    self.st[j].link.describe()
+                );
+            }
             // Only an answer to our own traffic shows the channel worked for us.
             if matches!(f.first(), Some(0x11) | Some(0x02)) {
                 self.st[j].mac.success();
@@ -173,7 +198,9 @@ impl Net {
     fn finish_tx(&mut self, tx: Tx) {
         let n = self.st.len();
         for j in 0..n {
-            let Some(snr) = self.hear[tx.from][j] else { continue };
+            let Some(snr) = self.hear[tx.from][j] else {
+                continue;
+            };
             // Deaf while sending?
             let deaf = self.st[j].txing.is_some_and(|e| e > tx.start) || self.was_txing(j, tx.start, tx.end);
             // Overlapping audible bursts at j, and capture.
@@ -195,14 +222,24 @@ impl Net {
                 self.collisions += 1;
             }
             if self.trace {
-                println!("  {:7} tx st{} tags {:?} -> st{} destroyed={} deaf={}", self.now, tx.from, tx.frames.iter().map(|f| f[0]).collect::<Vec<_>>(), j, destroyed, deaf);
+                println!(
+                    "  {:7} tx st{} tags {:?} -> st{} destroyed={} deaf={}",
+                    self.now,
+                    tx.from,
+                    tx.frames.iter().map(|f| f[0]).collect::<Vec<_>>(),
+                    j,
+                    destroyed,
+                    deaf
+                );
             }
             self.st[j].mac.on_rx_end(self.now);
             if destroyed {
                 continue;
             }
             if self.fade_loss > 0.0 && self.rand01() < self.fade_loss {
-                if self.trace { println!("      faded at st{j}"); }
+                if self.trace {
+                    println!("      faded at st{j}");
+                }
                 self.st[j].lost_fade += 1;
                 continue;
             }
@@ -211,8 +248,13 @@ impl Net {
     }
 
     fn was_txing(&self, j: usize, s: u64, e: u64) -> bool {
-        self.recent.iter().any(|t| t.from == j && t.start < e && t.end > s)
-            || self.active.iter().any(|t| t.from == j && t.start < e && t.end > s)
+        self.recent
+            .iter()
+            .any(|t| t.from == j && t.start < e && t.end > s)
+            || self
+                .active
+                .iter()
+                .any(|t| t.from == j && t.start < e && t.end > s)
     }
 
     /// Run until virtual time `until_ms`.
@@ -227,7 +269,9 @@ impl Net {
         let now = self.now;
         let n = self.st.len();
         // Finished transmissions.
-        let (done, still): (Vec<Tx>, Vec<Tx>) = std::mem::take(&mut self.active).into_iter().partition(|t| t.end <= now);
+        let (done, still): (Vec<Tx>, Vec<Tx>) = std::mem::take(&mut self.active)
+            .into_iter()
+            .partition(|t| t.end <= now);
         self.active = still;
         for tx in done {
             self.st[tx.from].txing = None;
@@ -235,7 +279,12 @@ impl Net {
             self.st[tx.from].link.tx_finished(tx.end);
             let (from, start, end) = (tx.from, tx.start, tx.end);
             self.finish_tx(tx);
-            self.recent.push_back(Tx { from, start, end, frames: Vec::new() });
+            self.recent.push_back(Tx {
+                from,
+                start,
+                end,
+                frames: Vec::new(),
+            });
         }
         while self.recent.front().is_some_and(|t| t.end + 30_000 < now) {
             self.recent.pop_front();
@@ -251,7 +300,9 @@ impl Net {
 
     fn drive_jobs(&mut self, i: usize) {
         let st = &mut self.st[i];
-        let Some(job) = st.jobs.front().cloned() else { return };
+        let Some(job) = st.jobs.front().cloned() else {
+            return;
+        };
         let peer = self.st_call(job.dest);
         let state = self.st[i].link.metrics().state;
         match state {
@@ -292,7 +343,11 @@ impl Net {
             return;
         }
         // Answers go ahead of everything else: the other station is waiting for them.
-        let class = if self.st[i].out.iter().any(|o| o.class == Class::Answer) { Class::Answer } else { Class::Data };
+        let class = if self.st[i].out.iter().any(|o| o.class == Class::Answer) {
+            Class::Answer
+        } else {
+            Class::Data
+        };
         let now = self.now;
         if !self.no_mac && self.st[i].mac.check(now, class).is_some() {
             return;
@@ -319,7 +374,12 @@ impl Net {
                 self.st[j].mac.on_rx_start(now);
             }
         }
-        self.active.push(Tx { from: i, start: now, end, frames });
+        self.active.push(Tx {
+            from: i,
+            start: now,
+            end,
+            frames,
+        });
     }
 
     /// Messages delivered to `dest` so far.
@@ -348,7 +408,10 @@ mod tests {
                 failures.push((seed, net.delivered_to(2), net.collisions));
             }
         }
-        assert!(failures.is_empty(), "not delivered (seed, delivered, collisions): {failures:?}");
+        assert!(
+            failures.is_empty(),
+            "not delivered (seed, delivered, collisions): {failures:?}"
+        );
     }
 
     /// Proves the simulator can see a collision: with the MAC off, the same start fails.
@@ -387,7 +450,10 @@ mod tests {
         // Hidden stations cannot hear each other, so listening cannot stop their calls from
         // landing on the hub's reception. The BUSY reply and the back-off get nearly all of
         // them through; the rest need the relay to grant turns (NETWORK-DESIGN L2).
-        assert!(failures.len() <= 1, "hidden stations (seed, delivered, collisions): {failures:?}");
+        assert!(
+            failures.len() <= 1,
+            "hidden stations (seed, delivered, collisions): {failures:?}"
+        );
     }
 
     #[test]

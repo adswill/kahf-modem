@@ -16,14 +16,17 @@ fn main() {
     ];
     for (name, sh, snrs) in modes {
         for &snr in snrs {
-            let cws: Vec<Vec<u8>> = (0..2).map(|j| ldpc::encode(&frame::build_payload_as(&[j as u8; 20], 3))).collect();
+            let cws: Vec<Vec<u8>> = (0..2)
+                .map(|j| ldpc::encode(&frame::build_payload_as(&[j as u8; 20], 3)))
+                .collect();
             let tx = modulate_burst_shape(&cws, sh);
             let (mut sum, mut n) = (0.0, 0);
             for seed in 0..12u64 {
                 let mut x = Vec::new();
                 x.extend(&tx);
-                
-                let mut rx = kahf_sim::awgn(&x, snr, 100 + seed); rx.extend(vec![0f32; 600]);
+
+                let mut rx = kahf_sim::awgn(&x, snr, 100 + seed);
+                rx.extend(vec![0f32; 600]);
                 if let Some((start, hz, tau)) = find_preamble(&rx) {
                     if let Some(b) = demodulate_burst_rx(&rx, start, hz, tau, ldpc::N, 2, sh) {
                         sum += b.snr_db;
@@ -31,7 +34,10 @@ fn main() {
                     }
                 }
             }
-            println!("{name:9} true {snr:6.1} dB   estimated {:6.1} dB  ({n}/12 found)", sum / n.max(1) as f64);
+            println!(
+                "{name:9} true {snr:6.1} dB   estimated {:6.1} dB  ({n}/12 found)",
+                sum / n.max(1) as f64
+            );
         }
     }
 }

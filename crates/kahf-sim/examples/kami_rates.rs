@@ -21,6 +21,13 @@ fn main() {
     println!("mode      raw bit/s   net info bit/s for 1, 4, 8, 16 codewords per burst");
     for (name, sh) in modes {
         let net = |m: usize| (m * 324) as f64 / (burst_len_shape(648, m, sh) as f64 / 8000.0);
-        println!("{name:9} {:9.0}   {:6.0} {:6.0} {:6.0} {:6.0}", sh.raw_bps(), net(1), net(4), net(8), net(16));
+        println!(
+            "{name:9} {:9.0}   {:6.0} {:6.0} {:6.0} {:6.0}",
+            sh.raw_bps(),
+            net(1),
+            net(4),
+            net(8),
+            net(16)
+        );
     }
 }

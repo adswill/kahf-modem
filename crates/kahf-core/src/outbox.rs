@@ -92,7 +92,11 @@ impl Outbox {
     }
 
     /// As `next`, but only items for which `want(id, item)` is true.
-    pub fn next_matching(&mut self, now_ms: u64, want: impl Fn(u64, &OutItem) -> bool) -> Option<(u64, OutItem)> {
+    pub fn next_matching(
+        &mut self,
+        now_ms: u64,
+        want: impl Fn(u64, &OutItem) -> bool,
+    ) -> Option<(u64, OutItem)> {
         self.entries
             .iter()
             .filter(|e| e.next_try_ms <= now_ms && want(e.id, &e.item))

@@ -251,7 +251,11 @@ fn run_relay(k: &Kahf) -> V {
     );
     c = c.push(para("Every twelve seconds the relay announces itself and gives stations a turn on its lane. Nothing is stored on a server: the server only plans which relay serves which lane.", 100));
     if r.slots.is_empty() {
-        c = c.push(caption("No fixed schedule is shown: the relay plans its own turns on the lane.").dim().fill_w());
+        c = c.push(
+            caption("No fixed schedule is shown: the relay plans its own turns on the lane.")
+                .dim()
+                .fill_w(),
+        );
     } else {
         let now = if r.now_unix > 0 { r.now_unix } else { now_unix() };
         for s in &r.slots {
@@ -296,7 +300,10 @@ fn run_relay(k: &Kahf) -> V {
     }
     c = c.push(heading("What it has done").sub());
     if r.recent.is_empty() {
-        c = c.push(para("Nothing forwarded yet. Quiet is normal: relays are used when stations cannot reach each other.", 100));
+        c = c.push(para(
+            "Nothing forwarded yet. Quiet is normal: relays are used when stations cannot reach each other.",
+            100,
+        ));
     } else {
         for h in &r.recent {
             c = c.push(

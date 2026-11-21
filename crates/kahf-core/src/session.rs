@@ -127,7 +127,13 @@ pub fn try_encode_sized(
     private: bool,
     chunk_max: usize,
 ) -> Result<Vec<Vec<u8>>, EncodeError> {
-    try_encode_inner(msg, true, key, private, chunk_max.clamp(HEADER + CRC_LEN + 1, CHUNK_MAX))
+    try_encode_inner(
+        msg,
+        true,
+        key,
+        private,
+        chunk_max.clamp(HEADER + CRC_LEN + 1, CHUNK_MAX),
+    )
 }
 
 /// As `encode`, with compression switched on or off.
@@ -547,7 +553,12 @@ fn crc16(bytes: &[u8]) -> u16 {
 mod tests {
     #[test]
     fn small_chunks_decode_like_big_ones() {
-        let msg = Message::Chat { from: "AA1AAA".into(), to: "BB1BBB".into(), text: "The quick brown fox jumps over the lazy dog, twice: the quick brown fox jumps again.".into() };
+        let msg = Message::Chat {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            text: "The quick brown fox jumps over the lazy dog, twice: the quick brown fox jumps again."
+                .into(),
+        };
         for max in [26usize, 20, 34] {
             let chunks = try_encode_sized(&msg, None, true, max).unwrap();
             assert!(chunks.iter().all(|c| c.len() <= max), "{max}");
@@ -555,7 +566,10 @@ mod tests {
             assert_eq!(got.message, msg);
             assert!(got.private);
         }
-        assert_eq!(try_encode_sized(&msg, None, false, 34).unwrap(), try_encode_signed(&msg, None, false).unwrap());
+        assert_eq!(
+            try_encode_sized(&msg, None, false, 34).unwrap(),
+            try_encode_signed(&msg, None, false).unwrap()
+        );
     }
     fn ser(msg: &Message) -> Vec<u8> {
         serialise(msg).unwrap()

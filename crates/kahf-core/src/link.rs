@@ -71,9 +71,20 @@ pub enum Action {
     Deliver(Vec<u8>),
     StateChanged(LinkState),
     /// A station announced itself (no link needed). Relays pass it on while `ttl` lasts.
-    Advert { call: String, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)> },
+    Advert {
+        call: String,
+        ttl: u8,
+        seq: u8,
+        flags: u8,
+        loc: Option<(f32, f32)>,
+    },
     /// A relay announced itself (identity, whether it is online, the time, how busy it is).
-    Beacon { call: String, flags: u8, time_s: u32, load: u8 },
+    Beacon {
+        call: String,
+        flags: u8,
+        time_s: u32,
+        load: u8,
+    },
     /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
     Metrics(LinkMetrics),
 }
@@ -235,7 +246,10 @@ impl Link {
 
     /// Feed one decoded frame payload from the air.
     pub fn on_receive(&mut self, payload: &[u8]) -> Vec<Action> {
-        if matches!(payload.first(), Some(&TAG_CONNECT) | Some(&TAG_CONNECT_ACK) | Some(&TAG_DISCONNECT)) {
+        if matches!(
+            payload.first(),
+            Some(&TAG_CONNECT) | Some(&TAG_CONNECT_ACK) | Some(&TAG_DISCONNECT)
+        ) {
             if let Some((from, _)) = decode_hs(payload) {
                 self.note_heard(&from);
             }
@@ -258,14 +272,25 @@ impl Link {
             Some(&TAG_BEACON) => match decode_beacon(payload) {
                 Some((call, flags, time_s, load)) if call != self.callsign && valid_callsign(&call) => {
                     self.note_heard(&call);
-                    vec![Action::Beacon { call, flags, time_s, load }]
+                    vec![Action::Beacon {
+                        call,
+                        flags,
+                        time_s,
+                        load,
+                    }]
                 }
                 _ => Vec::new(),
             },
             Some(&TAG_ADVERT) => match decode_advert(payload) {
                 Some((call, ttl, seq, flags, loc)) if call != self.callsign && valid_callsign(&call) => {
                     self.note_heard(&call);
-                    vec![Action::Advert { call, ttl, seq, flags, loc }]
+                    vec![Action::Advert {
+                        call,
+                        ttl,
+                        seq,
+                        flags,
+                        loc,
+                    }]
                 }
                 _ => Vec::new(),
             },
@@ -384,7 +409,10 @@ impl Link {
 
     /// Remember a station we heard, once per burst of frames.
     fn note_heard(&mut self, call: &str) {
-        if call != self.callsign && valid_callsign(call) && self.heard.last().map(|c| c.as_str()) != Some(call) {
+        if call != self.callsign
+            && valid_callsign(call)
+            && self.heard.last().map(|c| c.as_str()) != Some(call)
+        {
             if self.heard.len() >= 32 {
                 self.heard.remove(0);
             }
@@ -522,7 +550,9 @@ impl Link {
     }
 
     fn quiet_for_takeover(&self) -> bool {
-        self.peer_active && self.nothing_pending() && self.clock.saturating_sub(self.last_activity) >= TAKEOVER_IDLE_MS
+        self.peer_active
+            && self.nothing_pending()
+            && self.clock.saturating_sub(self.last_activity) >= TAKEOVER_IDLE_MS
     }
 
     /// Seconds a caller should stay away: a fixed part plus what we still have to send.
@@ -532,13 +562,18 @@ impl Link {
     }
 
     fn busy_for(&self, peer: &str) -> Option<u64> {
-        self.busy_until.iter().find(|(c, u)| c == peer && *u > self.clock).map(|(_, u)| *u)
+        self.busy_until
+            .iter()
+            .find(|(c, u)| c == peer && *u > self.clock)
+            .map(|(_, u)| *u)
     }
 
     /// A busy notice. Everyone who hears it leaves that station alone for a while, whoever it
     /// was addressed to (a hidden caller learns from the notice the others hear).
     fn on_busy(&mut self, p: &[u8]) -> Vec<Action> {
-        let Some((from, to, wait)) = decode_busy(p) else { return Vec::new() };
+        let Some((from, to, wait)) = decode_busy(p) else {
+            return Vec::new();
+        };
         if from == self.callsign {
             return Vec::new();
         }
@@ -642,7 +677,8 @@ impl Link {
             bitmap,
             self.measured_fer_pct(),
             // SNR report: half dB steps from -30 dB, 0 means unknown.
-            self.rx_snr.map_or(0, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8),
+            self.rx_snr
+                .map_or(0, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8),
         ]));
         out
     }
@@ -800,7 +836,11 @@ pub const ADVERT_TTL: u8 = 4;
 /// An announcement of a station, for everyone who can hear it: tag, hops left, sequence number,
 /// flags, callsign.
 pub fn encode_advert(call: &str, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)>) -> Vec<u8> {
-    let flags = if loc.is_some() { flags | ADVERT_LOCATION } else { flags & !ADVERT_LOCATION };
+    let flags = if loc.is_some() {
+        flags | ADVERT_LOCATION
+    } else {
+        flags & !ADVERT_LOCATION
+    };
     let mut v = vec![TAG_ADVERT, ttl, seq, flags, call.len() as u8];
     v.extend_from_slice(call.as_bytes());
     if let Some((lat, lon)) = loc {
@@ -916,7 +956,10 @@ mod tests {
                             self.b_rx.push(p)
                         }
                     }
-                    Action::StateChanged(_) | Action::Metrics(_) | Action::Advert { .. } | Action::Beacon { .. } => {}
+                    Action::StateChanged(_)
+                    | Action::Metrics(_)
+                    | Action::Advert { .. }
+                    | Action::Beacon { .. } => {}
                 }
             }
         }
@@ -1269,11 +1312,18 @@ mod advert_tests {
     fn a_beacon_carries_the_relay_and_the_time() {
         let mut l = Link::new("KB2BRV");
         let acts = l.on_receive(&encode_beacon("RR1RRR", BEACON_ONLINE, 1_800_000_000, 40));
-        assert_eq!(acts, vec![Action::Beacon { call: "RR1RRR".into(), flags: BEACON_ONLINE, time_s: 1_800_000_000, load: 40 }]);
+        assert_eq!(
+            acts,
+            vec![Action::Beacon {
+                call: "RR1RRR".into(),
+                flags: BEACON_ONLINE,
+                time_s: 1_800_000_000,
+                load: 40
+            }]
+        );
         assert!(l.on_receive(&encode_beacon("KB2BRV", 0, 1, 0)).is_empty());
         assert!(l.on_receive(&[TAG_BEACON, 0, 0, 0, 0, 0, 0, 5, b'x']).is_empty());
     }
-
 
     #[test]
     fn an_advert_is_heard_without_a_link() {
@@ -1282,7 +1332,11 @@ mod advert_tests {
         assert_eq!(
             acts,
             vec![Action::Advert {
-                call: "KA1ALF".into(), ttl: 3, seq: 7, flags: ADVERT_RELAY | ADVERT_LOCATION, loc: Some((25.2, 55.27))
+                call: "KA1ALF".into(),
+                ttl: 3,
+                seq: 7,
+                flags: ADVERT_RELAY | ADVERT_LOCATION,
+                loc: Some((25.2, 55.27))
             }]
         );
         let plain = l.on_receive(&encode_advert("KC3CCC", 1, 2, 0, None));

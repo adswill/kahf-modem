@@ -178,7 +178,10 @@ impl Node {
             match ev {
                 Event::Log(m) => self.note(m),
                 Event::Message { from, text } => self.note(format!("message from {from}: {text}")),
-                Event::Relay { call, online, .. } => self.note(format!("relay {call} {}", if online { "online" } else { "offline" })),
+                Event::Relay { call, online, .. } => self.note(format!(
+                    "relay {call} {}",
+                    if online { "online" } else { "offline" }
+                )),
                 Event::Tx { state } => self.note(format!("tx: {state:?}")),
                 _ => {}
             }

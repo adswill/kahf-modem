@@ -108,7 +108,13 @@ pub enum Violation {
 pub fn lane_17m(k: u8, role: Role) -> Lane {
     let lower = 18_111_200 + LANE_PITCH_HZ * k as u64;
     let centre = lower + LANE_WIDTH_HZ / 2;
-    Lane { k, role, lower_hz: lower, centre_hz: centre, dial_hz: centre - AUDIO_CENTRE_HZ }
+    Lane {
+        k,
+        role,
+        lower_hz: lower,
+        centre_hz: centre,
+        dial_hz: centre - AUDIO_CENTRE_HZ,
+    }
 }
 
 /// Roles of lanes 0..12 (MESH-SPEC.md 2.1).
@@ -131,7 +137,11 @@ impl BandTable {
     /// The built-in 17 m table for IARU Region 1 (2016 plan). **Not verified** against the
     /// newest plan: see the module note.
     pub fn builtin_r1() -> Self {
-        let lanes = ROLES_17M.iter().enumerate().map(|(k, r)| lane_17m(k as u8, *r)).collect();
+        let lanes = ROLES_17M
+            .iter()
+            .enumerate()
+            .map(|(k, r)| lane_17m(k as u8, *r))
+            .collect();
         BandTable {
             version: 1,
             region: Region::R1,
@@ -140,8 +150,18 @@ impl BandTable {
             bands: vec![Band {
                 name: "17m".into(),
                 segments: vec![
-                    Segment { lo_hz: 18_105_000, hi_hz: 18_109_000, max_bw_hz: 500, unattended_ok: true },
-                    Segment { lo_hz: 18_111_000, hi_hz: 18_120_000, max_bw_hz: 2_700, unattended_ok: true },
+                    Segment {
+                        lo_hz: 18_105_000,
+                        hi_hz: 18_109_000,
+                        max_bw_hz: 500,
+                        unattended_ok: true,
+                    },
+                    Segment {
+                        lo_hz: 18_111_000,
+                        hi_hz: 18_120_000,
+                        max_bw_hz: 2_700,
+                        unattended_ok: true,
+                    },
                 ],
                 lanes,
                 excluded: vec![
@@ -150,7 +170,11 @@ impl BandTable {
                     ex(18_104_000, 18_107_000, "FT4"),
                     ex(18_106_000, 18_106_200, "WSPR"),
                 ],
-                rules: Rules { sense_ms: 300, max_tx_s: 20, duty_cycle_pct: 25 },
+                rules: Rules {
+                    sense_ms: 300,
+                    max_tx_s: 20,
+                    duty_cycle_pct: 25,
+                },
             }],
         }
     }
@@ -199,12 +223,18 @@ impl BandTable {
 
     /// Sign with the project key. The result is what the server publishes next to the table.
     pub fn sign(&self, project_key: &[u8; 32]) -> [u8; 64] {
-        SigningKey::from_bytes(project_key).sign(&self.to_bytes()).to_bytes()
+        SigningKey::from_bytes(project_key)
+            .sign(&self.to_bytes())
+            .to_bytes()
     }
 }
 
 fn ex(lo_hz: u64, hi_hz: u64, why: &str) -> Excluded {
-    Excluded { lo_hz, hi_hz, why: why.into() }
+    Excluded {
+        lo_hz,
+        hi_hz,
+        why: why.into(),
+    }
 }
 
 fn put_str(o: &mut Vec<u8>, s: &str) {
@@ -221,12 +251,21 @@ pub enum Refusal {
 
 /// Accept a table that arrived with a signature. It must verify against the project's public
 /// key and must not be older than the one in use (`have`).
-pub fn accept(table: &BandTable, sig: Option<&[u8; 64]>, project_public: &[u8; 32], have: u32) -> Result<(), Refusal> {
+pub fn accept(
+    table: &BandTable,
+    sig: Option<&[u8; 64]>,
+    project_public: &[u8; 32],
+    have: u32,
+) -> Result<(), Refusal> {
     let sig = sig.ok_or(Refusal::Unsigned)?;
     let vk = VerifyingKey::from_bytes(project_public).map_err(|_| Refusal::BadSignature)?;
-    vk.verify(&table.to_bytes(), &Signature::from_bytes(sig)).map_err(|_| Refusal::BadSignature)?;
+    vk.verify(&table.to_bytes(), &Signature::from_bytes(sig))
+        .map_err(|_| Refusal::BadSignature)?;
     if table.version < have {
-        return Err(Refusal::Older { have, got: table.version });
+        return Err(Refusal::Older {
+            have,
+            got: table.version,
+        });
     }
     Ok(())
 }
@@ -251,7 +290,10 @@ impl Band {
         let lanes: Vec<&Lane> = ks.iter().map(|k| self.lane(*k)).collect::<Option<_>>()?;
         let low = lanes.iter().map(|l| l.centre_hz).min()?;
         let dial = low.checked_sub(AUDIO_CENTRE_HZ)?;
-        lanes.iter().all(|l| l.upper_hz() - dial <= audio_max_hz).then_some(dial)
+        lanes
+            .iter()
+            .all(|l| l.upper_hz() - dial <= audio_max_hz)
+            .then_some(dial)
     }
 
     /// Geometry: may a signal occupying `lo..hi` (transmitted Hz) go out? It must lie inside
@@ -267,15 +309,26 @@ impl Band {
             }
         }
         let first = self.lanes.iter().find(|l| lo >= l.lower_hz && lo <= l.upper_hz());
-        let Some(first) = first else { return Err(Violation::OutsideLanes) };
+        let Some(first) = first else {
+            return Err(Violation::OutsideLanes);
+        };
         // Walk adjacent lanes until the span is covered, the gaps between lanes count as covered.
         let mut top = first.upper_hz();
         while hi > top {
-            let next = self.lanes.iter().find(|l| l.lower_hz > top && l.lower_hz - top <= LANE_PITCH_HZ - LANE_WIDTH_HZ);
-            let Some(next) = next else { return Err(Violation::OutsideLanes) };
+            let next = self
+                .lanes
+                .iter()
+                .find(|l| l.lower_hz > top && l.lower_hz - top <= LANE_PITCH_HZ - LANE_WIDTH_HZ);
+            let Some(next) = next else {
+                return Err(Violation::OutsideLanes);
+            };
             top = next.upper_hz();
         }
-        let seg = self.segments.iter().find(|s| lo >= s.lo_hz && hi <= s.hi_hz).ok_or(Violation::OutsideLanes)?;
+        let seg = self
+            .segments
+            .iter()
+            .find(|s| lo >= s.lo_hz && hi <= s.hi_hz)
+            .ok_or(Violation::OutsideLanes)?;
         if !seg.unattended_ok {
             return Err(Violation::NotUnattended);
         }
@@ -302,7 +355,10 @@ impl BandTable {
     ) -> Result<(), Violation> {
         let b = self.band(band).ok_or(Violation::NoSuchBand)?;
         let (lo, hi) = occupied_span(dial_hz, audio_lo_hz, audio_hi_hz);
-        let (a, z) = (b.lane(first_k).ok_or(Violation::OutsideLanes)?, b.lane(last_k).ok_or(Violation::OutsideLanes)?);
+        let (a, z) = (
+            b.lane(first_k).ok_or(Violation::OutsideLanes)?,
+            b.lane(last_k).ok_or(Violation::OutsideLanes)?,
+        );
         if lo < a.lower_hz || hi > z.upper_hz() {
             return Err(Violation::OutsideLanes);
         }
@@ -344,7 +400,11 @@ mod tests {
         assert_eq!(b.lanes.len(), 12);
         for (k, lo, c, hi, dial) in TABLE {
             let l = b.lane(k).unwrap();
-            assert_eq!((l.lower_hz, l.centre_hz, l.upper_hz(), l.dial_hz), (lo, c, hi, dial), "lane {k}");
+            assert_eq!(
+                (l.lower_hz, l.centre_hz, l.upper_hz(), l.dial_hz),
+                (lo, c, hi, dial),
+                "lane {k}"
+            );
         }
     }
 
@@ -352,15 +412,25 @@ mod tests {
     fn roles_are_eight_relay_two_calling_two_spare() {
         let b = b17();
         assert_eq!(b.lanes_with(Role::Relay).count(), 8);
-        assert_eq!(b.lanes_with(Role::Calling).map(|l| l.k).collect::<Vec<_>>(), vec![5, 6]);
-        assert_eq!(b.lanes_with(Role::Spare).map(|l| l.k).collect::<Vec<_>>(), vec![4, 7]);
+        assert_eq!(
+            b.lanes_with(Role::Calling).map(|l| l.k).collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert_eq!(
+            b.lanes_with(Role::Spare).map(|l| l.k).collect::<Vec<_>>(),
+            vec![4, 7]
+        );
     }
 
     #[test]
     fn lanes_stay_inside_the_data_segment_and_clear_of_the_beacons() {
         let b = b17();
         for l in &b.lanes {
-            assert!(l.lower_hz >= 18_111_200 && l.upper_hz() <= 18_119_380, "lane {}", l.k);
+            assert!(
+                l.lower_hz >= 18_111_200 && l.upper_hz() <= 18_119_380,
+                "lane {}",
+                l.k
+            );
             assert_eq!(b.check_span(l.lower_hz, l.upper_hz()), Ok(()), "lane {}", l.k);
         }
         // 620 Hz clear below 18.120, 1.2 kHz above the beacon segment.
@@ -392,8 +462,14 @@ mod tests {
     #[test]
     fn excluded_ranges_are_refused() {
         let b = b17();
-        assert!(matches!(b.check_span(18_109_500, 18_109_900), Err(Violation::InExcluded(_))));
-        assert!(matches!(b.check_span(18_100_500, 18_100_900), Err(Violation::InExcluded(_))));
+        assert!(matches!(
+            b.check_span(18_109_500, 18_109_900),
+            Err(Violation::InExcluded(_))
+        ));
+        assert!(matches!(
+            b.check_span(18_100_500, 18_100_900),
+            Err(Violation::InExcluded(_))
+        ));
         // The narrow-digimode segment below the beacons is not a lane (and holds FT4/WSPR).
         assert!(b.check_span(18_105_000, 18_105_300).is_err());
         assert_eq!(b.check_span(18_120_100, 18_120_500), Err(Violation::OutsideLanes));
@@ -426,18 +502,33 @@ mod tests {
     fn the_built_in_table_may_not_transmit_until_it_is_verified() {
         let mut t = BandTable::builtin_r1();
         let d = t.bands[0].lane(2).unwrap().dial_hz;
-        assert_eq!(t.permit_tx("17m", 2, 2, d, 1260, 1740), Err(Violation::PlanNotVerified));
-        assert_eq!(t.permit_tx("20m", 2, 2, d, 1260, 1740), Err(Violation::NoSuchBand));
+        assert_eq!(
+            t.permit_tx("17m", 2, 2, d, 1260, 1740),
+            Err(Violation::PlanNotVerified)
+        );
+        assert_eq!(
+            t.permit_tx("20m", 2, 2, d, 1260, 1740),
+            Err(Violation::NoSuchBand)
+        );
         t.plan_verified = true;
         assert_eq!(t.permit_tx("17m", 2, 2, d, 1260, 1740), Ok(()));
         // The dial trap: the dial on the centre puts the signal in lane 4, not lane 2.
-        assert_eq!(t.permit_tx("17m", 2, 2, d + 1500, 1260, 1740), Err(Violation::OutsideLanes));
+        assert_eq!(
+            t.permit_tx("17m", 2, 2, d + 1500, 1260, 1740),
+            Err(Violation::OutsideLanes)
+        );
         // The right dial, the wrong lane asked for.
-        assert_eq!(t.permit_tx("17m", 3, 3, d, 1260, 1740), Err(Violation::OutsideLanes));
+        assert_eq!(
+            t.permit_tx("17m", 3, 3, d, 1260, 1740),
+            Err(Violation::OutsideLanes)
+        );
         // Two bonded lanes: 1180 Hz wide (1500 - 590 .. 1500 + 590 audio) on lanes 2 and 3.
         let d2 = t.bands[0].lane(2).unwrap().lower_hz - 1000;
         assert_eq!(t.permit_tx("17m", 2, 3, d2, 1000, 2180), Ok(()));
-        assert_eq!(t.permit_tx("17m", 2, 2, d2, 1000, 2180), Err(Violation::OutsideLanes));
+        assert_eq!(
+            t.permit_tx("17m", 2, 2, d2, 1000, 2180),
+            Err(Violation::OutsideLanes)
+        );
     }
 
     #[test]
@@ -450,11 +541,17 @@ mod tests {
         assert_eq!(accept(&t, Some(&sig), &public, 5), Ok(()));
         assert_eq!(accept(&t, Some(&sig), &public, 4), Ok(()));
         assert_eq!(accept(&t, None, &public, 0), Err(Refusal::Unsigned));
-        assert_eq!(accept(&t, Some(&sig), &public, 6), Err(Refusal::Older { have: 6, got: 5 }));
+        assert_eq!(
+            accept(&t, Some(&sig), &public, 6),
+            Err(Refusal::Older { have: 6, got: 5 })
+        );
         // One changed number breaks the signature.
         let mut forged = t.clone();
         forged.bands[0].segments[1].max_bw_hz = 5_000;
-        assert_eq!(accept(&forged, Some(&sig), &public, 0), Err(Refusal::BadSignature));
+        assert_eq!(
+            accept(&forged, Some(&sig), &public, 0),
+            Err(Refusal::BadSignature)
+        );
         // A signature by another key.
         let other = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
         assert_eq!(accept(&t, Some(&sig), &other, 0), Err(Refusal::BadSignature));

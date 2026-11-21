@@ -25,10 +25,18 @@ pub const HOLD: Duration = Duration::from_secs(60);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Msg {
     Hello,
-    Heartbeat { queue: u32 },
+    Heartbeat {
+        queue: u32,
+    },
     /// A message to carry to relay `to`: only an id and a size, never the body.
-    Deliver { id: u64, to: String, size: u32 },
-    Plan { epoch: u64 },
+    Deliver {
+        id: u64,
+        to: String,
+        size: u32,
+    },
+    Plan {
+        epoch: u64,
+    },
     Kicked,
 }
 
@@ -296,15 +304,26 @@ mod tests {
             }
             let now = h.clock.now();
             let held = h.held.remove(&self.me).unwrap_or_default();
-            Ok(held.into_iter().filter(|(t, _)| now.saturating_duration_since(*t) <= HOLD).map(|(_, m)| m).collect())
+            Ok(held
+                .into_iter()
+                .filter(|(t, _)| now.saturating_duration_since(*t) <= HOLD)
+                .map(|(_, m)| m)
+                .collect())
         }
     }
 
     fn client(clock: &Clock, hub: &Shared, me: &str) -> PushClient<FakeWire, FakePoll> {
         PushClient::new(
             clock.clone(),
-            FakeWire { hub: hub.clone(), me: me.into(), gen: 0 },
-            FakePoll { hub: hub.clone(), me: me.into() },
+            FakeWire {
+                hub: hub.clone(),
+                me: me.into(),
+                gen: 0,
+            },
+            FakePoll {
+                hub: hub.clone(),
+                me: me.into(),
+            },
         )
     }
 
@@ -337,10 +356,28 @@ mod tests {
         run(&clock, &mut [&mut a, &mut b], 100);
         assert_eq!((a.via, b.via), (Via::Ws, Via::Ws));
         let t_send = clock.now();
-        a.send(Msg::Deliver { id: 7, to: "RB".into(), size: 30 }).unwrap();
+        a.send(Msg::Deliver {
+            id: 7,
+            to: "RB".into(),
+            size: 30,
+        })
+        .unwrap();
         let got = run(&clock, &mut [&mut a, &mut b], 500);
-        let (at, who, m) = got.iter().find(|(_, _, m)| matches!(m, Msg::Deliver { .. })).expect("delivered");
-        assert_eq!((*who, m.clone()), (1, Msg::Deliver { id: 7, to: "RB".into(), size: 30 }));
+        let (at, who, m) = got
+            .iter()
+            .find(|(_, _, m)| matches!(m, Msg::Deliver { .. }))
+            .expect("delivered");
+        assert_eq!(
+            (*who, m.clone()),
+            (
+                1,
+                Msg::Deliver {
+                    id: 7,
+                    to: "RB".into(),
+                    size: 30
+                }
+            )
+        );
         assert!(*at < 100, "took {at} ms");
         let _ = t_send;
     }
@@ -373,15 +410,31 @@ mod tests {
         run(&clock, &mut [&mut a, &mut b], 100);
         // B's socket drops (a bad network); the hub holds what comes for B.
         h.borrow_mut().drop_socket("RB");
-        a.send(Msg::Deliver { id: 1, to: "RB".into(), size: 10 }).unwrap();
+        a.send(Msg::Deliver {
+            id: 1,
+            to: "RB".into(),
+            size: 10,
+        })
+        .unwrap();
         let got = run(&clock, &mut [&mut a, &mut b], 12_000);
-        let at = got.iter().find(|(_, w, m)| *w == 1 && matches!(m, Msg::Deliver { .. })).map(|(t, _, _)| *t).expect("delivered by poll");
+        let at = got
+            .iter()
+            .find(|(_, w, m)| *w == 1 && matches!(m, Msg::Deliver { .. }))
+            .map(|(t, _, _)| *t)
+            .expect("delivered by poll");
         assert!(at <= 10_100, "took {at} ms");
         // B reconnected by itself.
         assert_eq!(b.via, Via::Ws);
-        a.send(Msg::Deliver { id: 2, to: "RB".into(), size: 10 }).unwrap();
+        a.send(Msg::Deliver {
+            id: 2,
+            to: "RB".into(),
+            size: 10,
+        })
+        .unwrap();
         let got = run(&clock, &mut [&mut a, &mut b], 300);
-        assert!(got.iter().any(|(t, w, m)| *w == 1 && *t < 100 && matches!(m, Msg::Deliver { id: 2, .. })));
+        assert!(got
+            .iter()
+            .any(|(t, w, m)| *w == 1 && *t < 100 && matches!(m, Msg::Deliver { id: 2, .. })));
     }
 
     #[test]
@@ -391,19 +444,43 @@ mod tests {
         run(&clock, &mut [&mut a, &mut b], 100);
         // An item for B is held while B has no socket ...
         h.borrow_mut().drop_socket("RB");
-        a.send(Msg::Deliver { id: 9, to: "RB".into(), size: 10 }).unwrap();
+        a.send(Msg::Deliver {
+            id: 9,
+            to: "RB".into(),
+            size: 10,
+        })
+        .unwrap();
         // ... and the hub is then dead for 70 s: the item is older than 60 s when it comes back.
         h.borrow_mut().set_up(false);
         let got = run(&clock, &mut [&mut a, &mut b], 70_000);
         assert!(got.is_empty());
         assert_eq!((a.via, b.via), (Via::Poll, Via::Poll));
-        assert!(a.send(Msg::Deliver { id: 10, to: "RB".into(), size: 1 }).is_err(), "the caller keeps what it could not send");
+        assert!(
+            a.send(Msg::Deliver {
+                id: 10,
+                to: "RB".into(),
+                size: 1
+            })
+            .is_err(),
+            "the caller keeps what it could not send"
+        );
         h.borrow_mut().set_up(true);
         let got = run(&clock, &mut [&mut a, &mut b], 40_000);
-        assert!(got.iter().all(|(_, _, m)| !matches!(m, Msg::Deliver { id: 9, .. })), "a 70 s old item must be dropped");
+        assert!(
+            got.iter()
+                .all(|(_, _, m)| !matches!(m, Msg::Deliver { id: 9, .. })),
+            "a 70 s old item must be dropped"
+        );
         assert_eq!((a.via, b.via), (Via::Ws, Via::Ws));
-        a.send(Msg::Deliver { id: 11, to: "RB".into(), size: 1 }).unwrap();
+        a.send(Msg::Deliver {
+            id: 11,
+            to: "RB".into(),
+            size: 1,
+        })
+        .unwrap();
         let got = run(&clock, &mut [&mut a, &mut b], 200);
-        assert!(got.iter().any(|(_, w, m)| *w == 1 && matches!(m, Msg::Deliver { id: 11, .. })));
+        assert!(got
+            .iter()
+            .any(|(_, w, m)| *w == 1 && matches!(m, Msg::Deliver { id: 11, .. })));
     }
 }

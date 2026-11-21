@@ -20,24 +20,27 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
 mod datagram;
 mod referee;
-use referee::{RefGate, RefState};
 use datagram::{is_answer_payload, is_dg_item, DgState};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
 use kahf_core::lanes::{self as laneplan, BandTable};
-use kahf_core::narrow;
 use kahf_core::lanesense::{Class as LaneClass, LaneSense, Quarantine};
 use kahf_core::ldpc;
+use kahf_core::narrow;
+use referee::{RefGate, RefState};
 mod backbone;
 mod clock;
 #[allow(dead_code)]
 mod push;
-pub use clock::Clock;
 use backbone::{Backbone, BbHandle, BbJob, BbResult, Queued};
+pub use clock::Clock;
+use kahf_core::link::{
+    encode_advert, encode_beacon, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL,
+    BEACON_ONLINE,
+};
 use kahf_core::mac::{Class, Mac};
-use kahf_core::link::{encode_beacon, BEACON_ONLINE, encode_advert, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
 use kahf_core::phy::Modulation;
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
@@ -135,10 +138,17 @@ pub enum Event {
     /// mode changes.
     Metrics(LinkStatus),
     /// A station was heard on the air: its callsign and the SNR (dB) of the burst, if known.
-    Heard { call: String, snr_db: Option<f32> },
+    Heard {
+        call: String,
+        snr_db: Option<f32>,
+    },
     /// Where a message of ours stands, by its public id: answered by a relay on its way, delivered (answered
     /// by the station it is for), or waiting because the other side did not answer (it is tried again).
-    Delivery { id: u64, state: Delivery, note: String },
+    Delivery {
+        id: u64,
+        state: Delivery,
+        note: String,
+    },
     Log(String),
     /// Transmit progress: Starting (PTT on), Sending (audio handed to the radio),
     /// Done (PTT off) or Failed (with the reason).
@@ -347,12 +357,22 @@ impl Flags {
             internet_relay: AtomicBool::new(true),
             third_party_relay: AtomicBool::new(true),
             relay_timeout_ms: AtomicU64::new(RELAY_TIMEOUT_MS),
-            policy: Mutex::new(TxPolicy { table: BandTable::builtin_r1(), dial_hz: None, test_table: false, audio_span: None }),
+            policy: Mutex::new(TxPolicy {
+                table: BandTable::builtin_r1(),
+                dial_hz: None,
+                test_table: false,
+                audio_span: None,
+            }),
             bench_radio: AtomicBool::new(false),
             radio_known: AtomicBool::new(false),
             radio_dial_hz: AtomicU64::new(0),
             occupancy: Mutex::new(VecDeque::new()),
-            ref_counts: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            ref_counts: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
         }
     }
 }
@@ -369,8 +389,10 @@ fn tx_refusal(f: &Flags) -> Option<&'static str> {
 }
 
 const GATE_UNVERIFIED: &str = "Transmit is off: the 17 m band table is not verified against the current band plan yet. Receiving works.";
-const GATE_NO_DIAL: &str = "Transmit is off: KAHF does not know the radio's dial frequency. Choose a lane on the Radio screen.";
-const GATE_NOT_A_LANE: &str = "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
+const GATE_NO_DIAL: &str =
+    "Transmit is off: KAHF does not know the radio's dial frequency. Choose a lane on the Radio screen.";
+const GATE_NOT_A_LANE: &str =
+    "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
 const GATE_OUTSIDE: &str = "Transmit is off: the signal would not fit inside the lane.";
 const GATE_TEST_REAL: &str = "The test table is on, but this is a real radio. Transmit is off.";
 
@@ -494,7 +516,9 @@ fn gate_refusal(f: &Flags) -> Option<&'static str> {
     let Some(dial) = p.dial_hz.or((radio_dial != 0).then_some(radio_dial)) else {
         return Some(GATE_NO_DIAL);
     };
-    let Some(band) = p.table.band("17m") else { return Some(GATE_OUTSIDE) };
+    let Some(band) = p.table.band("17m") else {
+        return Some(GATE_OUTSIDE);
+    };
     let Some(lane) = band.lanes.iter().find(|l| l.dial_hz == dial) else {
         return Some(GATE_NOT_A_LANE);
     };
@@ -584,7 +608,10 @@ impl Engine {
     /// Transmit audio level in percent of full scale, 5 to 100. Lower is safer: set it so the
     /// radio's ALC only just moves, or lower.
     pub fn set_tx_level(&self, pct: u8) {
-        self.shared.flags.tx_level_pct.store(pct.clamp(5, 100), Ordering::SeqCst);
+        self.shared
+            .flags
+            .tx_level_pct
+            .store(pct.clamp(5, 100), Ordering::SeqCst);
     }
 
     /// Sends a steady 1 kHz tone for five seconds, so the drive can be set by the radio's ALC
@@ -637,7 +664,11 @@ impl Engine {
     /// What the relay referee has done since start: (rounds, requests heard, grants given).
     pub fn referee_counts(&self) -> (u64, u64, u64) {
         let c = &self.shared.flags.ref_counts;
-        (c[0].load(Ordering::Relaxed), c[1].load(Ordering::Relaxed), c[2].load(Ordering::Relaxed))
+        (
+            c[0].load(Ordering::Relaxed),
+            c[1].load(Ordering::Relaxed),
+            c[2].load(Ordering::Relaxed),
+        )
     }
 
     /// How many "I am here" frames from operators this relay has heard since start.
@@ -663,7 +694,10 @@ impl Engine {
             return ("off", why.to_string());
         }
         if lock(&f.policy).test_table && f.bench_radio.load(Ordering::SeqCst) {
-            return ("bench", "Test table: bench radio only, nothing reaches an antenna.".to_string());
+            return (
+                "bench",
+                "Test table: bench radio only, nothing reaches an antenna.".to_string(),
+            );
         }
         ("real", String::new())
     }
@@ -676,7 +710,7 @@ impl Engine {
     /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
     /// The KAMI mode used for the most recent transmission, for example "KAMI-32" or "KAMI-1c".
-pub fn transmit_modulation(&self) -> &'static str {
+    pub fn transmit_modulation(&self) -> &'static str {
         let level = self.shared.flags.tx_level_shown.load(Ordering::SeqCst) as usize;
         mode_name(MODULATIONS.get(level).copied().unwrap_or(MODULATION))
     }
@@ -717,7 +751,7 @@ pub fn transmit_modulation(&self) -> &'static str {
         Ok(())
     }
 
-        pub fn set_weak_mode(&self, on: bool) {
+    pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
     }
 
@@ -749,7 +783,12 @@ pub fn transmit_modulation(&self) -> &'static str {
     /// the app quits.
     /// Turns this station into a relay on `channel_khz`, with one transmit slot that covers the
     /// next 24 hours. The operator must confirm the licence and the terms.
-    pub fn enable_relay(&self, channel_khz: f32, licence_held: bool, terms_accepted: bool) -> Result<(), String> {
+    pub fn enable_relay(
+        &self,
+        channel_khz: f32,
+        licence_held: bool,
+        terms_accepted: bool,
+    ) -> Result<(), String> {
         self.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[channel_khz])?;
         let now = now_unix_secs().max(0) as u64;
         self.accept_relay_schedule(vec![Slot {
@@ -758,7 +797,10 @@ pub fn transmit_modulation(&self) -> &'static str {
             duration_s: 24 * 3600,
             direction: relay::Direction::Transmit,
         }])?;
-        self.start_relay(RelayAck { licence_held, terms_accepted })
+        self.start_relay(RelayAck {
+            licence_held,
+            terms_accepted,
+        })
     }
 
     pub fn start_relay(&self, ack: RelayAck) -> Result<(), String> {
@@ -1030,7 +1072,10 @@ pub fn transmit_modulation(&self) -> &'static str {
         if let Some(why) = tx_refusal(&self.shared.flags) {
             return Err(why.into());
         }
-        if msgs.iter().any(|m| dest_of(m).trim().eq_ignore_ascii_case(&self.config.callsign)) {
+        if msgs
+            .iter()
+            .any(|m| dest_of(m).trim().eq_ignore_ascii_case(&self.config.callsign))
+        {
             return Err("That is your own callsign. Choose the station you want to reach.".into());
         }
         let ids: Vec<u64> = msgs
@@ -1086,7 +1131,9 @@ fn read_attachment(path: &Path) -> Result<(String, Vec<u8>), String> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .ok_or_else(|| format!("{} has no file name", path.display()))?;
-    let size = fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?.len() as usize;
+    let size = fs::metadata(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .len() as usize;
     if size > MAX_ATTACHMENT_BYTES {
         return Err(format!(
             "{name} is {} kB. Files over {} kB cannot be sent over the radio: it would take far too long.",
@@ -1191,7 +1238,10 @@ fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
         Some(addr) => Some(Box::new(RigctldClient::connect(addr)?)),
         None => None,
     };
-    let named_blackhole = |n: &Option<String>| n.as_deref().is_some_and(|n| n.to_lowercase().contains("blackhole"));
+    let named_blackhole = |n: &Option<String>| {
+        n.as_deref()
+            .is_some_and(|n| n.to_lowercase().contains("blackhole"))
+    };
     let bench = cfg.rigctld.is_none() && named_blackhole(&cfg.audio_in) && named_blackhole(&cfg.audio_out);
     Ok(Box::new(AudioBackend {
         input: Some(input),
@@ -1605,7 +1655,8 @@ fn mod_level(m: Modulation) -> usize {
 
 /// Samples of one frame in the given KAMI mode.
 fn frame_len_for(m: Modulation) -> usize {
-    m.kami_shape().map_or(0, |sh| kahf_core::kami::frame_len_shape(ldpc::N, sh))
+    m.kami_shape()
+        .map_or(0, |sh| kahf_core::kami::frame_len_shape(ldpc::N, sh))
 }
 
 /// One frame, sent with the given modulation. The frame carries the modulation id.
@@ -1623,7 +1674,8 @@ fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
 
 /// Audio samples of a burst of `n` frames in KAMI mode `m`, without the lead and tail silence.
 fn burst_len_for(m: Modulation, n: usize) -> usize {
-    m.kami_shape().map_or(0, |sh| kahf_core::kami::burst_len_shape(ldpc::N, n, sh))
+    m.kami_shape()
+        .map_or(0, |sh| kahf_core::kami::burst_len_shape(ldpc::N, n, sh))
 }
 
 /// Codewords one burst carries at most: the frame id byte keeps the count of codewords still to
@@ -1669,7 +1721,10 @@ fn burst(frames: &[Vec<u8>], m: Modulation) -> Result<Vec<f32>, String> {
         let mut cws = Vec::with_capacity(group.len());
         for (j, payload) in group.iter().enumerate() {
             if payload.len() > MAX_CHUNK {
-                return Err(format!("frame payload of {} bytes is over {MAX_CHUNK}", payload.len()));
+                return Err(format!(
+                    "frame payload of {} bytes is over {MAX_CHUNK}",
+                    payload.len()
+                ));
             }
             let id = mod_id(m) | (((group.len() - 1 - j) as u8) << 5);
             cws.push(ldpc::encode(&frame::build_payload_as(payload, id)));
@@ -1924,7 +1979,9 @@ fn band_name(mhz: f64) -> String {
 
 /// A small stable hash, for repeatable test randomness.
 fn fnv(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 fn now_unix_secs() -> i64 {
@@ -2295,7 +2352,14 @@ impl Worker {
             last_activity: clock.now(),
             forwarded: VecDeque::new(),
             rx_deaf_until: None,
-            mac: Mac::new(if clock.is_virtual() { fnv(&config.callsign) } else { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) }),
+            mac: Mac::new(if clock.is_virtual() {
+                fnv(&config.callsign)
+            } else {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1)
+            }),
             rx_locked: false,
             harq: Default::default(),
             adverts_seen: VecDeque::new(),
@@ -2362,7 +2426,8 @@ impl Worker {
             if !self.rx_provisional() && !self.bursts.is_empty() {
                 let samples = self.bursts.pop_front().unwrap_or_default();
                 let ms = self.now_ms();
-                self.mac.on_tx_start(ms, ms + (samples.len() as u64 * 1000 / RATE as u64));
+                self.mac
+                    .on_tx_start(ms, ms + (samples.len() as u64 * 1000 / RATE as u64));
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2400,7 +2465,9 @@ impl Worker {
             Cmd::Advertise => self.advertise_now(),
             Cmd::Tone => {
                 let pct = self.shared.flags.tx_level_pct.load(Ordering::SeqCst);
-                self.log(format!("Sending a test tone at {pct} percent for {TONE_SECONDS} s."));
+                self.log(format!(
+                    "Sending a test tone at {pct} percent for {TONE_SECONDS} s."
+                ));
                 self.bursts.push_back(tone_samples(pct));
             }
             Cmd::Disconnect => {
@@ -2430,7 +2497,9 @@ impl Worker {
         let backend = (self.factory)().map_err(|e| format!("cannot open radio: {e}"))?;
         let flags = &self.shared.flags;
         flags.bench_radio.store(backend.is_bench(), Ordering::SeqCst);
-        flags.radio_dial_hz.store(backend.dial_hz().unwrap_or(0), Ordering::SeqCst);
+        flags
+            .radio_dial_hz
+            .store(backend.dial_hz().unwrap_or(0), Ordering::SeqCst);
         flags.radio_known.store(true, Ordering::SeqCst);
         let test = lock(&flags.policy).test_table;
         self.backend = Some(backend);
@@ -2443,7 +2512,10 @@ impl Worker {
 
     fn connect(&mut self, peer: &str) -> Result<(), String> {
         self.ensure_radio()?;
-        self.link.set_air_ms((burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
+        self.link.set_air_ms(
+            (burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64
+                * self.slow() as u64,
+        );
         let actions = guard("link connect", || self.link.connect(peer))?;
         self.log(format!("calling {peer}"));
         self.apply(actions);
@@ -2531,7 +2603,10 @@ impl Worker {
     /// The station the link must be connected to for outbox item `id`: its relay when it has
     /// been routed through one, else the message's own destination.
     fn route_peer(&self, id: u64, msg: &Message) -> String {
-        self.via.get(&id).cloned().unwrap_or_else(|| dest_of(msg).to_string())
+        self.via
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| dest_of(msg).to_string())
     }
 
     /// Same for an item known only by its queue entry.
@@ -2542,7 +2617,10 @@ impl Worker {
                 return Some(relay);
             }
         }
-        self.via.get(&id).cloned().or_else(|| self.queued.get(&id).map(|(d, _)| d.clone()))
+        self.via
+            .get(&id)
+            .cloned()
+            .or_else(|| self.queued.get(&id).map(|(d, _)| d.clone()))
     }
 
     /// The next relay hint not yet tried for this item, other than ourselves and the destination.
@@ -2599,7 +2677,10 @@ impl Worker {
             LinkState::Connecting { peer } if self.auto_initiated => {
                 // The route changed (a relay was chosen) while we were calling the old peer: stop.
                 let now = self.now_ms();
-                let want = self.outbox.next_matching(now, |_, i| !is_dg_item(i)).and_then(|(id, _)| self.route_peer_of(id));
+                let want = self
+                    .outbox
+                    .next_matching(now, |_, i| !is_dg_item(i))
+                    .and_then(|(id, _)| self.route_peer_of(id));
                 if want.is_some_and(|w| !w.eq_ignore_ascii_case(&peer)) {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
@@ -2607,14 +2688,12 @@ impl Worker {
                 }
             }
             LinkState::Connected { peer } if self.auto_initiated => {
-                let waiting = self
-                    .outbox
-                    .pending()
-                    .iter()
-                    .any(|(id, _, _)| {
-                        self.outbox.get(*id).is_some_and(|i| !is_dg_item(i))
-                            && self.route_peer_of(*id).is_some_and(|p| p.eq_ignore_ascii_case(&peer))
-                    });
+                let waiting = self.outbox.pending().iter().any(|(id, _, _)| {
+                    self.outbox.get(*id).is_some_and(|i| !is_dg_item(i))
+                        && self
+                            .route_peer_of(*id)
+                            .is_some_and(|p| p.eq_ignore_ascii_case(&peer))
+                });
                 if !waiting && self.clock.since(self.last_activity) >= AUTO_HANGUP {
                     if let Err(e) = self.disconnect() {
                         self.log(e);
@@ -2629,8 +2708,13 @@ impl Worker {
     /// its outbox for that station, once, so the next hop is delivered by the normal send path.
     fn forward_third_party(&mut self, msg: &Message, private: bool) {
         let flags = &self.shared.flags;
-        let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station);
-        if !(is_relay && flags.relay_running.load(Ordering::SeqCst) && flags.third_party_relay.load(Ordering::SeqCst)) {
+        let is_relay = lock(&self.shared.relay)
+            .as_ref()
+            .is_some_and(|r| r.role != Role::Station);
+        if !(is_relay
+            && flags.relay_running.load(Ordering::SeqCst)
+            && flags.third_party_relay.load(Ordering::SeqCst))
+        {
             return;
         }
         // Files go direct. A relay holds no files for others: they are too big for its air time.
@@ -2655,14 +2739,21 @@ impl Worker {
         // A station this relay hears itself is reached directly, not through the server.
         if self.bb.is_some() || lock(&self.shared.backbone_server).is_some() {
             if self.heard_lately(dest_of(msg)) {
-                self.log(format!("{} is heard here: the message is delivered directly.", dest_of(msg)));
+                self.log(format!(
+                    "{} is heard here: the message is delivered directly.",
+                    dest_of(msg)
+                ));
             } else {
                 self.bb_submit(msg);
                 return;
             }
         }
         let id = self.next_id();
-        self.log(format!("Forwarding a message from {} to {}.", sender_of(msg), dest_of(msg)));
+        self.log(format!(
+            "Forwarding a message from {} to {}.",
+            sender_of(msg),
+            dest_of(msg)
+        ));
         self.enqueue(vec![msg.clone()], vec![id], private);
     }
 
@@ -2670,9 +2761,13 @@ impl Worker {
         if call == self.callsign {
             return;
         }
-        self.heard_recent.insert(call.to_uppercase(), (snr.map(|s| s.round() as i32), self.clock.now()));
+        self.heard_recent.insert(
+            call.to_uppercase(),
+            (snr.map(|s| s.round() as i32), self.clock.now()),
+        );
         if self.heard_recent.len() > 500 {
-            self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
+            self.heard_recent
+                .retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
         }
     }
 
@@ -2691,7 +2786,9 @@ impl Worker {
         };
         match (want, self.bb.is_some()) {
             (Some(server), false) => {
-                let Some(key) = self.shared.station_key.clone() else { return };
+                let Some(key) = self.shared.station_key.clone() else {
+                    return;
+                };
                 self.bb = Some(BbHandle::spawn(Backbone::new(&server, &self.callsign, key)));
                 self.log(format!("Relay connected to the network through {server}."));
             }
@@ -2713,7 +2810,12 @@ impl Worker {
         };
         let limit = if kind == "chat" { 1024 } else { 4096 };
         if body.is_empty() || body.len() > limit {
-            self.log(format!("Message from {} to {} is too large for the network ({} bytes).", sender_of(msg), dest_of(msg), body.len()));
+            self.log(format!(
+                "Message from {} to {} is too large for the network ({} bytes).",
+                sender_of(msg),
+                dest_of(msg),
+                body.len()
+            ));
             return;
         }
         let now = now_unix_secs().max(0) as u64;
@@ -2728,12 +2830,19 @@ impl Worker {
             body,
             urgent: priority_of(msg) == Priority::Urgent,
         };
-        self.log(format!("Passing the message from {} to {} on to the network.", q.origin, q.dest));
+        self.log(format!(
+            "Passing the message from {} to {} on to the network.",
+            q.origin, q.dest
+        ));
         self.bb_sent.insert(q.id.clone(), q.dest.clone());
         if self.bb_sent.len() > 512 {
             self.bb_sent.clear();
         }
-        bb.send(BbJob::Submit(q, now, if kind == "chat" { 6 * 3600 } else { 24 * 3600 }));
+        bb.send(BbJob::Submit(
+            q,
+            now,
+            if kind == "chat" { 6 * 3600 } else { 24 * 3600 },
+        ));
     }
 
     /// A plan the server pushed: used only when its signature checks against the project key.
@@ -2754,20 +2863,43 @@ impl Worker {
     /// The mesh found no relay that hears the destination: this relay sends the message on the radio itself.
     fn bb_unrouted(&mut self, q: Queued) {
         let msg = if q.kind == "mail" {
-            Message::Mail { from: q.origin.clone(), to: q.dest.clone(), subject: q.subject.clone(), body: String::from_utf8_lossy(&q.body).into_owned(), attachments: Vec::new() }
+            Message::Mail {
+                from: q.origin.clone(),
+                to: q.dest.clone(),
+                subject: q.subject.clone(),
+                body: String::from_utf8_lossy(&q.body).into_owned(),
+                attachments: Vec::new(),
+            }
         } else {
-            Message::Chat { from: q.origin.clone(), to: q.dest.clone(), text: String::from_utf8_lossy(&q.body).into_owned() }
+            Message::Chat {
+                from: q.origin.clone(),
+                to: q.dest.clone(),
+                text: String::from_utf8_lossy(&q.body).into_owned(),
+            }
         };
         let id = self.next_id();
-        self.log(format!("No relay hears {} yet: sending the message on the radio.", q.dest));
+        self.log(format!(
+            "No relay hears {} yet: sending the message on the radio.",
+            q.dest
+        ));
         self.enqueue(vec![msg], vec![id], false);
     }
 
     /// An outbox item that came from the server is finished: tell the server how it went.
     fn bb_item_done(&mut self, oid: u64, delivered: bool) {
-        let Some(sid) = self.bb_pending.remove(&oid) else { return };
+        let Some(sid) = self.bb_pending.remove(&oid) else {
+            return;
+        };
         if let Some(bb) = &self.bb {
-            bb.send(BbJob::Receipt(sid, delivered, if delivered { String::new() } else { "no answer".into() }));
+            bb.send(BbJob::Receipt(
+                sid,
+                delivered,
+                if delivered {
+                    String::new()
+                } else {
+                    "no answer".into()
+                },
+            ));
         }
     }
 
@@ -2802,12 +2934,19 @@ impl Worker {
             return;
         }
         self.bb_last = self.clock.now();
-        self.heard_recent.retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
+        self.heard_recent
+            .retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
         let now = now_unix_secs().max(0) as u64;
         let list: Vec<(String, Option<i32>, u64)> = self
             .heard_recent
             .iter()
-            .map(|(c, (snr, t))| (c.clone(), *snr, now.saturating_sub(self.clock.since(*t).as_secs())))
+            .map(|(c, (snr, t))| {
+                (
+                    c.clone(),
+                    *snr,
+                    now.saturating_sub(self.clock.since(*t).as_secs()),
+                )
+            })
             .collect();
         if let Some(bb) = &self.bb {
             let (items, bytes) = (self.outbox.pending().len(), self.outbox.pending().len() * 64);
@@ -2850,10 +2989,17 @@ impl Worker {
                 attachments: Vec::new(),
             }
         } else {
-            Message::Chat { from: m.origin.clone(), to: m.dest.clone(), text: String::from_utf8_lossy(&m.body).into_owned() }
+            Message::Chat {
+                from: m.origin.clone(),
+                to: m.dest.clone(),
+                text: String::from_utf8_lossy(&m.body).into_owned(),
+            }
         };
         let id = self.next_id();
-        self.log(format!("Delivering a message from {} to {} that came through the network.", m.origin, m.dest));
+        self.log(format!(
+            "Delivering a message from {} to {} that came through the network.",
+            m.origin, m.dest
+        ));
         let oids = self.enqueue(vec![msg], vec![id], false);
         if let Some(oid) = oids.first() {
             self.bb_pending.insert(*oid, m.id);
@@ -2862,7 +3008,10 @@ impl Worker {
 
     /// The server says what became of a message one of our stations sent: tell that station.
     fn bb_receipt_notice(&mut self, r: backbone::Receipt) {
-        let origin = r.id.rsplit_once('-').map(|(o, _)| o.to_string()).unwrap_or_default();
+        let origin =
+            r.id.rsplit_once('-')
+                .map(|(o, _)| o.to_string())
+                .unwrap_or_default();
         if origin.is_empty() {
             return;
         }
@@ -2870,10 +3019,25 @@ impl Worker {
         let text = if r.status == "delivered" {
             format!("Delivered to {dest}.")
         } else {
-            format!("Could not deliver to {dest}: {}.", if r.reason.is_empty() { "no reason given" } else { &r.reason })
+            format!(
+                "Could not deliver to {dest}: {}.",
+                if r.reason.is_empty() {
+                    "no reason given"
+                } else {
+                    &r.reason
+                }
+            )
         };
         let id = self.next_id();
-        self.enqueue(vec![Message::Chat { from: self.callsign.clone(), to: origin, text }], vec![id], false);
+        self.enqueue(
+            vec![Message::Chat {
+                from: self.callsign.clone(),
+                to: origin,
+                text,
+            }],
+            vec![id],
+            false,
+        );
     }
 
     /// Plan 4: a station with a relay role sends only inside one of its transmit slots.
@@ -2956,7 +3120,9 @@ impl Worker {
         let now = self.now_ms();
         let (id, item) = self.outbox.next(now)?;
         match decode_item(&item.payload) {
-            Some((msg, private)) if self.route_peer(id, &msg).eq_ignore_ascii_case(&peer) => Some((id, msg, private)),
+            Some((msg, private)) if self.route_peer(id, &msg).eq_ignore_ascii_case(&peer) => {
+                Some((id, msg, private))
+            }
             Some(_) => None,
             None => {
                 self.outbox.cancel(id);
@@ -3048,7 +3214,10 @@ impl Worker {
         if self.lanes.as_ref().map(|w| w.dial_hz) != dial {
             self.lanes = dial.and_then(|d| LaneWatch::new(&lock(&self.shared.flags.policy).table, d));
             // On a lane dial our lane sits at 1500 Hz of audio.
-            self.lane_rx = self.lanes.as_ref().map(|_| narrow::LaneRx::new(laneplan::AUDIO_CENTRE_HZ as f64));
+            self.lane_rx = self
+                .lanes
+                .as_ref()
+                .map(|_| narrow::LaneRx::new(laneplan::AUDIO_CENTRE_HZ as f64));
             // On a calling lane the other calling lane is heard too, if its audio is in range.
             self.second = dial.and_then(|d| {
                 let table = lock(&self.shared.flags.policy);
@@ -3057,7 +3226,9 @@ impl Worker {
                 (own.role == laneplan::Role::Calling).then_some(())?;
                 let other = band.lanes_with(laneplan::Role::Calling).find(|l| l.k != own.k)?;
                 let audio = other.centre_hz as f64 - d as f64;
-                (300.0..=RATE as f64 / 2.0 - 300.0).contains(&audio).then(|| RxLane::new(audio, other.k))
+                (300.0..=RATE as f64 / 2.0 - 300.0)
+                    .contains(&audio)
+                    .then(|| RxLane::new(audio, other.k))
             });
             self.reset_kami();
         }
@@ -3072,7 +3243,11 @@ impl Worker {
                 // KAHF's own regular bursts look like a periodic narrow signal: a lane where a
                 // KAHF frame was decoded lately is not kept out of.
                 // Its neighbours hear the leakage of that burst, so they are skipped too.
-                let kahf_near = (k.saturating_sub(1)..=k + 1).any(|j| self.kahf_seen.get(&j).is_some_and(|t| now_ms.saturating_sub(*t) < 90_000));
+                let kahf_near = (k.saturating_sub(1)..=k + 1).any(|j| {
+                    self.kahf_seen
+                        .get(&j)
+                        .is_some_and(|t| now_ms.saturating_sub(*t) < 90_000)
+                });
                 if kahf_near {
                     continue;
                 }
@@ -3085,14 +3260,16 @@ impl Worker {
         }
         if now_ms >= self.occupancy_due_ms {
             self.occupancy_due_ms = now_ms + OCCUPANCY_PERIOD_MS;
-            let lanes = w
-                .ks
-                .iter()
-                .enumerate()
-                .map(|(i, k)| (*k, w.sense.over_db(i).map_or(0, |o| o.round() as i16)))
-                .collect();
+            let lanes =
+                w.ks.iter()
+                    .enumerate()
+                    .map(|(i, k)| (*k, w.sense.over_db(i).map_or(0, |o| o.round() as i16)))
+                    .collect();
             let mut q = lock(&self.shared.flags.occupancy);
-            q.push_back(OccupancyReport { at_unix: now_unix_secs(), lanes });
+            q.push_back(OccupancyReport {
+                at_unix: now_unix_secs(),
+                lanes,
+            });
             while q.len() > OCCUPANCY_KEEP {
                 q.pop_front();
             }
@@ -3111,7 +3288,10 @@ impl Worker {
             return Some(Err("Listening to the lane before sending.".to_string()));
         }
         if self.quarantine.blocked(k as usize, now_s) {
-            return Some(Err(format!("Lane {} is in quarantine: someone else was using it.", k + 1)));
+            return Some(Err(format!(
+                "Lane {} is in quarantine: someone else was using it.",
+                k + 1
+            )));
         }
         let (lo, hi) = (w.own.saturating_sub(1), (w.own + 1).min(w.ks.len() - 1));
         for j in lo..=hi {
@@ -3122,7 +3302,10 @@ impl Worker {
                 continue;
             }
             if let Some(over) = w.sense.over_db(j) {
-                return Some(Err(format!("Lane {} is busy ({over:.0} dB over its noise floor).", w.ks[j] + 1)));
+                return Some(Err(format!(
+                    "Lane {} is busy ({over:.0} dB over its noise floor).",
+                    w.ks[j] + 1
+                )));
             }
         }
         Some(Ok(()))
@@ -3205,7 +3388,10 @@ impl Worker {
         let seed = if self.clock.is_virtual() {
             fnv(&self.callsign)
         } else {
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
         } ^ id.unwrap_or(0);
         let pool = if urgent {
             select::Pool::Emergency
@@ -3339,7 +3525,10 @@ impl Worker {
                 Ok(actions) => waiting.extend(actions),
                 Err(e) => return self.fail_item(id, e),
             }
-            let frames = waiting.iter().filter(|a| matches!(a, Action::Transmit(_))).count();
+            let frames = waiting
+                .iter()
+                .filter(|a| matches!(a, Action::Transmit(_)))
+                .count();
             if frames >= BURST_MAX || i + 1 == chunks.len() {
                 self.apply_link(std::mem::take(&mut waiting), true);
             }
@@ -3372,7 +3561,11 @@ impl Worker {
         } else {
             self.log(format!("send failed, will retry: {why}"));
             if let Some(id) = self.tags.get(&id).map(|t| t.0) {
-                self.emit(Event::Delivery { id, state: Delivery::Waiting, note: why });
+                self.emit(Event::Delivery {
+                    id,
+                    state: Delivery::Waiting,
+                    note: why,
+                });
             }
         }
         self.persist_outbox();
@@ -3410,7 +3603,9 @@ impl Worker {
             (LinkState::Connecting { peer }, LinkState::Idle) => {
                 let key = peer.to_uppercase();
                 let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
-                let pause = AUTO_RETRY_BASE.saturating_mul(1 << (fails - 1).min(5)).min(Duration::from_secs(2400));
+                let pause = AUTO_RETRY_BASE
+                    .saturating_mul(1 << (fails - 1).min(5))
+                    .min(Duration::from_secs(2400));
                 self.auto_fails.insert(key, (fails, self.clock.now() + pause));
             }
             (_, LinkState::Connected { peer }) => {
@@ -3506,7 +3701,9 @@ impl Worker {
     fn rx_provisional(&self) -> bool {
         self.kami_at.is_some()
             && self.kami_mode.is_none()
-            && self.kami_seen.is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD * self.slow())
+            && self
+                .kami_seen
+                .is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD * self.slow())
     }
 
     fn tick_link(&mut self) {
@@ -3555,12 +3752,23 @@ impl Worker {
         }
         // Time-based, so a restart does not reuse a number neighbours still remember.
         let by_time = (self.now_ms() / 1000) as u8;
-        self.advert_seq = if by_time == self.advert_seq { by_time.wrapping_add(1) } else { by_time };
+        self.advert_seq = if by_time == self.advert_seq {
+            by_time.wrapping_add(1)
+        } else {
+            by_time
+        };
         let relay = self.shared.flags.relay_running.load(Ordering::SeqCst);
         let flags = if relay { ADVERT_RELAY } else { 0 };
-        self.adverts_seen.push_back((self.callsign.clone(), self.advert_seq));
+        self.adverts_seen
+            .push_back((self.callsign.clone(), self.advert_seq));
         let loc = *lock(&self.shared.location);
-        self.control.push_back(vec![encode_advert(&self.callsign, ADVERT_TTL, self.advert_seq, flags, loc)]);
+        self.control.push_back(vec![encode_advert(
+            &self.callsign,
+            ADVERT_TTL,
+            self.advert_seq,
+            flags,
+            loc,
+        )]);
         self.log("Announcing this station on the air.");
     }
 
@@ -3574,12 +3782,25 @@ impl Worker {
         if self.adverts_seen.len() > 256 {
             self.adverts_seen.pop_front();
         }
-        self.emit(Event::Advert { call: call.clone(), hops: ADVERT_TTL.saturating_sub(ttl), relay: flags & ADVERT_RELAY != 0, loc });
-        let is_relay = lock(&self.shared.relay).as_ref().is_some_and(|r| r.role != Role::Station)
+        self.emit(Event::Advert {
+            call: call.clone(),
+            hops: ADVERT_TTL.saturating_sub(ttl),
+            relay: flags & ADVERT_RELAY != 0,
+            loc,
+        });
+        let is_relay = lock(&self.shared.relay)
+            .as_ref()
+            .is_some_and(|r| r.role != Role::Station)
             && self.shared.flags.relay_running.load(Ordering::SeqCst);
         if is_relay && ttl > 0 && tx_refusal(&self.shared.flags).is_none() {
             self.log(format!("Passing on the announcement of {call}."));
-            self.control.push_back(vec![encode_advert(&call, ttl - 1, seq, flags & !ADVERT_LOCATION, loc)]);
+            self.control.push_back(vec![encode_advert(
+                &call,
+                ttl - 1,
+                seq,
+                flags & !ADVERT_LOCATION,
+                loc,
+            )]);
         }
     }
 
@@ -3592,11 +3813,27 @@ impl Worker {
             match action {
                 Action::Transmit(payload) => frames.push(payload),
                 Action::Deliver(chunk) => self.deliver(chunk),
-                Action::Beacon { call, flags, time_s, load } => {
+                Action::Beacon {
+                    call,
+                    flags,
+                    time_s,
+                    load,
+                } => {
                     self.note_heard_recent(&call, None);
-                    self.emit(Event::Relay { call, online: flags & BEACON_ONLINE != 0, time_s, load });
+                    self.emit(Event::Relay {
+                        call,
+                        online: flags & BEACON_ONLINE != 0,
+                        time_s,
+                        load,
+                    });
                 }
-                Action::Advert { call, ttl, seq, flags, loc } => self.on_advert(call, ttl, seq, flags, loc),
+                Action::Advert {
+                    call,
+                    ttl,
+                    seq,
+                    flags,
+                    loc,
+                } => self.on_advert(call, ttl, seq, flags, loc),
                 Action::StateChanged(state) => {
                     self.on_link_state(&state);
                     self.emit(Event::Link(state));
@@ -3632,7 +3869,8 @@ impl Worker {
     fn pick_level(&mut self) {
         let flags = &self.shared.flags;
         if !flags.auto_mode.load(Ordering::SeqCst) {
-            self.tx_level = (flags.fixed_level.load(Ordering::SeqCst) as usize).min(MODULATIONS.len() - 1) as u8;
+            self.tx_level =
+                (flags.fixed_level.load(Ordering::SeqCst) as usize).min(MODULATIONS.len() - 1) as u8;
             return;
         }
         let cur = self.tx_level as usize;
@@ -3658,7 +3896,11 @@ impl Worker {
         // channel changes during one (fading), so a burst that long often fails where a shorter
         // one gets through (measured: crates/kahf-sim hf_sweep). While the signal is not weak,
         // never fall below KAMI-16, whatever the losses; the lower rungs are for weak signals.
-        if self.link.peer_snr_db().is_some_and(|snr| snr >= HF_SLOW_FLOOR_SNR_DB) {
+        if self
+            .link
+            .peer_snr_db()
+            .is_some_and(|snr| snr >= HF_SLOW_FLOOR_SNR_DB)
+        {
             next = next.max(HF_MIN_LEVEL);
         }
         self.tx_level = next as u8;
@@ -3668,7 +3910,8 @@ impl Worker {
     fn emit_status(&self) {
         let m = self.link.metrics();
         let mode = MODULATIONS[self.tx_level as usize];
-        let net_bps = (8.0 * 324.0 * RATE as f64 / (burst_len_for(mode, 8).max(1) as f64 * self.slow() as f64)) as u32;
+        let net_bps =
+            (8.0 * 324.0 * RATE as f64 / (burst_len_for(mode, 8).max(1) as f64 * self.slow() as f64)) as u32;
         self.emit(Event::Metrics(LinkStatus {
             mode: mode_name(mode),
             auto: self.shared.flags.auto_mode.load(Ordering::SeqCst),
@@ -3694,8 +3937,13 @@ impl Worker {
         self.pick_level();
         let m = mode.unwrap_or(MODULATIONS[self.tx_level as usize]);
         // Weak mode: the most robust KAMI mode, for stations that cannot answer.
-        let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) { Modulation::Kami256 } else { m };
-        self.link.set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
+        let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
+            Modulation::Kami256
+        } else {
+            m
+        };
+        self.link
+            .set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
         self.shared
             .flags
             .tx_level_shown
@@ -3710,7 +3958,10 @@ impl Worker {
                     // Lane mode: the plain modem's audio, slowed to a 480 Hz signal on our lane.
                     // The silences at the ends stay short.
                     let end = samples.len().saturating_sub(TAIL_SILENCE).max(LEAD_SILENCE);
-                    let lane = narrow::to_lane(&samples[LEAD_SILENCE.min(end)..end], laneplan::AUDIO_CENTRE_HZ as f64);
+                    let lane = narrow::to_lane(
+                        &samples[LEAD_SILENCE.min(end)..end],
+                        laneplan::AUDIO_CENTRE_HZ as f64,
+                    );
                     samples = [vec![0f32; LEAD_SILENCE], lane, vec![0f32; TAIL_SILENCE]].concat();
                 }
                 let gain = self.shared.flags.tx_level_pct.load(Ordering::SeqCst) as f32 / 100.0;
@@ -3787,7 +4038,11 @@ impl Worker {
                 self.end_rx_gap();
                 let now = self.now_ms();
                 self.mac.on_tx_end(now);
-                let link_now = self.clock.since(self.started).saturating_sub(self.tick_paused).as_millis() as u64;
+                let link_now = self
+                    .clock
+                    .since(self.started)
+                    .saturating_sub(self.tick_paused)
+                    .as_millis() as u64;
                 self.link.tx_finished(link_now);
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
@@ -4028,7 +4283,8 @@ impl Worker {
             if n <= self.kami_next {
                 continue;
             }
-            let Some(rx) = kahf_core::kami::demodulate_burst_rx(&self.rx_buf[start..], 0, hz, tau, ldpc::N, n, sh)
+            let Some(rx) =
+                kahf_core::kami::demodulate_burst_rx(&self.rx_buf[start..], 0, hz, tau, ldpc::N, n, sh)
             else {
                 continue;
             };
@@ -4038,7 +4294,9 @@ impl Worker {
                 let (tag, now_ms) = (mod_id(m), self.now_ms());
                 let decoded = self
                     .harq
-                    .try_decode(j, tag, &llr, now_ms, |info| frame::parse_payload_id(info).is_some_and(|(_, id)| id & ID_MODE_MASK == tag))
+                    .try_decode(j, tag, &llr, now_ms, |info| {
+                        frame::parse_payload_id(info).is_some_and(|(_, id)| id & ID_MODE_MASK == tag)
+                    })
                     .and_then(|d| frame::parse_payload_id(&d.info));
                 let Some((data, id)) = decoded else { break };
                 if id & ID_MODE_MASK != mod_id(m) {
@@ -4109,7 +4367,11 @@ impl Worker {
 
     fn on_frame(&mut self, payload: Vec<u8>) {
         self.last_activity = self.clock.now();
-        let lane_k = if self.on_second { self.second_k } else { self.lanes.as_ref().map(|w| w.ks[w.own]) };
+        let lane_k = if self.on_second {
+            self.second_k
+        } else {
+            self.lanes.as_ref().map(|w| w.ks[w.own])
+        };
         if let Some(k) = lane_k {
             let now = self.now_ms();
             self.kahf_seen.insert(k, now);
@@ -4131,7 +4393,10 @@ impl Worker {
         }
         for call in self.link.take_heard() {
             self.note_heard_recent(&call, self.link.own_snr_db());
-            self.emit(Event::Heard { call, snr_db: self.link.own_snr_db() });
+            self.emit(Event::Heard {
+                call,
+                snr_db: self.link.own_snr_db(),
+            });
         }
     }
 
@@ -4389,7 +4654,9 @@ mod tests {
 
     /// `calls.len()` engines on one bus, all listening, with automatic linking on.
     fn bus_engines(tag: &str, calls: &[&str]) -> Vec<Engine> {
-        let bus = Arc::new(Bus { line: Mutex::new(Vec::new()) });
+        let bus = Arc::new(Bus {
+            line: Mutex::new(Vec::new()),
+        });
         let clock = Clock::virtual_time();
         clock.join_thread();
         calls
@@ -4398,8 +4665,21 @@ mod tests {
                 let b = bus.clone();
                 let c = clock.clone();
                 let start = clock.now();
-                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { bus: b.clone(), clock: c.clone(), start, delivered: 0, tx_base: 0 }) as Box<dyn Backend>));
-                let mut e = Engine::spawn_with_clock(config(call, temp_dir(&format!("{tag}-{call}"))), factory, clock.clone()).unwrap();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(BusRadio {
+                        bus: b.clone(),
+                        clock: c.clone(),
+                        start,
+                        delivered: 0,
+                        tx_base: 0,
+                    }) as Box<dyn Backend>)
+                });
+                let mut e = Engine::spawn_with_clock(
+                    config(call, temp_dir(&format!("{tag}-{call}"))),
+                    factory,
+                    clock.clone(),
+                )
+                .unwrap();
                 e.listen().unwrap();
                 e.set_auto_link(true);
                 e.set_fixed_mode("KAMI-1c").unwrap();
@@ -4410,7 +4690,11 @@ mod tests {
 
     /// Runs the engines until `done` says so or `secs` pass, collecting every chat received:
     /// `(receiver index, sender, text)`.
-    fn run_bus(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[(usize, String, String)]) -> bool) -> Vec<(usize, String, String)> {
+    fn run_bus(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[(usize, String, String)]) -> bool,
+    ) -> Vec<(usize, String, String)> {
         let mut got: Vec<(usize, String, String)> = Vec::new();
         let clock = engines[0].clock.clone();
         let t0 = clock.now();
@@ -4418,7 +4702,9 @@ mod tests {
         while clock.now() < deadline && !done(&got) {
             for (i, e) in engines.iter_mut().enumerate() {
                 for ev in e.poll_events() {
-                    if std::env::var_os("KAHF_TRACE").is_some() && !matches!(ev, Event::Spectrum(_) | Event::Metrics(_)) {
+                    if std::env::var_os("KAHF_TRACE").is_some()
+                        && !matches!(ev, Event::Spectrum(_) | Event::Metrics(_))
+                    {
                         eprintln!("[{:6.1}s] st{i}: {ev:?}", clock.since(t0).as_secs_f32());
                     }
                     if let Event::Message { from, text } = ev {
@@ -4447,7 +4733,12 @@ mod tests {
             e[1].send_message("AA1AAA", &format!("b{i}")).unwrap();
         }
         let got = run_bus(&mut e, 240, |g| g.len() >= 8);
-        let texts = |who: usize| got.iter().filter(|(i, _, _)| *i == who).map(|(_, f, t)| (f.clone(), t.clone())).collect::<Vec<_>>();
+        let texts = |who: usize| {
+            got.iter()
+                .filter(|(i, _, _)| *i == who)
+                .map(|(_, f, t)| (f.clone(), t.clone()))
+                .collect::<Vec<_>>()
+        };
         let want_b: Vec<(String, String)> = (0..4).map(|i| ("AA1AAA".to_string(), format!("a{i}"))).collect();
         let want_a: Vec<(String, String)> = (0..4).map(|i| ("BB1BBB".to_string(), format!("b{i}"))).collect();
         assert_eq!(texts(1), want_b, "what BB1BBB received");
@@ -4734,7 +5025,10 @@ mod tests {
         let end = Instant::now() + Duration::from_secs(10);
         let mut done = false;
         while !done && Instant::now() < end {
-            done = e.poll_events().iter().any(|ev| matches!(ev, Event::Tx { state: TxState::Done }));
+            done = e
+                .poll_events()
+                .iter()
+                .any(|ev| matches!(ev, Event::Tx { state: TxState::Done }));
             thread::sleep(Duration::from_millis(20));
         }
         assert!(done, "transmit did not finish");
@@ -4776,8 +5070,11 @@ mod tests {
     /// Finds and decodes one KAMI frame of any mode in `audio`: (end in samples, payload, mode).
     fn decode_any(audio: &[f32]) -> Option<(usize, Vec<u8>, Modulation)> {
         let (start, hz, tau) = kahf_core::kami::find_preamble(audio)?;
-        let fits: Vec<Modulation> =
-            KAMI_MODES.iter().copied().filter(|&m| start + frame_len_for(m) <= audio.len()).collect();
+        let fits: Vec<Modulation> = KAMI_MODES
+            .iter()
+            .copied()
+            .filter(|&m| start + frame_len_for(m) <= audio.len())
+            .collect();
         let shapes: Vec<kahf_core::kami::Shape> = fits.iter().filter_map(|m| m.kami_shape()).collect();
         kahf_core::kami::demodulate_at(&audio[start..], 0, hz, tau, ldpc::N, &shapes)
             .into_iter()
@@ -4813,10 +5110,21 @@ mod tests {
         for m in [Modulation::Kami8, Modulation::Kami1b] {
             let air = burst(&payloads, m).unwrap();
             assert_eq!(air.len(), LEAD_SILENCE + burst_len_for(m, 3) + TAIL_SILENCE);
-            assert!(burst_len_for(m, 3) < 3 * frame_len_for(m), "{m:?} shares the preamble");
+            assert!(
+                burst_len_for(m, 3) < 3 * frame_len_for(m),
+                "{m:?} shares the preamble"
+            );
             let (start, hz, tau) = kahf_core::kami::find_preamble(&air).expect("preamble");
-            let llrs = kahf_core::kami::demodulate_burst_at(&air, start, hz, tau, ldpc::N, 3, m.kami_shape().unwrap())
-                .expect("burst fits");
+            let llrs = kahf_core::kami::demodulate_burst_at(
+                &air,
+                start,
+                hz,
+                tau,
+                ldpc::N,
+                3,
+                m.kami_shape().unwrap(),
+            )
+            .expect("burst fits");
             let got: Vec<Vec<u8>> = llrs
                 .iter()
                 .map(|l| {
@@ -5053,7 +5361,10 @@ mod tests {
     impl NoisyRadio {
         fn gauss(&mut self) -> f32 {
             let mut u = || {
-                self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                self.state = self
+                    .state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
             };
             let (a, b) = (u(), u());
@@ -5089,7 +5400,9 @@ mod tests {
         let air = burst(&[b"ref".to_vec()], Modulation::Kami32).unwrap();
         let body = &air[LEAD_SILENCE..air.len() - TAIL_SILENCE];
         // The engine sends at its transmit level, below full scale.
-        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt() * DEFAULT_TX_LEVEL_PCT as f32 / 100.0;
+        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt()
+            * DEFAULT_TX_LEVEL_PCT as f32
+            / 100.0;
         rms * 10f32.powf(-snr_db / 20.0)
     }
 
@@ -5097,8 +5410,17 @@ mod tests {
         let clock = test_clock();
         let start = clock.now();
         Box::new(move || {
-            Ok(Box::new(NoisyRadio { inner: FakeRadio { rx: rx.clone(), tx: tx.clone(), clock: clock.clone(), start, delivered: 0 }, sigma, state: seed })
-                as Box<dyn Backend>)
+            Ok(Box::new(NoisyRadio {
+                inner: FakeRadio {
+                    rx: rx.clone(),
+                    tx: tx.clone(),
+                    clock: clock.clone(),
+                    start,
+                    delivered: 0,
+                },
+                sigma,
+                state: seed,
+            }) as Box<dyn Backend>)
         })
     }
 
@@ -5119,7 +5441,12 @@ mod tests {
         b.listen().unwrap();
         a.connect("BB1BBB").unwrap();
         assert!(
-            wait_for(&mut a, |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })), 120).is_some(),
+            wait_for(
+                &mut a,
+                |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+                120
+            )
+            .is_some(),
             "link did not come up"
         );
         (a, b)
@@ -5128,7 +5455,12 @@ mod tests {
     fn send_and_wait(a: &mut Engine, b: &mut Engine, text: &str) {
         a.send_message("BB1BBB", text).unwrap();
         assert!(
-            wait_for(b, |e| matches!(e, Event::Message { text: t, .. } if t == text), 120).is_some(),
+            wait_for(
+                b,
+                |e| matches!(e, Event::Message { text: t, .. } if t == text),
+                120
+            )
+            .is_some(),
             "{text:?} did not arrive at {}",
             a.transmit_modulation()
         );
@@ -5168,11 +5500,18 @@ mod tests {
             }
             if self.sigma > 0.0 {
                 for v in out.iter_mut().skip(from) {
-                    self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    self.state = self
+                        .state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     let a = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
-                    self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    self.state = self
+                        .state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     let b = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
-                    *v += self.sigma * ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32;
+                    *v +=
+                        self.sigma * ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32;
                 }
             }
             Ok(())
@@ -5193,20 +5532,38 @@ mod tests {
 
     /// Engines for `calls`, where `hears` lists (from, to): station `to` hears station `from`.
     fn mesh(tag: &str, calls: &[&str], hears: &[(usize, usize)], sigma: f32) -> Vec<Engine> {
-        let pipes: Vec<Pipe> = hears.iter().map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect();
+        let pipes: Vec<Pipe> = hears
+            .iter()
+            .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+            .collect();
         calls
             .iter()
             .enumerate()
             .map(|(i, call)| {
-                let rx: Vec<Pipe> =
-                    hears.iter().zip(&pipes).filter(|((_, to), _)| *to == i).map(|(_, p)| p.clone()).collect();
-                let tx: Vec<Pipe> =
-                    hears.iter().zip(&pipes).filter(|((from, _), _)| *from == i).map(|(_, p)| p.clone()).collect();
+                let rx: Vec<Pipe> = hears
+                    .iter()
+                    .zip(&pipes)
+                    .filter(|((_, to), _)| *to == i)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                let tx: Vec<Pipe> = hears
+                    .iter()
+                    .zip(&pipes)
+                    .filter(|((from, _), _)| *from == i)
+                    .map(|(_, p)| p.clone())
+                    .collect();
                 let clock = test_clock();
                 let start = clock.now();
                 let factory: Factory = Box::new(move || {
-                    Ok(Box::new(MeshRadio { rx: rx.clone(), tx: tx.clone(), sigma, state: 7 + i as u64, clock: clock.clone(), start, delivered: 0 })
-                        as Box<dyn Backend>)
+                    Ok(Box::new(MeshRadio {
+                        rx: rx.clone(),
+                        tx: tx.clone(),
+                        sigma,
+                        state: 7 + i as u64,
+                        clock: clock.clone(),
+                        start,
+                        delivered: 0,
+                    }) as Box<dyn Backend>)
                 });
                 vspawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap()
             })
@@ -5214,7 +5571,8 @@ mod tests {
     }
 
     fn make_relay(e: &Engine) {
-        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+            .unwrap();
         // A relay sends only in its scheduled transmit slots: give it one that covers the test.
         let now = now_unix_secs().max(0) as u64;
         e.accept_relay_schedule(vec![Slot {
@@ -5224,7 +5582,11 @@ mod tests {
             direction: relay::Direction::Transmit,
         }])
         .unwrap();
-        e.start_relay(RelayAck { licence_held: true, terms_accepted: true }).unwrap();
+        e.start_relay(RelayAck {
+            licence_held: true,
+            terms_accepted: true,
+        })
+        .unwrap();
     }
 
     #[test]
@@ -5235,12 +5597,19 @@ mod tests {
         a.set_auto_link(true);
         a.send_message("BB1BBB", "no connect needed").unwrap();
         assert!(
-            wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "no connect needed"), 120).is_some(),
+            wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text, .. } if text == "no connect needed"),
+                120
+            )
+            .is_some(),
             "the queued message was not sent by itself"
         );
         // A chat needs no connection: it went out as bundle frames and the link stayed idle.
         assert!(
-            !a.poll_events().iter().any(|e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. }))),
+            !a.poll_events()
+                .iter()
+                .any(|e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. }))),
             "a chat should not open a link"
         );
     }
@@ -5255,7 +5624,12 @@ mod tests {
             &[(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)],
             0.0,
         );
-        let (mut b, mut r2, mut r1, mut a) = (st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap());
+        let (mut b, mut r2, mut r1, mut a) = (
+            st.pop().unwrap(),
+            st.pop().unwrap(),
+            st.pop().unwrap(),
+            st.pop().unwrap(),
+        );
         make_relay(&r1);
         make_relay(&r2);
         r1.listen().unwrap();
@@ -5266,14 +5640,23 @@ mod tests {
         a.set_relay_timeout_ms(500);
         r1.set_relay_hints(&["RR2RRR".to_string()]);
         a.send_message("BB1BBB", "over two relays").unwrap();
-        let got = wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "over two relays"), 900);
+        let got = wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text, .. } if text == "over two relays"),
+            900,
+        );
         assert!(got.is_some(), "the message did not arrive over two relays");
     }
 
     #[test]
     fn a_message_reaches_a_station_that_only_a_relay_can_hear() {
         // A and B cannot hear each other; both hear the relay R.
-        let mut st = mesh("relay3", &["AA1AAA", "RR1RRR", "BB1BBB"], &[(0, 1), (1, 0), (1, 2), (2, 1)], 0.0);
+        let mut st = mesh(
+            "relay3",
+            &["AA1AAA", "RR1RRR", "BB1BBB"],
+            &[(0, 1), (1, 0), (1, 2), (2, 1)],
+            0.0,
+        );
         let (mut b, mut r, mut a) = (st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap());
         make_relay(&r);
         r.listen().unwrap();
@@ -5283,23 +5666,48 @@ mod tests {
         a.set_relay_timeout_ms(500);
         a.send_message("BB1BBB", "through the relay").unwrap();
         assert!(
-            wait_for(&mut b, |e| matches!(e, Event::Message { text, .. } if text == "through the relay"), 400).is_some(),
+            wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text, .. } if text == "through the relay"),
+                400
+            )
+            .is_some(),
             "the relayed message did not arrive"
         );
         // A heard the relay answer, not B: the message is "at the relay", not "delivered".
-        let told: Vec<Delivery> = a.poll_events().into_iter().filter_map(|e| if let Event::Delivery { state, .. } = e { Some(state) } else { None }).collect();
-        assert!(told.contains(&Delivery::AtRelay) && !told.contains(&Delivery::Delivered), "{told:?}");
+        let told: Vec<Delivery> = a
+            .poll_events()
+            .into_iter()
+            .filter_map(|e| {
+                if let Event::Delivery { state, .. } = e {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            told.contains(&Delivery::AtRelay) && !told.contains(&Delivery::Delivered),
+            "{told:?}"
+        );
         // The forward is counted when B has acknowledged it, a moment after B showed the message.
         let counted = |r: &Engine| r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64);
         assert!(wait_until(30, || counted(&r) == 1), "one forward counted");
         assert_eq!(counted(&r), 1);
         // Delivered once only.
         test_clock().sleep(Duration::from_secs(5));
-        let again = b.poll_events().into_iter().filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay")).count();
+        let again = b
+            .poll_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay"))
+            .count();
         assert_eq!(again, 0, "no second copy");
         // The relay only carried it: no file in its data folder may hold the text (MESH-SPEC 7).
         let hits = files_containing(&r.config.data_dir, b"through the relay");
-        assert!(hits.is_empty(), "the relay wrote the message body to disk: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "the relay wrote the message body to disk: {hits:?}"
+        );
         // Sanity: the same scan does find it where it belongs, the sender's own outbox/log or the receiver's.
         let _ = (&a, &b);
     }
@@ -5341,7 +5749,11 @@ mod tests {
         a.send_message("BB1BBB", "needle-in-the-outbox").unwrap();
         test_clock().sleep(Duration::from_millis(200));
         let hits = files_containing(&a.config.data_dir, b"needle-in-the-outbox");
-        assert!(!hits.is_empty(), "outbox files: {:?}", fs::read_dir(&a.config.data_dir).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
+        assert!(
+            !hits.is_empty(),
+            "outbox files: {:?}",
+            fs::read_dir(&a.config.data_dir).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
     }
 
     #[test]
@@ -5357,7 +5769,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(a.transmit_modulation(), "KAMI-1d", "a clean link should use the fastest mode");
+        assert_eq!(
+            a.transmit_modulation(),
+            "KAMI-1d",
+            "a clean link should use the fastest mode"
+        );
         let s = status.expect("a metrics event");
         assert!(s.auto && s.net_bps > 4000, "{s:?}");
         assert!(s.peer_snr_db.unwrap_or(0.0) > 30.0, "{s:?}");
@@ -5370,8 +5786,14 @@ mod tests {
             test_clock().sleep(Duration::from_millis(1500));
             send_and_wait(&mut a, &mut b, &format!("noisy {i}"));
         }
-        let robust = ["KAMI-256", "KAMI-128", "KAMI-64", "KAMI-32", "KAMI-16", "KAMI-8", "KAMI-4"];
-        assert!(robust.contains(&a.transmit_modulation()), "mode {}", a.transmit_modulation());
+        let robust = [
+            "KAMI-256", "KAMI-128", "KAMI-64", "KAMI-32", "KAMI-16", "KAMI-8", "KAMI-4",
+        ];
+        assert!(
+            robust.contains(&a.transmit_modulation()),
+            "mode {}",
+            a.transmit_modulation()
+        );
     }
 
     #[test]
@@ -5415,7 +5837,11 @@ mod tests {
             test_clock().sleep(Duration::from_millis(1500));
             let text = format!("step {i}");
             a.send_message("BB1BBB", &text).unwrap();
-            let got = wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if *t == text), 60);
+            let got = wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text: t, .. } if *t == text),
+                60,
+            );
             if got.is_none() {
                 for ev in b.poll_events() {
                     eprintln!("B EVENT: {ev:?}");
@@ -5521,8 +5947,12 @@ mod tests {
     fn gate_station(tag: &str, bench: bool) -> (Engine, Arc<AtomicU64>) {
         let keyed = Arc::new(AtomicU64::new(0));
         let k = keyed.clone();
-        let factory: Factory =
-            Box::new(move || Ok(Box::new(GateRadio { keyed: k.clone(), bench }) as Box<dyn Backend>));
+        let factory: Factory = Box::new(move || {
+            Ok(Box::new(GateRadio {
+                keyed: k.clone(),
+                bench,
+            }) as Box<dyn Backend>)
+        });
         let mut e = vspawn(config("AA1AAA", temp_dir(tag)), factory).unwrap();
         e.set_test_table(false);
         e.listen().unwrap();
@@ -5601,7 +6031,11 @@ mod tests {
         assert!(!fire(&real, &keyed_real), "the test table opened a real radio");
 
         let (bench, keyed_bench) = gate_station("gate-test-bench", true);
-        assert_eq!(bench.tx_gate().0, "off", "a bench radio still needs the test table");
+        assert_eq!(
+            bench.tx_gate().0,
+            "off",
+            "a bench radio still needs the test table"
+        );
         bench.set_test_table(true);
         assert_eq!(bench.tx_gate().0, "bench");
         assert!(fire(&bench, &keyed_bench));
@@ -5645,11 +6079,15 @@ mod tests {
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let noise: Vec<f32> = (0..700 * RATE as usize)
             .map(|_| {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((x >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.004
             })
             .collect();
-        let bus = Arc::new(Bus { line: Mutex::new(noise) });
+        let bus = Arc::new(Bus {
+            line: Mutex::new(noise),
+        });
         let clock = Clock::virtual_time();
         clock.join_thread();
         let engines = calls
@@ -5657,8 +6095,21 @@ mod tests {
             .map(|(call, dial_hz)| {
                 let (b, c) = (bus.clone(), clock.clone());
                 let start = clock.now();
-                let factory: Factory = Box::new(move || Ok(Box::new(BusRadio { bus: b.clone(), clock: c.clone(), start, delivered: 0, tx_base: 0 }) as Box<dyn Backend>));
-                let mut e = Engine::spawn_with_clock(config(call, temp_dir(&format!("{tag}-{call}"))), factory, clock.clone()).unwrap();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(BusRadio {
+                        bus: b.clone(),
+                        clock: c.clone(),
+                        start,
+                        delivered: 0,
+                        tx_base: 0,
+                    }) as Box<dyn Backend>)
+                });
+                let mut e = Engine::spawn_with_clock(
+                    config(call, temp_dir(&format!("{tag}-{call}"))),
+                    factory,
+                    clock.clone(),
+                )
+                .unwrap();
                 e.set_dial_hz(Some(*dial_hz));
                 e.listen().unwrap();
                 e.set_auto_link(true);
@@ -5680,19 +6131,32 @@ mod tests {
         let mut x = 0x2545_F491_4F6C_DD1Du64;
         let tones: Vec<(f64, f64)> = (0..40)
             .map(|i| {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                (centre_hz - 200.0 + 10.0 * i as f64, (x >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU)
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (
+                    centre_hz - 200.0 + 10.0 * i as f64,
+                    (x >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU,
+                )
             })
             .collect();
         for (n, v) in line[a..z].iter_mut().enumerate() {
             let t = (a + n) as f64 / RATE as f64;
-            *v += tones.iter().map(|(f, ph)| (std::f64::consts::TAU * f * t + ph).sin()).sum::<f64>() as f32 * 0.02;
+            *v += tones
+                .iter()
+                .map(|(f, ph)| (std::f64::consts::TAU * f * t + ph).sin())
+                .sum::<f64>() as f32
+                * 0.02;
         }
     }
 
     /// Runs the engines for `secs` virtual seconds. Returns when engine 0 started each burst
     /// (seconds from the start) and what was received.
-    fn run_lane(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[(usize, String, String)]) -> bool) -> (Vec<f32>, Vec<(usize, String, String)>) {
+    fn run_lane(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[(usize, String, String)]) -> bool,
+    ) -> (Vec<f32>, Vec<(usize, String, String)>) {
         let clock = engines[0].clock.clone();
         let t0 = clock.now();
         let (mut starts, mut got) = (Vec::new(), Vec::new());
@@ -5700,7 +6164,9 @@ mod tests {
             for (i, e) in engines.iter_mut().enumerate() {
                 for ev in e.poll_events() {
                     match ev {
-                        Event::Tx { state: TxState::Starting } if i == 0 => starts.push(clock.since(t0).as_secs_f32()),
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } if i == 0 => starts.push(clock.since(t0).as_secs_f32()),
                         Event::Message { from, text } => got.push((i, from, text)),
                         _ => {}
                     }
@@ -5735,7 +6201,10 @@ mod tests {
         assert_eq!(got.len(), 1, "the message never arrived after the lane cleared");
         // The clock started at the engine's spawn, the send call came after 30 s of sleep.
         let first = starts.first().copied().expect("no transmission");
-        assert!(first >= 70.0, "transmitted on a jammed lane: first burst at {first} s (jam ends at 100 s from the start)");
+        assert!(
+            first >= 70.0,
+            "transmitted on a jammed lane: first burst at {first} s (jam ends at 100 s from the start)"
+        );
     }
 
     #[test]
@@ -5747,7 +6216,10 @@ mod tests {
         let (starts, got) = run_lane(&mut e, 400, |g| !g.is_empty());
         assert_eq!(got.len(), 1);
         let first = starts.first().copied().expect("no transmission");
-        assert!(first >= 70.0, "transmitted beside a jammed neighbour lane: first burst at {first} s");
+        assert!(
+            first >= 70.0,
+            "transmitted beside a jammed neighbour lane: first burst at {first} s"
+        );
     }
 
     #[test]
@@ -5784,7 +6256,11 @@ mod tests {
 
     /// Runs the engines for `secs` virtual seconds and returns every chat received as
     /// `(receiver index, sender, text)` and when each engine started a burst, in seconds.
-    fn run_dg(engines: &mut [Engine], secs: u64, mut done: impl FnMut(&[Heard3]) -> bool) -> (Vec<Heard3>, Vec<Vec<f32>>) {
+    fn run_dg(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[Heard3]) -> bool,
+    ) -> (Vec<Heard3>, Vec<Vec<f32>>) {
         let clock = engines[0].clock.clone();
         let t0 = clock.now();
         let mut got = Vec::new();
@@ -5793,7 +6269,9 @@ mod tests {
             for (i, e) in engines.iter_mut().enumerate() {
                 for ev in e.poll_events() {
                     match ev {
-                        Event::Tx { state: TxState::Starting } => starts[i].push(clock.since(t0).as_secs_f32()),
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } => starts[i].push(clock.since(t0).as_secs_f32()),
                         Event::Message { from, text } => got.push((i, from, text)),
                         _ => {}
                     }
@@ -5811,18 +6289,41 @@ mod tests {
             e[0].send_message(call, &format!("for {i}")).unwrap();
         }
         let (got, starts) = run_dg(&mut e, 60, |_| false);
-        let mut texts: Vec<(usize, String)> = got.iter().map(|(i, f, t)| {
-            assert_eq!(f, "HH1HHH");
-            (*i, t.clone())
-        }).collect();
+        let mut texts: Vec<(usize, String)> = got
+            .iter()
+            .map(|(i, f, t)| {
+                assert_eq!(f, "HH1HHH");
+                (*i, t.clone())
+            })
+            .collect();
         texts.sort();
-        assert_eq!(texts, vec![(1, "for 0".to_string()), (2, "for 1".to_string()), (3, "for 2".to_string())], "{got:?}");
+        assert_eq!(
+            texts,
+            vec![
+                (1, "for 0".to_string()),
+                (2, "for 1".to_string()),
+                (3, "for 2".to_string())
+            ],
+            "{got:?}"
+        );
         // One burst from the hub carried all three. Each station answered once, A then B then C.
-        assert_eq!(starts[0].len(), 1, "the hub sent {} bursts: {:?}", starts[0].len(), starts[0]);
+        assert_eq!(
+            starts[0].len(),
+            1,
+            "the hub sent {} bursts: {:?}",
+            starts[0].len(),
+            starts[0]
+        );
         let first = |i: usize| starts[i][0];
-        assert!(first(1) < first(2) && first(2) < first(3), "answers out of order: {starts:?}");
+        assert!(
+            first(1) < first(2) && first(2) < first(3),
+            "answers out of order: {starts:?}"
+        );
         // Each answer waits for the one before it to finish.
-        assert!(first(2) - first(1) > 1.0 && first(3) - first(2) > 1.0, "answers overlap: {starts:?}");
+        assert!(
+            first(2) - first(1) > 1.0 && first(3) - first(2) > 1.0,
+            "answers overlap: {starts:?}"
+        );
     }
 
     #[test]
@@ -5832,18 +6333,28 @@ mod tests {
         for round in 0..3 {
             for (from, eng) in e.iter_mut().enumerate() {
                 let to = (from + 1) % 3;
-                eng.send_message(calls[to], &format!("{from}>{to} #{round}")).unwrap();
+                eng.send_message(calls[to], &format!("{from}>{to} #{round}"))
+                    .unwrap();
             }
         }
         let (got, _) = run_dg(&mut e, 900, |g| g.len() >= 9);
         assert_eq!(got.len(), 9, "{got:?}");
         for (from, call) in calls.iter().enumerate() {
             let to = (from + 1) % 3;
-            let seen: Vec<(String, String)> = got.iter().filter(|(i, _, _)| *i == to).map(|(_, f, t)| (f.clone(), t.clone())).collect();
-            let want: Vec<(String, String)> = (0..3).map(|r| (call.to_string(), format!("{from}>{to} #{r}"))).collect();
+            let seen: Vec<(String, String)> = got
+                .iter()
+                .filter(|(i, _, _)| *i == to)
+                .map(|(_, f, t)| (f.clone(), t.clone()))
+                .collect();
+            let want: Vec<(String, String)> = (0..3)
+                .map(|r| (call.to_string(), format!("{from}>{to} #{r}")))
+                .collect();
             assert_eq!(seen, want, "station {to}");
         }
-        assert!(got.iter().all(|(i, f, _)| f != calls[*i]), "a station heard itself");
+        assert!(
+            got.iter().all(|(i, f, _)| f != calls[*i]),
+            "a station heard itself"
+        );
     }
 
     #[test]
@@ -5909,7 +6420,11 @@ mod tests {
         }
         w.dg_burst_end();
         assert!(messages_seen(&w).is_empty());
-        assert_eq!(w.dg.waiting_acks(), 0, "B must not answer a burst that is not for it");
+        assert_eq!(
+            w.dg.waiting_acks(),
+            0,
+            "B must not answer a burst that is not for it"
+        );
     }
 
     // ---- lane mode (WP4) -----------------------------------------------------------------------
@@ -5918,10 +6433,20 @@ mod tests {
     fn a_chat_arrives_on_every_one_of_the_twelve_lanes() {
         let table = BandTable::builtin_r1();
         for lane in &table.bands[0].lanes {
-            let (mut e, _bus) = lane_engines_at(&format!("lane-all-{}", lane.k), &["AA1AAA", "BB1BBB"], lane.dial_hz);
+            let (mut e, _bus) = lane_engines_at(
+                &format!("lane-all-{}", lane.k),
+                &["AA1AAA", "BB1BBB"],
+                lane.dial_hz,
+            );
             send_at(&mut e, 5);
             let (_, got) = run_lane(&mut e, 400, |g| !g.is_empty());
-            assert_eq!(got.len(), 1, "no message on lane {} (dial {} Hz)", lane.k, lane.dial_hz);
+            assert_eq!(
+                got.len(),
+                1,
+                "no message on lane {} (dial {} Hz)",
+                lane.k,
+                lane.dial_hz
+            );
             assert_eq!(got[0].2, "hello");
         }
     }
@@ -5951,14 +6476,21 @@ mod tests {
         }
         let air = (end - start) as f64 / RATE as f64;
         // Five times as long as the plain modem's burst for the same number of codewords.
-        let plain: Vec<f64> = (1..=2).map(|n| burst_len_for(Modulation::Kami1c, n) as f64 / RATE as f64).collect();
+        let plain: Vec<f64> = (1..=2)
+            .map(|n| burst_len_for(Modulation::Kami1c, n) as f64 / RATE as f64)
+            .collect();
         assert!(
             plain.iter().any(|p| (air / 5.0 - p).abs() < 0.12 * p),
             "lane burst of {air:.2} s is not five times a plain burst of {plain:?} s"
         );
         let freqs: Vec<f64> = (0..=300).map(|k| 10.0 * k as f64).collect();
         let db = narrow::psd_db(&line[start + RATE as usize / 4..end], &freqs);
-        let outside = freqs.iter().zip(&db).filter(|(f, _)| (**f - 1500.0).abs() > 240.0).map(|(_, d)| *d).fold(f64::MIN, f64::max);
+        let outside = freqs
+            .iter()
+            .zip(&db)
+            .filter(|(f, _)| (**f - 1500.0).abs() > 240.0)
+            .map(|(_, d)| *d)
+            .fold(f64::MIN, f64::max);
         assert!(outside < -26.0, "level outside the lane reaches {outside:.1} dB");
         assert!(!starts.is_empty());
     }
@@ -5999,28 +6531,56 @@ mod tests {
     fn hears(dial_hz: u64, audio: Vec<f32>, text: &str) -> bool {
         let rx: Pipe = Arc::new(Mutex::new(audio.into()));
         let tx: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut b = vspawn(config("BB1BBB", temp_dir(&format!("hears-{dial_hz}-{text}"))), fake_factory(rx, tx)).unwrap();
+        let mut b = vspawn(
+            config("BB1BBB", temp_dir(&format!("hears-{dial_hz}-{text}"))),
+            fake_factory(rx, tx),
+        )
+        .unwrap();
         b.set_dial_hz(Some(dial_hz));
         b.listen().unwrap();
-        wait_for(&mut b, |e| matches!(e, Event::Message { text: t, .. } if t == text), 60).is_some()
+        wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text: t, .. } if t == text),
+            60,
+        )
+        .is_some()
     }
 
     #[test]
     fn a_station_on_c1_also_hears_a_burst_on_c2_and_one_on_c2_hears_c1() {
         // C1 dial 18113.44 kHz: C1 at 1500 Hz of audio, C2 at 2200 Hz.
-        assert!(hears(18_113_440, lane_burst_audio("own lane", 1500.0), "own lane"), "own lane not heard");
-        assert!(hears(18_113_440, lane_burst_audio("other calling lane", 2200.0), "other calling lane"), "C2 not heard from C1");
+        assert!(
+            hears(18_113_440, lane_burst_audio("own lane", 1500.0), "own lane"),
+            "own lane not heard"
+        );
+        assert!(
+            hears(
+                18_113_440,
+                lane_burst_audio("other calling lane", 2200.0),
+                "other calling lane"
+            ),
+            "C2 not heard from C1"
+        );
         // C2 dial 18114.14 kHz: C2 at 1500 Hz, C1 at 800 Hz.
-        assert!(hears(18_114_140, lane_burst_audio("c1 from c2", 800.0), "c1 from c2"), "C1 not heard from C2");
+        assert!(
+            hears(18_114_140, lane_burst_audio("c1 from c2", 800.0), "c1 from c2"),
+            "C1 not heard from C2"
+        );
     }
 
     #[test]
     fn a_station_hears_only_its_own_lane_and_the_other_calling_lane() {
         // On a relay lane (R2, lane 1) nothing but its own lane is heard: a burst 700 Hz up is lane 2.
         assert!(hears(18_110_640, lane_burst_audio("own", 1500.0), "own"));
-        assert!(!hears(18_110_640, lane_burst_audio("neighbour", 2200.0), "neighbour"), "a relay lane station heard a neighbour lane");
+        assert!(
+            !hears(18_110_640, lane_burst_audio("neighbour", 2200.0), "neighbour"),
+            "a relay lane station heard a neighbour lane"
+        );
         // On C1 a burst on the spare lane X2 (3 x 700 Hz up: 3600 Hz) is not a calling lane.
-        assert!(!hears(18_113_440, lane_burst_audio("spare", 3600.0), "spare"), "a calling lane station heard the spare lane");
+        assert!(
+            !hears(18_113_440, lane_burst_audio("spare", 3600.0), "spare"),
+            "a calling lane station heard the spare lane"
+        );
     }
 
     // ---- the relay as referee (WP5) ------------------------------------------------------------
@@ -6062,8 +6622,15 @@ mod tests {
         // Let the operator hear a beacon first, then write.
         test_clock().sleep(Duration::from_secs(30));
         a.send_message("ZZ9ZZZ", "through the referee").unwrap();
-        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text == "through the referee"), 400);
-        assert!(got.is_some(), "the message never reached the destination ({n} stations)");
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text == "through the referee"),
+            400,
+        );
+        assert!(
+            got.is_some(),
+            "the message never reached the destination ({n} stations)"
+        );
     }
 
     /// The relay goes quiet for a while (a crash or a restart): a message written meanwhile is not
@@ -6078,11 +6645,20 @@ mod tests {
         a.listen().unwrap();
         test_clock().sleep(Duration::from_secs(30));
         r.stop_relay();
-        a.send_message("ZZ9ZZZ", "written while the relay was down").unwrap();
-        let early = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")), 100);
+        a.send_message("ZZ9ZZZ", "written while the relay was down")
+            .unwrap();
+        let early = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")),
+            100,
+        );
         assert!(early.is_none(), "it cannot arrive without a relay");
         make_relay(&r);
-        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")), 600);
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")),
+            600,
+        );
         assert!(got.is_some(), "the message was lost across the relay restart");
     }
 
@@ -6110,21 +6686,34 @@ mod tests {
         test_clock().sleep(Duration::from_secs(30));
         let words = "purple-giraffe-7731";
         a.send_message("ZZ9ZZZ", words).unwrap();
-        let got = wait_for(&mut z, |e| matches!(e, Event::Message { text, .. } if text == words), 400);
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text == words),
+            400,
+        );
         assert!(got.is_some(), "the message never arrived");
         test_clock().sleep(Duration::from_secs(5));
-        assert!(!contains(&r.config.data_dir, words.as_bytes()), "the relay stored the text");
+        assert!(
+            !contains(&r.config.data_dir, words.as_bytes()),
+            "the relay stored the text"
+        );
         // The scan itself works: it finds the words in a file we plant.
         let planted = z.config.data_dir.join("planted.txt");
         fs::write(&planted, words).unwrap();
-        assert!(contains(&z.config.data_dir, words.as_bytes()), "sanity: the scan finds a planted file");
+        assert!(
+            contains(&z.config.data_dir, words.as_bytes()),
+            "sanity: the scan finds a planted file"
+        );
     }
 
     #[test]
     fn hidden_operators_and_one_relay_every_message_arrives_once() {
         // Three operators by default; REF_OPS=10 runs ten (all delivered after 389 virtual seconds,
         // about 2.5 minutes of real time: see docs/NETWORK-STATUS.md, WP5).
-        let ops: usize = std::env::var("REF_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let ops: usize = std::env::var("REF_OPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
         let mut st = referee_cell("ref-ten", ops);
         let mut z = st.pop().unwrap();
         for e in st.iter_mut() {
@@ -6166,7 +6755,12 @@ mod tests {
         eprintln!("{ops} operators, one relay: all delivered after {secs} virtual seconds");
         // Nothing arrives twice afterwards.
         clock.sleep(Duration::from_secs(120));
-        assert!(z.poll_events().into_iter().all(|e| !matches!(e, Event::Message { .. })), "a duplicate arrived");
+        assert!(
+            z.poll_events()
+                .into_iter()
+                .all(|e| !matches!(e, Event::Message { .. })),
+            "a duplicate arrived"
+        );
     }
 
     /// Soak in a small cell: three operators write four messages each at uneven intervals over
@@ -6213,7 +6807,10 @@ mod tests {
         assert_eq!(sorted.len(), plan.len(), "missing or duplicated: got {seen:?}");
         assert_eq!(seen.len(), plan.len(), "a duplicate arrived: {seen:?}");
         for op in 1..=3 {
-            let order: Vec<&String> = seen.iter().filter(|t| t.starts_with(&format!("op{op} "))).collect();
+            let order: Vec<&String> = seen
+                .iter()
+                .filter(|t| t.starts_with(&format!("op{op} ")))
+                .collect();
             let mut want = order.clone();
             want.sort();
             assert_eq!(order, want, "operator {op}'s messages arrived out of order");
@@ -6249,7 +6846,9 @@ mod tests {
         let clock = e[0].clock.clone();
         let t0 = clock.now();
         let mut states = Vec::new();
-        while clock.now() < t0 + Duration::from_secs(120) && !states.iter().any(|(_, s)| *s == Delivery::Delivered) {
+        while clock.now() < t0 + Duration::from_secs(120)
+            && !states.iter().any(|(_, s)| *s == Delivery::Delivered)
+        {
             for ev in e[0].poll_events() {
                 if let Event::Delivery { id, state, .. } = ev {
                     states.push((id, state));
@@ -6267,7 +6866,8 @@ mod tests {
     fn six_chats_do_not_cause_a_resend_storm() {
         let mut e = bus_engines("storm", &["AA1AAA", "BB1BBB"]);
         for i in 0..6 {
-            e[0].send_chat("BB1BBB", &format!("message number {i}"), false).unwrap();
+            e[0].send_chat("BB1BBB", &format!("message number {i}"), false)
+                .unwrap();
         }
         let clock = e[0].clock.clone();
         let t0 = clock.now();
@@ -6276,8 +6876,13 @@ mod tests {
             for (n, eng) in e.iter_mut().enumerate() {
                 for ev in eng.poll_events() {
                     match ev {
-                        Event::Delivery { state: Delivery::Delivered, .. } if n == 0 => delivered += 1,
-                        Event::Tx { state: TxState::Starting } => bursts += 1,
+                        Event::Delivery {
+                            state: Delivery::Delivered,
+                            ..
+                        } if n == 0 => delivered += 1,
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } => bursts += 1,
                         Event::Message { .. } if n == 1 => received += 1,
                         _ => {}
                     }
@@ -6294,15 +6899,37 @@ mod tests {
     /// texts stay on the direct link.
     #[test]
     fn mail_files_and_long_texts_never_take_the_chat_path() {
-        let item = |m: &Message| OutItem { kind: "msg".into(), payload: encode_message(m, false) };
+        let item = |m: &Message| OutItem {
+            kind: "msg".into(),
+            payload: encode_message(m, false),
+        };
         let (from, to) = ("AA1AAA".to_string(), "BB1BBB".to_string());
-        let chat = Message::Chat { from: from.clone(), to: to.clone(), text: "hi".into() };
+        let chat = Message::Chat {
+            from: from.clone(),
+            to: to.clone(),
+            text: "hi".into(),
+        };
         assert!(is_dg_item(&item(&chat)));
-        let long = Message::Chat { from: from.clone(), to: to.clone(), text: "x".repeat(2000) };
+        let long = Message::Chat {
+            from: from.clone(),
+            to: to.clone(),
+            text: "x".repeat(2000),
+        };
         assert!(!is_dg_item(&item(&long)));
-        let mail = Message::Mail { from: from.clone(), to: to.clone(), subject: "s".into(), body: "b".into(), attachments: vec![] };
+        let mail = Message::Mail {
+            from: from.clone(),
+            to: to.clone(),
+            subject: "s".into(),
+            body: "b".into(),
+            attachments: vec![],
+        };
         assert!(!is_dg_item(&item(&mail)));
-        let file = Message::File { from, to, name: "a.txt".into(), data: vec![1, 2, 3] };
+        let file = Message::File {
+            from,
+            to,
+            name: "a.txt".into(),
+            data: vec![1, 2, 3],
+        };
         assert!(!is_dg_item(&item(&file)));
     }
 
@@ -6327,7 +6954,11 @@ mod tests {
             }
             clock.sleep(Duration::from_millis(50));
         }
-        assert_eq!(r.heres_heard(), 1, "the relay did not hear the operator say it is here");
+        assert_eq!(
+            r.heres_heard(),
+            1,
+            "the relay did not hear the operator say it is here"
+        );
         // Not again within ten minutes.
         let t1 = clock.now();
         while clock.now() < t1 + Duration::from_secs(300) {
@@ -6336,7 +6967,11 @@ mod tests {
             }
             clock.sleep(Duration::from_millis(100));
         }
-        assert_eq!(r.heres_heard(), 1, "the operator repeated itself inside ten minutes");
+        assert_eq!(
+            r.heres_heard(),
+            1,
+            "the operator repeated itself inside ten minutes"
+        );
     }
 
     #[test]
@@ -6466,7 +7101,14 @@ mod tests {
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
         let mut cfg = config(callsign, temp_dir(tag));
         cfg.sdr = None;
-        Worker::new(cfg, rx, shared, factory, Arc::new(AtomicU64::new(1)), Clock::real())
+        Worker::new(
+            cfg,
+            rx,
+            shared,
+            factory,
+            Arc::new(AtomicU64::new(1)),
+            Clock::real(),
+        )
     }
 
     fn chat(from: &str, to: &str, text: &str) -> Message {
@@ -6890,8 +7532,21 @@ mod tests {
         let mut w = bare_worker("advert-plain", "AA1AAA");
         w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
         w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
-        let shown: Vec<_> = lock(&w.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
-        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 0, relay: false, loc: None }]);
+        let shown: Vec<_> = lock(&w.shared.events)
+            .items
+            .iter()
+            .filter(|e| matches!(e, Event::Advert { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Event::Advert {
+                call: "BB1BBB".into(),
+                hops: 0,
+                relay: false,
+                loc: None
+            }]
+        );
         assert!(w.control.is_empty(), "a plain station passed an advert on");
 
         let mut r = bare_worker("advert-relay", "RR1RRR");
@@ -6899,10 +7554,26 @@ mod tests {
             Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
         r.shared.flags.relay_running.store(true, Ordering::SeqCst);
         r.on_advert("BB1BBB".into(), 3, 9, ADVERT_RELAY, Some((25.2, 55.27)));
-        let shown: Vec<_> = lock(&r.shared.events).items.iter().filter(|e| matches!(e, Event::Advert { .. })).cloned().collect();
-        assert_eq!(shown, vec![Event::Advert { call: "BB1BBB".into(), hops: 1, relay: true, loc: Some((25.2, 55.27)) }]);
+        let shown: Vec<_> = lock(&r.shared.events)
+            .items
+            .iter()
+            .filter(|e| matches!(e, Event::Advert { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Event::Advert {
+                call: "BB1BBB".into(),
+                hops: 1,
+                relay: true,
+                loc: Some((25.2, 55.27))
+            }]
+        );
         assert_eq!(r.control.len(), 1);
-        assert_eq!(r.control[0], vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY, Some((25.2, 55.27)))]);
+        assert_eq!(
+            r.control[0],
+            vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY, Some((25.2, 55.27)))]
+        );
         // The last hop is shown but not passed on.
         r.on_advert("CC1CCC".into(), 0, 1, 0, None);
         assert_eq!(r.control.len(), 1);
@@ -6928,7 +7599,12 @@ mod tests {
             Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
         r.shared.flags.relay_running.store(true, Ordering::SeqCst);
         r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
-        let file = Message::File { from: "AA1AAA".into(), to: "BB1BBB".into(), name: "x".into(), data: vec![1] };
+        let file = Message::File {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            name: "x".into(),
+            data: vec![1],
+        };
         r.forward_third_party(&file, false);
         assert!(r.forwarded.is_empty(), "a file was queued for forwarding");
         r.forward_third_party(&chat("AA1AAA", "BB1BBB", "hi"), false);
@@ -6942,7 +7618,11 @@ mod tests {
         r.shared.flags.relay_running.store(true, Ordering::SeqCst);
         r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
         // A server that is not there: jobs fail quietly in the thread, which is all these tests need.
-        r.bb = Some(BbHandle::spawn(Backbone::new("http://127.0.0.1:9", "RR1RRR", StationKey::generate())));
+        r.bb = Some(BbHandle::spawn(Backbone::new(
+            "http://127.0.0.1:9",
+            "RR1RRR",
+            StationKey::generate(),
+        )));
         r
     }
 
@@ -6950,12 +7630,20 @@ mod tests {
     fn a_message_from_the_server_is_sent_on_the_radio_and_remembered() {
         let mut r = relay_with_backbone("bb-deliver");
         let m = Queued {
-            id: "K1ALF-7".into(), origin: "K1ALF".into(), dest: "D1AVE".into(), kind: "chat".into(),
-            subject: String::new(), body: b"hello".to_vec(), urgent: false,
+            id: "K1ALF-7".into(),
+            origin: "K1ALF".into(),
+            dest: "D1AVE".into(),
+            kind: "chat".into(),
+            subject: String::new(),
+            body: b"hello".to_vec(),
+            urgent: false,
         };
         r.bb_deliver(m.clone());
         assert_eq!(r.outbox.pending().len(), 1);
-        assert_eq!(r.bb_pending.values().cloned().collect::<Vec<_>>(), vec!["K1ALF-7".to_string()]);
+        assert_eq!(
+            r.bb_pending.values().cloned().collect::<Vec<_>>(),
+            vec!["K1ALF-7".to_string()]
+        );
         // The same message again (the server hands it out until it is receipted) is not queued twice.
         r.bb_deliver(m);
         assert_eq!(r.outbox.pending().len(), 1);
@@ -6965,9 +7653,17 @@ mod tests {
     fn a_receipt_becomes_a_short_message_to_the_origin() {
         let mut r = relay_with_backbone("bb-receipt");
         r.bb_receipt_notice(backbone::Receipt {
-            id: "K1ALF-7".into(), dest: "D1AVE".into(), status: "delivered".into(), reason: String::new(),
+            id: "K1ALF-7".into(),
+            dest: "D1AVE".into(),
+            status: "delivered".into(),
+            reason: String::new(),
         });
-        let (_, item, _) = r.outbox.pending().into_iter().next().expect("a notice was queued");
+        let (_, item, _) = r
+            .outbox
+            .pending()
+            .into_iter()
+            .next()
+            .expect("a notice was queued");
         let _ = item;
         assert_eq!(r.outbox.pending().len(), 1);
     }
@@ -6978,10 +7674,18 @@ mod tests {
         r.note_heard_recent("D1AVE", Some(10.0));
         r.forward_third_party(&chat("K1ALF", "D1AVE", "hi"), false);
         // The relay hears Dave itself, so it delivers on the radio (and does not use the server).
-        assert_eq!(r.outbox.pending().len(), 1, "a station heard here must be delivered to directly");
+        assert_eq!(
+            r.outbox.pending().len(),
+            1,
+            "a station heard here must be delivered to directly"
+        );
         // A station nobody here hears goes to the server, not onto the radio.
         r.forward_third_party(&chat("K1ALF", "Z9FAR", "hi"), false);
-        assert_eq!(r.outbox.pending().len(), 1, "radio forward used although the server is available");
+        assert_eq!(
+            r.outbox.pending().len(),
+            1,
+            "radio forward used although the server is available"
+        );
     }
 
     #[test]

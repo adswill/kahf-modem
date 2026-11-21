@@ -239,7 +239,11 @@ mod tests {
         assert_eq!(pools.iter().filter(|p| **p == Pool::Online).count(), 8);
         assert_eq!(pools.iter().filter(|p| **p == Pool::Open).count(), 2);
         assert_eq!(pools.iter().filter(|p| **p == Pool::Emergency).count(), 2);
-        assert_eq!((pools[5], pools[6]), (Pool::Open, Pool::Open), "C1 and C2 are the open pool");
+        assert_eq!(
+            (pools[5], pools[6]),
+            (Pool::Open, Pool::Open),
+            "C1 and C2 are the open pool"
+        );
     }
 
     #[test]

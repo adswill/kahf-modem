@@ -41,17 +41,33 @@ impl HopItem {
             return None;
         }
         let n = |i: usize| u32::from_be_bytes([0, body[i], body[i + 1], body[i + 2]]);
-        Some(HopItem { origin: n(0), id: u16::from_be_bytes([body[3], body[4]]), dest: n(5), payload: body[8..].to_vec() })
+        Some(HopItem {
+            origin: n(0),
+            id: u16::from_be_bytes([body[3], body[4]]),
+            dest: n(5),
+            payload: body[8..].to_vec(),
+        })
     }
 }
 
 /// Build the frame that sends `item` to relay `next`, from relay `me`, at hop count `hops`.
 pub fn frame(me: u32, next: u32, hops: u8, item: &HopItem) -> Result<Vec<u8>, String> {
     if item.payload.len() > PAYLOAD_MAX {
-        return Err(format!("hop payload of {} bytes is over {PAYLOAD_MAX}", item.payload.len()));
+        return Err(format!(
+            "hop payload of {} bytes is over {PAYLOAD_MAX}",
+            item.payload.len()
+        ));
     }
     Frame {
-        header: Header { kind: Kind::Message, flags: 0, hops, next_hop: next, source: me, index: 0, count: 1 },
+        header: Header {
+            kind: Kind::Message,
+            flags: 0,
+            hops,
+            next_hop: next,
+            source: me,
+            index: 0,
+            count: 1,
+        },
         body: item.body(),
     }
     .encode()
@@ -92,7 +108,11 @@ pub struct Forwarder {
 
 impl Forwarder {
     pub fn new(me: u32) -> Self {
-        Forwarder { me, seen: HashMap::new(), pending: HashMap::new() }
+        Forwarder {
+            me,
+            seen: HashMap::new(),
+            pending: HashMap::new(),
+        }
     }
 
     /// A message of this relay's own, to start the hop. Returns the frame; the hop is
@@ -100,18 +120,29 @@ impl Forwarder {
     pub fn originate(&mut self, next: u32, item: &HopItem, now_ms: u64) -> Result<Vec<u8>, String> {
         let f = frame(self.me, next, 0, item)?;
         self.seen.insert((item.origin, item.id), now_ms);
-        self.pending.insert((item.origin, item.id), Pending { next, hops: 0, at_ms: now_ms });
+        self.pending.insert(
+            (item.origin, item.id),
+            Pending {
+                next,
+                hops: 0,
+                at_ms: now_ms,
+            },
+        );
         Ok(f)
     }
 
     /// A frame was heard. `route(dest)` is the next relay towards `dest`, when there is one.
     pub fn on_frame(&mut self, payload: &[u8], now_ms: u64, route: impl Fn(u32) -> Option<u32>) -> Action {
         self.seen.retain(|_, t| now_ms.saturating_sub(*t) <= SEEN_MS);
-        let Some(f) = Frame::decode(payload) else { return Action::Ignore };
+        let Some(f) = Frame::decode(payload) else {
+            return Action::Ignore;
+        };
         if f.header.kind != Kind::Message {
             return Action::Ignore;
         }
-        let Some(item) = HopItem::parse(&f.body) else { return Action::Ignore };
+        let Some(item) = HopItem::parse(&f.body) else {
+            return Action::Ignore;
+        };
         let key = (item.origin, item.id);
         // Passive ack: the relay we sent it to has passed it on, one hop further.
         if let Some(p) = self.pending.get(&key) {
@@ -134,11 +165,20 @@ impl Forwarder {
         if f.header.hops + 1 >= HOP_MAX {
             return Action::Drop(Why::HopLimit);
         }
-        let Some(next) = route(item.dest) else { return Action::Drop(Why::NoRoute) };
+        let Some(next) = route(item.dest) else {
+            return Action::Drop(Why::NoRoute);
+        };
         let hops = f.header.hops + 1;
         match frame(self.me, next, hops, &item) {
             Ok(out) => {
-                self.pending.insert(key, Pending { next, hops, at_ms: now_ms });
+                self.pending.insert(
+                    key,
+                    Pending {
+                        next,
+                        hops,
+                        at_ms: now_ms,
+                    },
+                );
                 Action::Forward(out)
             }
             Err(_) => Action::Ignore,
@@ -147,7 +187,12 @@ impl Forwarder {
 
     /// Hops whose passive ack did not come in `ACK_WAIT_MS`: the message must go another way.
     pub fn expired(&mut self, now_ms: u64) -> Vec<(u32, u16)> {
-        let dead: Vec<(u32, u16)> = self.pending.iter().filter(|(_, p)| now_ms.saturating_sub(p.at_ms) > ACK_WAIT_MS).map(|(k, _)| *k).collect();
+        let dead: Vec<(u32, u16)> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| now_ms.saturating_sub(p.at_ms) > ACK_WAIT_MS)
+            .map(|(k, _)| *k)
+            .collect();
         for k in &dead {
             self.pending.remove(k);
         }
@@ -174,7 +219,15 @@ mod tests {
 
     impl Net {
         fn new(ids: &[u32]) -> Self {
-            Net { fw: ids.iter().map(|&i| (i, Forwarder::new(i))).collect(), hears: BTreeMap::new(), route: BTreeMap::new(), delivered: vec![], acked: vec![], drops: vec![], sent: 0 }
+            Net {
+                fw: ids.iter().map(|&i| (i, Forwarder::new(i))).collect(),
+                hears: BTreeMap::new(),
+                route: BTreeMap::new(),
+                delivered: vec![],
+                acked: vec![],
+                drops: vec![],
+                sent: 0,
+            }
         }
 
         /// Everyone who hears `from` gets the frame, in rounds, until nothing is left to send.
@@ -188,7 +241,11 @@ mod tests {
                 now += 1000;
                 for rx in self.hears.get(&tx).cloned().unwrap_or_default() {
                     let table = self.route.clone();
-                    let act = self.fw.get_mut(&rx).unwrap().on_frame(&f, now, |d| table.get(&(rx, d)).copied());
+                    let act = self
+                        .fw
+                        .get_mut(&rx)
+                        .unwrap()
+                        .on_frame(&f, now, |d| table.get(&(rx, d)).copied());
                     match act {
                         Action::Forward(out) => queue.insert(0, (rx, out)),
                         Action::Deliver(i) => self.delivered.push((rx, i)),
@@ -202,7 +259,12 @@ mod tests {
     }
 
     fn item(origin: u32, dest: u32) -> HopItem {
-        HopItem { origin, id: 7, dest, payload: b"hello".to_vec() }
+        HopItem {
+            origin,
+            id: 7,
+            dest,
+            payload: b"hello".to_vec(),
+        }
     }
 
     /// A -- B -- C -- D, each hears its neighbours only.
@@ -237,7 +299,11 @@ mod tests {
         net.run(1, f, 0);
         assert_eq!(net.delivered, vec![(4, it)]);
         // A hears B forward, B hears C forward: those are the acknowledgements.
-        assert!(net.acked.contains(&(1, 7)) && net.acked.contains(&(2, 7)), "{:?}", net.acked);
+        assert!(
+            net.acked.contains(&(1, 7)) && net.acked.contains(&(2, 7)),
+            "{:?}",
+            net.acked
+        );
         assert!(net.fw.get_mut(&1).unwrap().expired(60_000).is_empty());
         assert!(net.drops.iter().all(|(_, w)| *w != Why::HopLimit));
     }
@@ -264,7 +330,11 @@ mod tests {
         let f = net.fw.get_mut(&1).unwrap().originate(2, &item(1, 9), 0).unwrap();
         net.run(1, f, 0);
         assert!(net.delivered.is_empty());
-        assert!(net.drops.iter().any(|(r, w)| *r == 1 && *w == Why::Loop), "{:?}", net.drops);
+        assert!(
+            net.drops.iter().any(|(r, w)| *r == 1 && *w == Why::Loop),
+            "{:?}",
+            net.drops
+        );
         assert!(net.sent <= 4, "{} transmissions", net.sent);
     }
 
@@ -275,12 +345,19 @@ mod tests {
         let f = net.fw.get_mut(&1).unwrap().originate(2, &item(1, 7), 0).unwrap();
         net.run(1, f, 0);
         assert!(net.delivered.is_empty(), "six transmissions must not get through");
-        assert!(net.drops.contains(&(6, Why::HopLimit)) || net.drops.iter().any(|(_, w)| *w == Why::HopLimit), "{:?}", net.drops);
+        assert!(
+            net.drops.contains(&(6, Why::HopLimit)) || net.drops.iter().any(|(_, w)| *w == Why::HopLimit),
+            "{:?}",
+            net.drops
+        );
         // Six relays need five transmissions: over the limit. Five relays need four: allowed.
         let mut net = line(6);
         let f = net.fw.get_mut(&1).unwrap().originate(2, &item(1, 6), 0).unwrap();
         net.run(1, f, 0);
-        assert!(net.delivered.is_empty(), "five transmissions must not get through");
+        assert!(
+            net.delivered.is_empty(),
+            "five transmissions must not get through"
+        );
         let mut net = line(5);
         let f = net.fw.get_mut(&1).unwrap().originate(2, &item(1, 5), 0).unwrap();
         net.run(1, f, 0);
@@ -296,13 +373,38 @@ mod tests {
         assert!(net.drops.contains(&(2, Why::NoRoute)));
         // Nobody forwarded: A never heard the passive ack, so after the wait the hop is reported failed.
         assert!(net.fw.get_mut(&1).unwrap().expired(ACK_WAIT_MS / 2).is_empty());
-        assert_eq!(net.fw.get_mut(&1).unwrap().expired(ACK_WAIT_MS + 5000), vec![(1, 7)]);
+        assert_eq!(
+            net.fw.get_mut(&1).unwrap().expired(ACK_WAIT_MS + 5000),
+            vec![(1, 7)]
+        );
     }
 
     #[test]
     fn payload_size_and_bad_frames_are_checked() {
-        assert!(frame(1, 2, 0, &HopItem { origin: 1, id: 1, dest: 2, payload: vec![0; PAYLOAD_MAX + 1] }).is_err());
-        assert!(frame(1, 2, 0, &HopItem { origin: 1, id: 1, dest: 2, payload: vec![0; PAYLOAD_MAX] }).is_ok());
+        assert!(frame(
+            1,
+            2,
+            0,
+            &HopItem {
+                origin: 1,
+                id: 1,
+                dest: 2,
+                payload: vec![0; PAYLOAD_MAX + 1]
+            }
+        )
+        .is_err());
+        assert!(frame(
+            1,
+            2,
+            0,
+            &HopItem {
+                origin: 1,
+                id: 1,
+                dest: 2,
+                payload: vec![0; PAYLOAD_MAX]
+            }
+        )
+        .is_ok());
         let mut f = Forwarder::new(1);
         assert_eq!(f.on_frame(&[1, 2, 3], 0, |_| None), Action::Ignore);
     }

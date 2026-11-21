@@ -5,8 +5,8 @@ pub mod auth;
 pub mod bandplan;
 pub mod blank;
 pub mod bundle;
-pub mod diversity;
 pub mod burst;
+pub mod diversity;
 pub mod extras;
 pub mod frame;
 pub mod harq;
@@ -15,17 +15,15 @@ pub mod image;
 pub mod interf;
 pub mod io;
 pub mod kami;
-pub mod ldpc;
 pub mod lanes;
 pub mod lanesense;
+pub mod ldpc;
 pub mod ldpc_std;
 pub mod link;
 pub mod mac;
-pub mod narrow;
-#[cfg(test)]
-pub mod sim;
 pub mod marker;
 pub mod msg;
+pub mod narrow;
 pub mod outbox;
 pub mod payload_position;
 pub mod payload_presence;
@@ -42,6 +40,8 @@ pub mod relay;
 pub mod select;
 pub mod sense;
 pub mod session;
+#[cfg(test)]
+pub mod sim;
 pub mod snr_est;
 pub mod spectrum;
 

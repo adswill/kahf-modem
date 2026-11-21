@@ -54,7 +54,12 @@ pub struct Plan {
 /// FNV-1a over (seed, epoch, id): the tie-break, the same in the JS twin.
 pub fn mix(seed: u32, epoch: u64, id: u32) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
-    for b in seed.to_le_bytes().into_iter().chain((epoch as u32).to_le_bytes()).chain(id.to_le_bytes()) {
+    for b in seed
+        .to_le_bytes()
+        .into_iter()
+        .chain((epoch as u32).to_le_bytes())
+        .chain(id.to_le_bytes())
+    {
         h = (h ^ b as u32).wrapping_mul(0x0100_0193);
     }
     h
@@ -75,7 +80,10 @@ pub fn plan(epoch: u64, seed: u32, relays: &[RelayIn]) -> Plan {
     }
     let n = active.len();
     if n == 0 {
-        return Plan { epoch, grants: vec![] };
+        return Plan {
+            epoch,
+            grants: vec![],
+        };
     }
     // Cells by demand: one each, then the next cell to the relay with the largest weight per cell held.
     let w: Vec<u64> = active.iter().map(|r| weight(r)).collect();
@@ -133,7 +141,11 @@ pub fn plan(epoch: u64, seed: u32, relays: &[RelayIn]) -> Plan {
             }
         }
         for &i in members.iter() {
-            grants.push(Grant { relay: active[i].id, lane: lane_of[&i] as u8, slot: s as u8 });
+            grants.push(Grant {
+                relay: active[i].id,
+                lane: lane_of[&i] as u8,
+                slot: s as u8,
+            });
         }
         prev = lane_of;
     }
@@ -143,9 +155,17 @@ pub fn plan(epoch: u64, seed: u32, relays: &[RelayIn]) -> Plan {
 /// The plan every relay computes for itself when the server is silent: all known relays as
 /// active, cut to one epoch in `LOCAL_DUTY_DIV` for each relay.
 pub fn local_plan(epoch: u64, seed: u32, relay_ids: &[u32]) -> Plan {
-    let all: Vec<RelayIn> = relay_ids.iter().map(|&id| RelayIn { id, queue_bytes: 1, urgency: 0 }).collect();
+    let all: Vec<RelayIn> = relay_ids
+        .iter()
+        .map(|&id| RelayIn {
+            id,
+            queue_bytes: 1,
+            urgency: 0,
+        })
+        .collect();
     let mut p = plan(epoch, seed, &all);
-    p.grants.retain(|g| (epoch + g.relay as u64).is_multiple_of(LOCAL_DUTY_DIV));
+    p.grants
+        .retain(|g| (epoch + g.relay as u64).is_multiple_of(LOCAL_DUTY_DIV));
     p
 }
 
@@ -163,7 +183,9 @@ impl Plan {
     }
 
     pub fn sign(&self, project_key: &[u8; 32]) -> [u8; 64] {
-        SigningKey::from_bytes(project_key).sign(&self.to_bytes()).to_bytes()
+        SigningKey::from_bytes(project_key)
+            .sign(&self.to_bytes())
+            .to_bytes()
     }
 
     pub fn grant_for(&self, relay: u32, slot: u8) -> Option<&Grant> {
@@ -180,7 +202,10 @@ pub enum Source {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    Go { lane: u8, source: Source },
+    Go {
+        lane: u8,
+        source: Source,
+    },
     /// Nothing in the plan for this slot, or nothing to go on: silence.
     Hold,
 }
@@ -201,7 +226,8 @@ impl Held {
     /// Keep a plan only if the project key signed it.
     pub fn accept(&mut self, plan: Plan, sig: &[u8; 64], project_public: &[u8; 32]) -> Result<(), Refused> {
         let vk = VerifyingKey::from_bytes(project_public).map_err(|_| Refused::BadSignature)?;
-        vk.verify(&plan.to_bytes(), &Signature::from_bytes(sig)).map_err(|_| Refused::BadSignature)?;
+        vk.verify(&plan.to_bytes(), &Signature::from_bytes(sig))
+            .map_err(|_| Refused::BadSignature)?;
         let keep_from = plan.epoch.saturating_sub(LOOKAHEAD + 1);
         self.plans.retain(|e, _| *e >= keep_from);
         self.plans.insert(plan.epoch, plan);
@@ -218,13 +244,19 @@ impl Held {
     pub fn decide(&self, me: u32, epoch: u64, slot: u8) -> Decision {
         if let Some(p) = self.plans.get(&epoch) {
             return match p.grant_for(me, slot) {
-                Some(g) => Decision::Go { lane: g.lane, source: Source::Server },
+                Some(g) => Decision::Go {
+                    lane: g.lane,
+                    source: Source::Server,
+                },
                 None => Decision::Hold,
             };
         }
         match &self.inputs {
             Some((seed, ids)) => match local_plan(epoch, *seed, ids).grant_for(me, slot) {
-                Some(g) => Decision::Go { lane: g.lane, source: Source::Local },
+                Some(g) => Decision::Go {
+                    lane: g.lane,
+                    source: Source::Local,
+                },
                 None => Decision::Hold,
             },
             None => Decision::Hold,
@@ -289,7 +321,12 @@ pub fn bond(plan: &Plan, wants: &[(u32, u8)]) -> Vec<Bonded> {
             for l in best.0..best.0 + best.1 {
                 taken[g.slot as usize][l as usize] = true;
             }
-            out.push(Bonded { relay, slot: g.slot, first: best.0, count: best.1 });
+            out.push(Bonded {
+                relay,
+                slot: g.slot,
+                first: best.0,
+                count: best.1,
+            });
         }
     }
     out
@@ -315,12 +352,19 @@ pub fn hop_grants(plan: &Plan, requests: &[(u32, u32)]) -> Vec<HopGrant> {
         let mut mine: Vec<&Grant> = plan.grants.iter().filter(|g| g.relay == from).collect();
         mine.sort_by_key(|g| g.slot);
         let pick = mine.into_iter().find(|g| {
-            plan.grant_for(to, g.slot).is_none() && !receiving.contains(&(g.slot, to)) && !used.contains(&(from, g.slot))
+            plan.grant_for(to, g.slot).is_none()
+                && !receiving.contains(&(g.slot, to))
+                && !used.contains(&(from, g.slot))
         });
         if let Some(g) = pick {
             receiving.push((g.slot, to));
             used.push((from, g.slot));
-            out.push(HopGrant { relay: from, target: to, lane: g.lane, slot: g.slot });
+            out.push(HopGrant {
+                relay: from,
+                target: to,
+                lane: g.lane,
+                slot: g.slot,
+            });
         }
     }
     out
@@ -334,7 +378,10 @@ mod tests {
     struct Rng(u64);
     impl Rng {
         fn next(&mut self, n: u64) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) % n
         }
     }
@@ -343,7 +390,11 @@ mod tests {
         (0..n)
             .map(|i| RelayIn {
                 id: 1000 + i,
-                queue_bytes: if r.next(100) < busy_pct { 1 + r.next(3000) as u32 } else { 0 },
+                queue_bytes: if r.next(100) < busy_pct {
+                    1 + r.next(3000) as u32
+                } else {
+                    0
+                },
                 urgency: r.next(3) as u8,
             })
             .collect()
@@ -355,8 +406,18 @@ mod tests {
         let mut per_slot = HashSet::new();
         for g in &p.grants {
             assert!((g.lane as usize) < LANES && (g.slot as usize) < SLOTS);
-            assert!(cells.insert((g.lane, g.slot)), "two relays on lane {} slot {}", g.lane, g.slot);
-            assert!(per_slot.insert((g.relay, g.slot)), "relay {} twice in slot {}", g.relay, g.slot);
+            assert!(
+                cells.insert((g.lane, g.slot)),
+                "two relays on lane {} slot {}",
+                g.lane,
+                g.slot
+            );
+            assert!(
+                per_slot.insert((g.relay, g.slot)),
+                "relay {} twice in slot {}",
+                g.relay,
+                g.slot
+            );
             let r = rs.iter().find(|r| r.id == g.relay).unwrap();
             assert!(r.queue_bytes > 0, "idle relay {} holds a cell", g.relay);
         }
@@ -379,7 +440,13 @@ mod tests {
 
     #[test]
     fn a_busy_relay_among_idle_ones_gets_over_eighty_percent_of_a_lane() {
-        let mut rs: Vec<RelayIn> = (0..30).map(|i| RelayIn { id: i, queue_bytes: 0, urgency: 0 }).collect();
+        let mut rs: Vec<RelayIn> = (0..30)
+            .map(|i| RelayIn {
+                id: i,
+                queue_bytes: 0,
+                urgency: 0,
+            })
+            .collect();
         rs[7].queue_bytes = 900;
         rs[19].queue_bytes = 50;
         for epoch in 0..60 {
@@ -392,14 +459,23 @@ mod tests {
                     *lanes.entry(g.lane).or_default() += 1;
                 }
                 let best = lanes.values().max().copied().unwrap_or(0);
-                assert!(best * 100 >= SLOTS * 80, "relay {id} holds {best} of {SLOTS} slots on one lane");
+                assert!(
+                    best * 100 >= SLOTS * 80,
+                    "relay {id} holds {best} of {SLOTS} slots on one lane"
+                );
             }
         }
     }
 
     #[test]
     fn thirty_busy_relays_share_fairly_and_the_big_queue_gets_more() {
-        let mut rs: Vec<RelayIn> = (0..30).map(|i| RelayIn { id: i, queue_bytes: 100, urgency: 0 }).collect();
+        let mut rs: Vec<RelayIn> = (0..30)
+            .map(|i| RelayIn {
+                id: i,
+                queue_bytes: 100,
+                urgency: 0,
+            })
+            .collect();
         rs[4].queue_bytes = 2000;
         let mut served: HashMap<u32, usize> = HashMap::new();
         for epoch in 0..20 {
@@ -410,14 +486,31 @@ mod tests {
                 *served.entry(g.relay).or_default() += 1;
             }
         }
-        assert!(rs.iter().all(|r| served.get(&r.id).copied().unwrap_or(0) >= 20), "someone starved");
-        let others = served.iter().filter(|(k, _)| **k != 4).map(|(_, v)| *v).max().unwrap();
-        assert!(served[&4] > others, "the large queue should get more than any other");
+        assert!(
+            rs.iter().all(|r| served.get(&r.id).copied().unwrap_or(0) >= 20),
+            "someone starved"
+        );
+        let others = served
+            .iter()
+            .filter(|(k, _)| **k != 4)
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap();
+        assert!(
+            served[&4] > others,
+            "the large queue should get more than any other"
+        );
     }
 
     #[test]
     fn more_relays_than_cells_rotate() {
-        let rs: Vec<RelayIn> = (0..70).map(|i| RelayIn { id: i, queue_bytes: 10, urgency: 0 }).collect();
+        let rs: Vec<RelayIn> = (0..70)
+            .map(|i| RelayIn {
+                id: i,
+                queue_bytes: 10,
+                urgency: 0,
+            })
+            .collect();
         let mut seen = HashSet::new();
         for epoch in 0..6 {
             let p = plan(epoch, 1, &rs);
@@ -435,14 +528,26 @@ mod tests {
         assert_eq!(plan(42, 11, &rs), plan(42, 11, &rs));
         let mut rev = rs.clone();
         rev.reverse();
-        assert_eq!(plan(42, 11, &rs), plan(42, 11, &rev), "input order does not matter");
+        assert_eq!(
+            plan(42, 11, &rs),
+            plan(42, 11, &rev),
+            "input order does not matter"
+        );
     }
 
     #[test]
     fn unsigned_forged_or_foreign_plans_are_refused() {
         let secret = [3u8; 32];
         let public = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
-        let p = plan(10, 1, &[RelayIn { id: 1, queue_bytes: 5, urgency: 0 }]);
+        let p = plan(
+            10,
+            1,
+            &[RelayIn {
+                id: 1,
+                queue_bytes: 5,
+                urgency: 0,
+            }],
+        );
         let sig = p.sign(&secret);
         let mut h = Held::default();
         assert_eq!(h.accept(p.clone(), &sig, &public), Ok(()));
@@ -495,14 +600,27 @@ mod tests {
             }
         }
         // Reduced duty: a quarter of what a full epoch would give, at most.
-        assert!(local_grants > 0 && local_grants <= CELLS / LOCAL_DUTY_DIV as usize + LANES, "{local_grants}");
+        assert!(
+            local_grants > 0 && local_grants <= CELLS / LOCAL_DUTY_DIV as usize + LANES,
+            "{local_grants}"
+        );
         // The server returns: its plan is followed again.
         let p = plan(106, 5, &rs);
         let sig = p.sign(&secret);
         for h in held.iter_mut() {
             h.accept(p.clone(), &sig, &public).unwrap();
         }
-        let go = ids.iter().enumerate().any(|(i, id)| (0..SLOTS as u8).any(|s| matches!(held[i].decide(*id, 106, s), Decision::Go { source: Source::Server, .. })));
+        let go = ids.iter().enumerate().any(|(i, id)| {
+            (0..SLOTS as u8).any(|s| {
+                matches!(
+                    held[i].decide(*id, 106, s),
+                    Decision::Go {
+                        source: Source::Server,
+                        ..
+                    }
+                )
+            })
+        });
         assert!(go);
     }
 
@@ -514,11 +632,21 @@ mod tests {
 
     /// 20 relays from a formula (the JS test builds the same), epochs 77 and 78.
     pub fn twin_input() -> Vec<RelayIn> {
-        (0..20u32).map(|i| RelayIn { id: 10 + i, queue_bytes: (i * 37 % 11) * 250, urgency: (i % 3) as u8 }).collect()
+        (0..20u32)
+            .map(|i| RelayIn {
+                id: 10 + i,
+                queue_bytes: (i * 37 % 11) * 250,
+                urgency: (i % 3) as u8,
+            })
+            .collect()
     }
 
     pub fn twin_line(p: &Plan) -> String {
-        p.grants.iter().map(|g| format!("{}:{}:{}", g.relay, g.lane, g.slot)).collect::<Vec<_>>().join(",")
+        p.grants
+            .iter()
+            .map(|g| format!("{}:{}:{}", g.relay, g.lane, g.slot))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     #[test]
@@ -526,7 +654,10 @@ mod tests {
         let rs = twin_input();
         eprintln!("TWIN77 {}", twin_line(&plan(77, 42, &rs)));
         eprintln!("TWIN78 {}", twin_line(&plan(78, 42, &rs)));
-        eprintln!("TWINL {}", twin_line(&local_plan(80, 42, &rs.iter().map(|r| r.id).collect::<Vec<_>>())));
+        eprintln!(
+            "TWINL {}",
+            twin_line(&local_plan(80, 42, &rs.iter().map(|r| r.id).collect::<Vec<_>>()))
+        );
     }
 }
 
@@ -536,30 +667,68 @@ mod bonding_tests {
     use crate::lanes::{BandTable, LANE_PITCH_HZ, LANE_WIDTH_HZ};
 
     fn busy(ids: &[u32]) -> Vec<RelayIn> {
-        ids.iter().map(|&id| RelayIn { id, queue_bytes: 800, urgency: 0 }).collect()
+        ids.iter()
+            .map(|&id| RelayIn {
+                id,
+                queue_bytes: 800,
+                urgency: 0,
+            })
+            .collect()
     }
 
     /// What the JS twin (server/src/planner.js) must give for the same input: run with `--nocapture`.
     #[test]
     fn known_bonds_and_hops_for_the_js_twin() {
-        let rs: Vec<RelayIn> = (0..20u32).map(|i| RelayIn { id: 10 + i, queue_bytes: (i * 37 % 11) * 250, urgency: (i % 3) as u8 }).collect();
+        let rs: Vec<RelayIn> = (0..20u32)
+            .map(|i| RelayIn {
+                id: 10 + i,
+                queue_bytes: (i * 37 % 11) * 250,
+                urgency: (i % 3) as u8,
+            })
+            .collect();
         let p = plan(77, 42, &rs);
         let wants: Vec<(u32, u8)> = rs.iter().map(|r| (r.id, 1 + (r.id % 4) as u8)).collect();
-        let b: Vec<String> = bond(&p, &wants).iter().map(|b| format!("{}:{}:{}:{}", b.relay, b.slot, b.first, b.count)).collect();
+        let b: Vec<String> = bond(&p, &wants)
+            .iter()
+            .map(|b| format!("{}:{}:{}:{}", b.relay, b.slot, b.first, b.count))
+            .collect();
         eprintln!("TWINB {}", b.join(","));
         let h: Vec<String> = hop_grants(&p, &[(10, 11), (12, 13), (14, 15), (10, 15), (16, 17), (18, 19)])
             .iter()
             .map(|h| format!("{}>{}:{}:{}", h.relay, h.target, h.lane, h.slot))
             .collect();
         eprintln!("TWINH {}", h.join(","));
-        eprintln!("TWINC {}", [(25.0, 50), (5.0, 5000), (10.0, 500), (16.0, 500), (30.0, 500), (9.0, 108), (15.0, 108), (21.0, 108)].iter().map(|(s, b)| bond_count(*s, *b).to_string()).collect::<Vec<_>>().join(","));
+        eprintln!(
+            "TWINC {}",
+            [
+                (25.0, 50),
+                (5.0, 5000),
+                (10.0, 500),
+                (16.0, 500),
+                (30.0, 500),
+                (9.0, 108),
+                (15.0, 108),
+                (21.0, 108)
+            ]
+            .iter()
+            .map(|(s, b)| bond_count(*s, *b).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+        );
     }
 
     #[test]
     fn eligibility_needs_a_strong_link_and_a_large_transfer() {
         assert_eq!(bond_count(25.0, 50), 1, "too small");
         assert_eq!(bond_count(5.0, 5000), 1, "too weak");
-        assert_eq!([bond_count(10.0, 500), bond_count(16.0, 500), bond_count(30.0, 500)], [2, 3, 4]);
+        assert_eq!(
+            [
+                bond_count(10.0, 500),
+                bond_count(16.0, 500),
+                bond_count(30.0, 500)
+            ],
+            [2, 3, 4]
+        );
     }
 
     #[test]
@@ -574,7 +743,10 @@ mod bonding_tests {
                         assert!(![5, 6].contains(&l), "run {b:?} takes a calling lane");
                     }
                     let own = PHYS[p.grants.iter().find(|g| g.slot == b.slot).unwrap().lane as usize];
-                    assert!(b.first <= own && own < b.first + b.count, "run {b:?} lost its own lane");
+                    assert!(
+                        b.first <= own && own < b.first + b.count,
+                        "run {b:?} lost its own lane"
+                    );
                 }
             }
         }
@@ -586,7 +758,17 @@ mod bonding_tests {
     fn bonded_runs_never_overlap_each_other_or_anyone_elses_lane() {
         let mut seen_wide = false;
         for epoch in 0..200 {
-            let rs: Vec<RelayIn> = (0..6u32).map(|i| RelayIn { id: i, queue_bytes: if (epoch + i as u64).is_multiple_of(4) { 0 } else { 500 }, urgency: 0 }).collect();
+            let rs: Vec<RelayIn> = (0..6u32)
+                .map(|i| RelayIn {
+                    id: i,
+                    queue_bytes: if (epoch + i as u64).is_multiple_of(4) {
+                        0
+                    } else {
+                        500
+                    },
+                    urgency: 0,
+                })
+                .collect();
             let p = plan(epoch, 2, &rs);
             let wants: Vec<(u32, u8)> = (0..6).map(|i| (i, 1 + (i as u8 + epoch as u8) % 4)).collect();
             let runs = bond(&p, &wants);
@@ -595,7 +777,10 @@ mod bonding_tests {
                 for b in runs.iter().filter(|b| b.slot == slot) {
                     seen_wide |= b.count > 1;
                     for l in b.first..b.first + b.count {
-                        assert!(used[l as usize].replace(b.relay).is_none(), "lane {l} twice in slot {slot}");
+                        assert!(
+                            used[l as usize].replace(b.relay).is_none(),
+                            "lane {l} twice in slot {slot}"
+                        );
                     }
                 }
                 // Another relay's own grant is never inside someone else's run.
@@ -620,10 +805,17 @@ mod bonding_tests {
                 }
                 let (a, z) = (b.lane(first).unwrap(), b.lane(first + count - 1).unwrap());
                 let width = z.upper_hz() - a.lower_hz;
-                assert_eq!(width, count as u64 * LANE_WIDTH_HZ + (count as u64 - 1) * (LANE_PITCH_HZ - LANE_WIDTH_HZ));
+                assert_eq!(
+                    width,
+                    count as u64 * LANE_WIDTH_HZ + (count as u64 - 1) * (LANE_PITCH_HZ - LANE_WIDTH_HZ)
+                );
                 assert!(width <= 2_700);
                 let (lo, hi) = (1500 - LANE_WIDTH_HZ / 2, 1500 - LANE_WIDTH_HZ / 2 + width);
-                assert_eq!(t.permit_tx("17m", first, first + count - 1, a.dial_hz, lo, hi), Ok(()), "{first}+{count}");
+                assert_eq!(
+                    t.permit_tx("17m", first, first + count - 1, a.dial_hz, lo, hi),
+                    Ok(()),
+                    "{first}+{count}"
+                );
             }
         }
     }
@@ -635,25 +827,58 @@ mod hop_tests {
 
     #[test]
     fn a_hop_uses_a_cell_of_the_sender_and_a_slot_when_the_target_is_listening() {
-        let rs: Vec<RelayIn> = (0..12u32).map(|i| RelayIn { id: i, queue_bytes: if i < 8 { 500 } else { 0 }, urgency: 0 }).collect();
+        let rs: Vec<RelayIn> = (0..12u32)
+            .map(|i| RelayIn {
+                id: i,
+                queue_bytes: if i < 8 { 500 } else { 0 },
+                urgency: 0,
+            })
+            .collect();
         for epoch in 0..100 {
             let p = plan(epoch, 4, &rs);
             // Relay 0 wants to hop to 9 (idle: always listening) and relay 1 to 2 (busy).
             let hops = hop_grants(&p, &[(0, 9), (1, 2), (3, 9)]);
             let mut by_target: Vec<(u8, u32)> = vec![];
             for h in &hops {
-                assert!(p.grants.iter().any(|g| g.relay == h.relay && g.slot == h.slot && g.lane == h.lane), "not the sender's own cell");
-                assert!(p.grant_for(h.target, h.slot).is_none(), "target {} sends in slot {}", h.target, h.slot);
-                assert!(!by_target.contains(&(h.slot, h.target)), "two hops into one relay in one slot");
+                assert!(
+                    p.grants
+                        .iter()
+                        .any(|g| g.relay == h.relay && g.slot == h.slot && g.lane == h.lane),
+                    "not the sender's own cell"
+                );
+                assert!(
+                    p.grant_for(h.target, h.slot).is_none(),
+                    "target {} sends in slot {}",
+                    h.target,
+                    h.slot
+                );
+                assert!(
+                    !by_target.contains(&(h.slot, h.target)),
+                    "two hops into one relay in one slot"
+                );
                 by_target.push((h.slot, h.target));
             }
-            assert!(hops.iter().any(|h| h.relay == 0 && h.target == 9), "an idle target is always reachable");
+            assert!(
+                hops.iter().any(|h| h.relay == 0 && h.target == 9),
+                "an idle target is always reachable"
+            );
         }
     }
 
     #[test]
     fn a_target_that_transmits_all_epoch_gets_no_hop() {
-        let mut rs: Vec<RelayIn> = vec![RelayIn { id: 1, queue_bytes: 900, urgency: 0 }, RelayIn { id: 2, queue_bytes: 900, urgency: 0 }];
+        let mut rs: Vec<RelayIn> = vec![
+            RelayIn {
+                id: 1,
+                queue_bytes: 900,
+                urgency: 0,
+            },
+            RelayIn {
+                id: 2,
+                queue_bytes: 900,
+                urgency: 0,
+            },
+        ];
         rs[0].queue_bytes = 900;
         // Two busy relays each hold all six slots on their own lane: neither can listen to the other.
         let p = plan(3, 1, &rs);

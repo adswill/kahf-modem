@@ -66,14 +66,18 @@ struct Slow {
 impl LaneSense {
     /// One lane per audio centre (Hz), in order of frequency. Neighbours are the adjacent entries.
     pub fn new(centres: &[f64]) -> Self {
-        let window = (0..FRAME).map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / (FRAME - 1) as f64).cos()) as f32).collect();
+        let window = (0..FRAME)
+            .map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / (FRAME - 1) as f64).cos()) as f32)
+            .collect();
         let tables = |f: fn(f64) -> f64| -> Vec<Vec<f32>> {
             centres
                 .iter()
                 .flat_map(|c| {
                     (0..BINS).map(move |b| {
                         let hz = c - 300.0 + b as f64 * BIN_HZ;
-                        (0..FRAME).map(|i| f(2.0 * PI * hz * i as f64 / FS) as f32).collect::<Vec<f32>>()
+                        (0..FRAME)
+                            .map(|i| f(2.0 * PI * hz * i as f64 / FS) as f32)
+                            .collect::<Vec<f32>>()
                     })
                 })
                 .collect()
@@ -97,7 +101,12 @@ impl LaneSense {
     pub fn push(&mut self, samples: &[f32]) {
         self.pending.extend_from_slice(samples);
         while self.pending.len() >= FRAME {
-            let frame: Vec<f32> = self.pending.drain(..FRAME).zip(&self.window).map(|(a, w)| a * w).collect();
+            let frame: Vec<f32> = self
+                .pending
+                .drain(..FRAME)
+                .zip(&self.window)
+                .map(|(a, w)| a * w)
+                .collect();
             for k in 0..self.centres.len() {
                 let mut p = [0f64; BINS];
                 for (b, pb) in p.iter_mut().enumerate() {
@@ -115,7 +124,10 @@ impl LaneSense {
                 top.sort_by(|a, b| b.total_cmp(a));
                 let peak = (top[0] + top[1] + top[2]) / total;
                 let h = &mut self.hist[k];
-                h.push_back(Frame { db: (10.0 * total.log10()) as f32, peak: peak as f32 });
+                h.push_back(Frame {
+                    db: (10.0 * total.log10()) as f32,
+                    peak: peak as f32,
+                });
                 if h.len() > HISTORY {
                     h.pop_front();
                 }
@@ -174,7 +186,9 @@ impl LaneSense {
     /// What sits on lane `k`, judged from the last 40 s (the periodic class needs about that).
     pub fn classify(&self, k: usize) -> Class {
         let h = &self.hist[k];
-        let Some(floor) = self.floor_db(k) else { return Class::Quiet };
+        let Some(floor) = self.floor_db(k) else {
+            return Class::Quiet;
+        };
         let on = |f: &Frame| f.db > floor + BUSY_OVER_DB;
         let recent: Vec<&Frame> = h.iter().rev().take(30).collect();
         if recent.iter().filter(|f| on(f)).count() * 2 < recent.len().max(1) && !self.periodic(k, floor) {
@@ -224,7 +238,11 @@ impl LaneSense {
     /// Two or more long transmissions about 15 s apart, with gaps between.
     fn periodic(&self, k: usize, floor: f32) -> bool {
         let runs = on_runs(self.hist[k].iter().map(|f| f.db > floor + BUSY_OVER_DB));
-        let long: Vec<usize> = runs.iter().filter(|(_, len)| *len >= 80).map(|(s, _)| *s).collect();
+        let long: Vec<usize> = runs
+            .iter()
+            .filter(|(_, len)| *len >= 80)
+            .map(|(s, _)| *s)
+            .collect();
         long.windows(2).any(|w| (130..=170).contains(&(w[1] - w[0])))
     }
 }
@@ -310,7 +328,10 @@ mod tests {
     struct Rng(u64);
     impl Rng {
         fn u(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gauss(&mut self) -> f32 {
@@ -326,7 +347,9 @@ mod tests {
     }
 
     fn tone(hz: f64, amp: f32, t0: usize, n: usize) -> Vec<f32> {
-        (0..n).map(|i| amp * (2.0 * PI * hz * (t0 + i) as f64 / FS).sin() as f32).collect()
+        (0..n)
+            .map(|i| amp * (2.0 * PI * hz * (t0 + i) as f64 / FS).sin() as f32)
+            .collect()
     }
 
     fn add(a: &mut [f32], b: &[f32]) {

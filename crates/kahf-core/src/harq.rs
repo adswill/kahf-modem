@@ -51,9 +51,16 @@ impl Harq {
             self.slots[slot] = None;
             return Some(Decoded { info, looks: 1 });
         }
-        let prev = self.slots[slot].take().filter(|e| e.mode == mode && now_ms.saturating_sub(e.at_ms) <= KEEP_MS && e.llr.len() == llr.len());
+        let prev = self.slots[slot].take().filter(|e| {
+            e.mode == mode && now_ms.saturating_sub(e.at_ms) <= KEEP_MS && e.llr.len() == llr.len()
+        });
         let Some(prev) = prev else {
-            self.slots[slot] = Some(Entry { mode, at_ms: now_ms, llr: llr.to_vec(), looks: 1 });
+            self.slots[slot] = Some(Entry {
+                mode,
+                at_ms: now_ms,
+                llr: llr.to_vec(),
+                looks: 1,
+            });
             return None;
         };
         let sum: Vec<f32> = prev.llr.iter().zip(llr).map(|(a, b)| a + b).collect();
@@ -61,7 +68,12 @@ impl Harq {
         match ldpc::decode(&sum, 50).filter(|i| accept(i)) {
             Some(info) => Some(Decoded { info, looks }),
             None => {
-                self.slots[slot] = Some(Entry { mode, at_ms: now_ms, llr: sum, looks });
+                self.slots[slot] = Some(Entry {
+                    mode,
+                    at_ms: now_ms,
+                    llr: sum,
+                    looks,
+                });
                 None
             }
         }
@@ -80,7 +92,10 @@ mod tests {
     struct Rng(u64);
     impl Rng {
         fn u(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gauss(&mut self) -> f32 {
@@ -105,7 +120,10 @@ mod tests {
         a.extend(air.iter().map(|v| v + sigma * r.gauss()));
         a.extend((0..3000).map(|_| sigma * r.gauss()));
         let (start, hz, tau) = kami::find_preamble(&a)?;
-        kami::demodulate_at(&a, start, hz, tau, ldpc::N, &[SH]).into_iter().next().map(|(_, l)| l)
+        kami::demodulate_at(&a, start, hz, tau, ldpc::N, &[SH])
+            .into_iter()
+            .next()
+            .map(|(_, l)| l)
     }
 
     /// Attempts needed for each frame, up to 4, with and without combining; (without, with).
@@ -118,7 +136,9 @@ mod tests {
             let mut h = Harq::default();
             let (mut p, mut c) = (0, 0);
             for n in 1..=4u32 {
-                let Some(l) = look(&air, snr, t * 100 + n as u64) else { continue };
+                let Some(l) = look(&air, snr, t * 100 + n as u64) else {
+                    continue;
+                };
                 if p == 0 && ldpc::decode(&l, 50).is_some_and(|i| ok(&i)) {
                     p = n;
                 }
@@ -137,7 +157,12 @@ mod tests {
         // KAMI-8 needs about -2.3 dB per sample; at -7.5 dB a single look mostly fails.
         let (plain, chase) = attempts(-7.5, 24);
         let done = |v: &[u32]| v.iter().filter(|n| **n > 0).count();
-        assert!(done(&chase) > done(&plain), "combining should rescue frames fresh tries do not: {} vs {}", done(&chase), done(&plain));
+        assert!(
+            done(&chase) > done(&plain),
+            "combining should rescue frames fresh tries do not: {} vs {}",
+            done(&chase),
+            done(&plain)
+        );
         // Measured when written: fresh tries decode 0 of 24 within four looks, combining 17 of 24.
         assert!(done(&chase) >= 14, "{} of 24 within four tries", done(&chase));
     }
@@ -146,12 +171,19 @@ mod tests {
     fn a_good_repeat_decodes_alone_and_an_unrelated_frame_is_not_spoiled() {
         let a = info(1);
         let b = info(2);
-        let (air_a, air_b) = (kami::modulate_frame_shape(&ldpc::encode(&a), SH), kami::modulate_frame_shape(&ldpc::encode(&b), SH));
+        let (air_a, air_b) = (
+            kami::modulate_frame_shape(&ldpc::encode(&a), SH),
+            kami::modulate_frame_shape(&ldpc::encode(&b), SH),
+        );
         let mut h = Harq::default();
         // A bad look at A is kept ...
-        assert!(h.try_decode(0, 1, &look(&air_a, -9.0, 1).unwrap(), 0, |i| i == a.as_slice()).is_none());
+        assert!(h
+            .try_decode(0, 1, &look(&air_a, -9.0, 1).unwrap(), 0, |i| i == a.as_slice())
+            .is_none());
         // ... then a clean look at a different frame B decodes by itself.
-        let got = h.try_decode(0, 1, &look(&air_b, 20.0, 2).unwrap(), 1000, |i| i == b.as_slice()).unwrap();
+        let got = h
+            .try_decode(0, 1, &look(&air_b, 20.0, 2).unwrap(), 1000, |i| i == b.as_slice())
+            .unwrap();
         assert_eq!((got.info, got.looks), (b, 1));
     }
 
@@ -163,9 +195,14 @@ mod tests {
         let mut h = Harq::default();
         assert!(h.try_decode(0, 1, &bad, 0, |i| i == a.as_slice()).is_none());
         // Same bits again after the keep time: it starts over (and fails alone).
-        assert!(h.try_decode(0, 1, &bad, KEEP_MS + 1, |i| i == a.as_slice()).is_none());
+        assert!(h
+            .try_decode(0, 1, &bad, KEEP_MS + 1, |i| i == a.as_slice())
+            .is_none());
         let mut h = Harq::default();
         assert!(h.try_decode(0, 1, &bad, 0, |i| i == a.as_slice()).is_none());
-        assert!(h.try_decode(0, 2, &bad, 10, |i| i == a.as_slice()).is_none(), "another mode starts over");
+        assert!(
+            h.try_decode(0, 2, &bad, 10, |i| i == a.as_slice()).is_none(),
+            "another mode starts over"
+        );
     }
 }

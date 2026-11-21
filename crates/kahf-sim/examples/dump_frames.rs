@@ -8,7 +8,9 @@ fn main() {
     let mut s = 12345u64;
     let mut bits = Vec::new();
     for _ in 0..648 {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         bits.push(((s >> 33) & 1) as u8);
     }
     for (name, m) in [

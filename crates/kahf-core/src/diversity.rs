@@ -16,12 +16,18 @@ const LEVEL: f32 = 7.0;
 /// 4 bit signed levels, two per byte (high nibble first), for `llr.len()` bits.
 pub fn pack(llr: &[f32]) -> Vec<u8> {
     let q = |l: f32| ((l.clamp(-CLIP, CLIP) * LEVEL / CLIP).round() as i8 + 8) as u8 & 0x0F;
-    llr.chunks(2).map(|c| (q(c[0]) << 4) | c.get(1).map_or(8, |l| q(*l))).collect()
+    llr.chunks(2)
+        .map(|c| (q(c[0]) << 4) | c.get(1).map_or(8, |l| q(*l)))
+        .collect()
 }
 
 pub fn unpack(bytes: &[u8], n: usize) -> Vec<f32> {
     let d = |nib: u8| (nib as i8 - 8) as f32 * CLIP / LEVEL;
-    bytes.iter().flat_map(|b| [d(b >> 4), d(b & 0x0F)]).take(n).collect()
+    bytes
+        .iter()
+        .flat_map(|b| [d(b >> 4), d(b & 0x0F)])
+        .take(n)
+        .collect()
 }
 
 /// What a relay sends for a codeword it could not decode.
@@ -79,7 +85,10 @@ mod tests {
     struct Rng(u64);
     impl Rng {
         fn u(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
         }
         fn gauss(&mut self) -> f32 {
@@ -105,7 +114,10 @@ mod tests {
         a.extend(air.iter().map(|v| v + sigma * r.gauss()));
         a.extend((0..3000).map(|_| sigma * r.gauss()));
         let (start, hz, tau) = kami::find_preamble(&a)?;
-        kami::demodulate_at(&a, start, hz, tau, ldpc::N, &[SH]).into_iter().next().map(|(_, l)| l)
+        kami::demodulate_at(&a, start, hz, tau, ldpc::N, &[SH])
+            .into_iter()
+            .next()
+            .map(|(_, l)| l)
     }
 
     #[test]
@@ -145,7 +157,11 @@ mod tests {
                 } else {
                     failed += 1;
                     // Only what failed locally is forwarded.
-                    c.add(&Forward { frame: t, relay, llr4: pack(&llr) });
+                    c.add(&Forward {
+                        frame: t,
+                        relay,
+                        llr4: pack(&llr),
+                    });
                 }
             }
             if c.relays(t) > 0 || failed == 3 {
@@ -159,7 +175,11 @@ mod tests {
             }
         }
         // Measured when written: 0 of 72 single looks decode, 15 of 24 frames lost at all three relays are decoded by the sum.
-        assert!(single_ok * 100 <= trials as usize * 3 * 40, "single decodes {single_ok} of {}", trials * 3);
+        assert!(
+            single_ok * 100 <= trials as usize * 3 * 40,
+            "single decodes {single_ok} of {}",
+            trials * 3
+        );
         assert!(each_failed_and_combined_ok >= 10, "frames lost at all three relays but decoded by the server: {each_failed_and_combined_ok} (combined {combined_ok})");
     }
 
@@ -169,10 +189,18 @@ mod tests {
         let air = kami::modulate_frame_shape(&ldpc::encode(&sent), SH);
         let mut c = Combiner::default();
         let l = look(&air, 20.0, 1).unwrap();
-        c.add(&Forward { frame: 1, relay: 7, llr4: pack(&l) });
+        c.add(&Forward {
+            frame: 1,
+            relay: 7,
+            llr4: pack(&l),
+        });
         assert_eq!(c.decode(1).as_deref(), Some(sent.as_slice()));
         // The same relay sending again replaces, not doubles.
-        c.add(&Forward { frame: 1, relay: 7, llr4: pack(&l) });
+        c.add(&Forward {
+            frame: 1,
+            relay: 7,
+            llr4: pack(&l),
+        });
         assert_eq!(c.relays(1), 1);
         c.forget(1);
         assert_eq!(c.decode(1), None);

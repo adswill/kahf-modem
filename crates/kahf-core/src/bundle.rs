@@ -88,7 +88,15 @@ pub fn peek(payload: &[u8]) -> Option<Header> {
     if index >= count {
         return None;
     }
-    Some(Header { kind, flags, hops, next_hop: n(2), source: n(5), index, count })
+    Some(Header {
+        kind,
+        flags,
+        hops,
+        next_hop: n(2),
+        source: n(5),
+        index,
+        count,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,7 +126,10 @@ impl Frame {
     }
 
     pub fn decode(payload: &[u8]) -> Option<Frame> {
-        Some(Frame { header: peek(payload)?, body: payload[HEADER..].to_vec() })
+        Some(Frame {
+            header: peek(payload)?,
+            body: payload[HEADER..].to_vec(),
+        })
     }
 
     /// Should this station act on the frame? Only the named next hop (or anyone, for 0) does.
@@ -198,7 +209,15 @@ pub fn ack(me: u32, to: u32, got: &[u8]) -> Result<Vec<u8>, String> {
         map |= 1 << i;
     }
     Frame {
-        header: Header { kind: Kind::Ack, flags: 0, hops: 0, next_hop: to, source: me, index: 0, count: 1 },
+        header: Header {
+            kind: Kind::Ack,
+            flags: 0,
+            hops: 0,
+            next_hop: to,
+            source: me,
+            index: 0,
+            count: 1,
+        },
         body: vec![map],
     }
     .encode()
@@ -217,13 +236,25 @@ mod tests {
     const CALLS: [&str; 5] = ["AA1AAA", "BB1BBB", "CC1CCC", "DD1DDD", "EE1EEE"];
 
     fn item(to: &str, text: &str) -> Item {
-        Item { to: h24(to), kind: Kind::Message, body: text.as_bytes().to_vec() }
+        Item {
+            to: h24(to),
+            kind: Kind::Message,
+            body: text.as_bytes().to_vec(),
+        }
     }
 
     #[test]
     fn the_header_round_trips_and_is_nine_bytes() {
         let f = Frame {
-            header: Header { kind: Kind::Grant, flags: 5, hops: 3, next_hop: 0xABCDEF, source: 0x123456, index: 6, count: 8 },
+            header: Header {
+                kind: Kind::Grant,
+                flags: 5,
+                hops: 3,
+                next_hop: 0xABCDEF,
+                source: 0x123456,
+                index: 6,
+                count: 8,
+            },
             body: b"xyz".to_vec(),
         };
         let b = f.encode().unwrap();
@@ -236,10 +267,33 @@ mod tests {
     fn bad_input_is_refused() {
         assert_eq!(peek(&[0x30; 8]), None, "short");
         assert_eq!(peek(&[0x11; 36]), None, "a link layer tag is not ours");
-        let mut b = Frame { header: Header { kind: Kind::Ack, flags: 0, hops: 0, next_hop: 1, source: 2, index: 0, count: 1 }, body: vec![] }.encode().unwrap();
+        let mut b = Frame {
+            header: Header {
+                kind: Kind::Ack,
+                flags: 0,
+                hops: 0,
+                next_hop: 1,
+                source: 2,
+                index: 0,
+                count: 1,
+            },
+            body: vec![],
+        }
+        .encode()
+        .unwrap();
         b[8] = 0x30; // index 3 of a count of 1
         assert_eq!(peek(&b), None);
-        let big = Frame { header: peek(&b[..0].iter().chain(&[0x32, 0, 0, 0, 1, 0, 0, 2, 0]).copied().collect::<Vec<u8>>()).unwrap(), body: vec![0; BODY_MAX + 1] };
+        let big = Frame {
+            header: peek(
+                &b[..0]
+                    .iter()
+                    .chain(&[0x32, 0, 0, 0, 1, 0, 0, 2, 0])
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            )
+            .unwrap(),
+            body: vec![0; BODY_MAX + 1],
+        };
         assert!(big.encode().is_err());
     }
 
@@ -252,7 +306,11 @@ mod tests {
         let burst = &bursts[0];
         assert_eq!(burst.len(), 5);
         for (i, me) in CALLS.iter().enumerate() {
-            let mine: Vec<Frame> = burst.iter().filter_map(|p| Frame::decode(p)).filter(|f| f.is_for(h24(me))).collect();
+            let mine: Vec<Frame> = burst
+                .iter()
+                .filter_map(|p| Frame::decode(p))
+                .filter(|f| f.is_for(h24(me)))
+                .collect();
             assert_eq!(mine.len(), 1, "{me}");
             assert_eq!(mine[0].body, format!("hi {me}").as_bytes());
             assert_eq!(mine[0].header.index as usize, i);
@@ -263,21 +321,39 @@ mod tests {
             }
         }
         // The sender ignores its own frames coming back (echo), whoever they name.
-        assert!(burst.iter().filter_map(|p| Frame::decode(p)).all(|f| !f.is_for(src)));
+        assert!(burst
+            .iter()
+            .filter_map(|p| Frame::decode(p))
+            .all(|f| !f.is_for(src)));
         // A station that is not in the bundle acts on nothing.
         let other = h24("ZZ9ZZZ");
-        assert!(burst.iter().filter_map(|p| Frame::decode(p)).all(|f| !f.is_for(other)));
+        assert!(burst
+            .iter()
+            .filter_map(|p| Frame::decode(p))
+            .all(|f| !f.is_for(other)));
     }
 
     #[test]
     fn answers_come_in_the_order_listed_and_never_share_a_slot() {
         let src = h24("RELAY1");
         // CC1CCC has two items; it answers once, at its first place.
-        let items = vec![item("BB1BBB", "1"), item("CC1CCC", "2"), item("CC1CCC", "3"), item("AA1AAA", "4"), item("EE1EEE", "5")];
+        let items = vec![
+            item("BB1BBB", "1"),
+            item("CC1CCC", "2"),
+            item("CC1CCC", "3"),
+            item("AA1AAA", "4"),
+            item("EE1EEE", "5"),
+        ];
         let burst = &build(src, &items).unwrap()[0];
         let heads: Vec<Header> = burst.iter().map(|p| peek(p).unwrap()).collect();
-        assert_eq!(answer_order(&heads), vec![h24("BB1BBB"), h24("CC1CCC"), h24("AA1AAA"), h24("EE1EEE")]);
-        let delays: Vec<u64> = ["BB1BBB", "CC1CCC", "AA1AAA", "EE1EEE"].iter().map(|c| answer_delay_ms(answer_slot(&heads, h24(c)).unwrap())).collect();
+        assert_eq!(
+            answer_order(&heads),
+            vec![h24("BB1BBB"), h24("CC1CCC"), h24("AA1AAA"), h24("EE1EEE")]
+        );
+        let delays: Vec<u64> = ["BB1BBB", "CC1CCC", "AA1AAA", "EE1EEE"]
+            .iter()
+            .map(|c| answer_delay_ms(answer_slot(&heads, h24(c)).unwrap()))
+            .collect();
         assert_eq!(delays, vec![300, 600, 900, 1200]);
         assert_eq!(answer_slot(&heads, h24("DD1DDD")), None);
     }
@@ -289,7 +365,10 @@ mod tests {
         let mut burst = build(src, &items).unwrap().remove(0);
         burst.remove(2); // CC1CCC's codeword is lost
         for me in CALLS {
-            let got = burst.iter().filter_map(|p| Frame::decode(p)).any(|f| f.is_for(h24(me)));
+            let got = burst
+                .iter()
+                .filter_map(|p| Frame::decode(p))
+                .any(|f| f.is_for(h24(me)));
             assert_eq!(got, me != "CC1CCC", "{me}");
         }
     }
@@ -314,7 +393,15 @@ mod tests {
         assert_eq!(bursts.iter().map(|b| b.len()).collect::<Vec<_>>(), vec![8, 3]);
         assert_eq!(peek(&bursts[1][2]).unwrap().count, 3);
         assert_eq!(build(h24("RELAY1"), &[]).unwrap().len(), 0);
-        assert!(build(1, &[Item { to: 2, kind: Kind::Message, body: vec![0; BODY_MAX + 1] }]).is_err());
+        assert!(build(
+            1,
+            &[Item {
+                to: 2,
+                kind: Kind::Message,
+                body: vec![0; BODY_MAX + 1]
+            }]
+        )
+        .is_err());
     }
 
     #[test]
