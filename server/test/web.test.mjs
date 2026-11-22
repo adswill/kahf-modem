@@ -43,30 +43,32 @@ function scriptsOf(html) {
 
 const EMOJI = /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/u;
 
-test("home page: no downloads block without a release, and the real modem numbers", () => {
+test("home page: no downloads block without a release, the twelve lanes and the honest status", () => {
   const html = renderHome();
-  for (const id of ["top-title", "why17", "what", "relays", "how", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
+  for (const id of ["top-title", "lanes", "messages", "reach", "status", "dev", "licences"]) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.equal((html.match(/<h1\b/g) || []).length, 1);
-  assert.equal((html.match(/<section\b/g) || []).length, 5);
+  assert.equal((html.match(/<section\b/g) || []).length, 7);
   assert.doesNotMatch(html, /no public release|Latest version|Required update|Planned builds|id="download"/i);
   assert.match(html, /No religious or political content/);
   assert.match(html, /General Public License/);
   assert.match(html, /class="skip" href="#main"/);
-  assert.match(html, /<svg[^>]*aria-labelledby="dg-t dg-d"/);
-  assert.match(html, /153 carriers, 15\.625 Hz apart/);
-  assert.match(html, /312 Hz/);
-  assert.match(html, /2\.69 kHz/);
-  assert.equal((html.match(/<line class="(?:carr|pilot)"/g) || []).length, 153);
+  // No old modem claims: the page describes KAMI lanes on 17 metres only.
+  assert.doesNotMatch(html, /OFDM|153 carriers|\b(80|40|20) ?m\b|14\.1\d|7\.0\d/);
+  // The lane table: twelve rows, with the numbers of the plan (MESH-SPEC 2.2).
+  assert.equal((html.match(/<tr data-k="\d+">/g) || []).length, 12);
+  assert.match(html, /<td>C1<\/td><td>Calling<\/td><td>18\.11494<\/td><td>18\.11344<\/td>/);
+  assert.match(html, /<td>R8<\/td><td>Relay<\/td><td>18\.11914<\/td><td>18\.11764<\/td>/);
+  assert.equal((html.match(/<g class="lane /g) || []).length, 12);
+  // It says plainly that nothing has been on a real radio.
+  assert.match(html, /not yet been tried on a real radio channel/);
+  assert.match(html, /refuses to transmit/);
   assert.doesNotMatch(html, /<canvas|Simulation|Generated signal/);
 });
 
-test("the screenshot is one real file, shown at its true size", async () => {
+test("the old screenshot file is still served, but the home page shows no image", async () => {
   const html = renderHome();
-  assert.equal((html.match(/<img\b/g) || []).length, 1);
-  assert.match(html, /<img src="\/operate\.png" width="1512" height="940" alt="[^"]+"/);
+  assert.equal((html.match(/<img\b/g) || []).length, 0);
   const png = await readFile(new URL("../src/web/operate.png", import.meta.url));
-  assert.equal(png.readUInt32BE(16), 1512);
-  assert.equal(png.readUInt32BE(20), 940);
   const res = await handleRequest(new Request("https://kahf.test/operate.png"), fakeStore(), Date.parse(NOW));
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("content-type"), "image/png");
@@ -109,7 +111,7 @@ test("one self-hosted display face, system faces for text and data", async () =>
 });
 
 const MAP_LIB = /https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)/;
-const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TILES = 'window.location.origin + "/tiles/{z}/{x}/{y}.png"';
 
 test("the map is MapLibre with OpenStreetMap raster tiles and the pinned library", () => {
   const html = renderMap([STATION], NOW, [RELAY]);
@@ -143,7 +145,7 @@ test("the map script makes only the feed fetch and loads only the tiles it names
   const fetches = MAP_SCRIPT.match(/\bfetch\(/g) || [];
   assert.equal(fetches.length, 2, "the shared helper and the live poll");
   const urls = MAP_SCRIPT.match(/https?:\/\/[^\s"'`)]+/g) || [];
-  assert.deepEqual([...new Set(urls)], [TILES]);
+  assert.deepEqual([...new Set(urls)], [], "no external URL in the script");
 });
 
 test("the map page has its status line, the selected-node panel and the count", () => {
@@ -157,7 +159,8 @@ test("no external URL except the map library and its tiles, and the only image i
   const pages = [renderHome(), renderMap([STATION], NOW, [RELAY]), renderMap([], NOW, [])];
   for (const html of pages) {
     const allowed = /^(https:\/\/unpkg\.com\/maplibre-gl@5\.7\.3\/dist\/maplibre-gl\.(js|css)|https:\/\/tile\.openstreetmap\.org\/\{z\}\/\{x\}\/\{y\}\.png)$/;
-    for (const u of html.match(/https?:\/\/[^\s"'<>)]+/g) || []) assert.match(u, allowed, u);
+    const own = /^https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)$/;
+    for (const u of html.match(/https?:\/\/[^\s"'<>)]+/g) || []) assert.ok(allowed.test(u) || own.test(u), u);
     assert.doesNotMatch(html, /<(?:iframe|object|embed|base|form|audio|video|source)\b/i);
     assert.doesNotMatch(html, /<meta[^>]+http-equiv/i);
     for (const m of html.matchAll(/<img\b[^>]*>/g)) assert.match(m[0], /src="\/operate\.png"/);
@@ -180,8 +183,9 @@ test("the strict CSP is still applied to both pages and the image", async () => 
   assert.match(home, /img-src 'self'/);
   assert.match(home, /connect-src 'self'/);
   assert.match(map, /script-src 'sha256-[^']+' https:\/\/unpkg\.com/);
-  assert.match(map, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
-  assert.match(map, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
+  assert.match(map, /connect-src 'self'; /);
+  assert.match(map, /img-src 'self' data: blob:;/);
+  assert.doesNotMatch(map, /tile\.openstreetmap/);
   assert.ok(home.includes(`script-src ${await homeScriptSha256()}`));
   assert.ok(map.includes(`script-src ${await mapScriptSha256()}`));
 });
@@ -237,8 +241,29 @@ test("the colour tokens match the design: night ground, bone text, amber, one gr
 });
 
 test("pages stay small", () => {
-  assert.ok(renderHome().length < 60_000);
+  assert.ok(renderHome().length < 90_000);
   assert.ok(renderMap([STATION], NOW, [RELAY]).length < 60_000);
+});
+
+test("a click on a map node opens a card with its details, built from DOM calls", () => {
+  assert.match(MAP_SCRIPT, /new window\.maplibregl\.Popup\(/);
+  assert.match(MAP_SCRIPT, /setDOMContent\(wrap\)/);
+  assert.match(MAP_SCRIPT, /function nodeCard\(p\)/);
+  assert.match(MAP_SCRIPT, /Known only because "/);
+  assert.match(MAP_SCRIPT, /Reported hearing "/);
+  assert.match(MAP_SCRIPT, /Passes messages between stations/);
+  // Nodes at the same point are listed together, and the chosen one is marked.
+  assert.match(MAP_SCRIPT, /here\.forEach\(function \(x\) \{ wrap\.appendChild\(nodeCard/);
+  assert.match(MAP_SCRIPT, /function syncSelection\(\)/);
+  assert.doesNotMatch(MAP_SCRIPT, /setHTML|innerHTML|outerHTML/);
+});
+
+test("the map page says why it is empty and has a details row", () => {
+  const html = renderMap([], NOW, []);
+  assert.match(html, /id="map-empty"/);
+  assert.match(html, /No stations are on the map yet/);
+  assert.match(html, /id="p-info"/);
+  assert.match(html, /Click a point on the map/);
 });
 
 test("the inner pages render, are linked from the nav, and follow the same rules as the home page", async () => {
@@ -248,7 +273,9 @@ test("the inner pages render, are linked from the nav, and follow the same rules
     const html = renderSite(path);
     assert.equal((html.match(/<h1\b/g) || []).length, 1, path);
     assert.match(html, new RegExp(`<a href="${path}" aria-current="page">`), path);
-    assert.doesNotMatch(html.replace(/<script>[\s\S]*?<\/script>/, "").replace(/<style>[\s\S]*?<\/style>/, ""), EXTERNAL, path);
+    const bare = html.replace(/<script>[\s\S]*?<\/script>/, "").replace(/<style>[\s\S]*?<\/style>/g, "");
+    // The only links off this site are the project source and the support page (in the footer).
+    assert.doesNotMatch(bare.replace(/href="https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)" rel="noopener noreferrer"/g, 'href="#"'), EXTERNAL, path);
     assert.doesNotMatch(html, EMOJI, path);
     assert.doesNotMatch(html, /lorem|ipsum|TODO|TBD|coming soon/i, path);
     const res = await handleRequest(new Request("https://kahf.test" + path), fakeStore(), Date.parse(NOW));
@@ -259,8 +286,3 @@ test("the inner pages render, are linked from the nav, and follow the same rules
   assert.equal(renderSite("/nope"), null);
 });
 
-test("the 17 m strip spans the real allocation and is the same on every render", async () => {
-  const { bandStrip } = await import("../src/web/home.js");
-  assert.equal(bandStrip(), bandStrip());
-  assert.match(bandStrip(), /18\.068 to 18\.168 megahertz/);
-});

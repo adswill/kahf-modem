@@ -279,4 +279,33 @@ mod tests {
             "floor moved from {before} to {after} dB"
         );
     }
+
+    #[test]
+    fn sense_sees_every_kami_mode_as_a_busy_channel() {
+        use crate::{frame, kami, ldpc};
+        let cw = ldpc::encode(&frame::build_payload_as(b"carrier sense", 3));
+        for sh in [
+            kami::Shape::walsh(8),
+            kami::Shape::walsh(5),
+            kami::Shape::walsh(2),
+            kami::Shape { wb: 0, lb: 3 },
+        ] {
+            let mut s = Sense::new(FS);
+            s.push(&noise(secs(2.0), 0.01, 21));
+            assert!(!s.channel_busy(1.5, 2.7), "{sh:?} quiet channel");
+            // The burst loops until the sense window is full of it.
+            let tx = kami::modulate_burst_shape(std::slice::from_ref(&cw), sh);
+            let mut air = Vec::new();
+            while air.len() < secs(1.0) {
+                air.extend_from_slice(&tx);
+            }
+            let heard: Vec<f32> = air
+                .iter()
+                .zip(noise(air.len(), 0.01, 22))
+                .map(|(a, n)| 0.3 * a + n)
+                .collect();
+            s.push(&heard);
+            assert!(s.channel_busy(1.5, 2.7), "{sh:?} signal in the channel");
+        }
+    }
 }

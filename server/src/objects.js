@@ -2,8 +2,6 @@
 //
 //   CallsignObject  one per callsign: the reporter owner (key, removal replay guard)
 //                   and the relay registration (key, area).
-//   MailObject      one per callsign: backbone message queue, id claims, receipts.
-//   IndexObject     one for the backbone: heard index, wanted list, rate counters.
 //   AreaObject      one per one-degree area: which relays are live there, and the
 //                   slots each one last planned. New slots are planned against them.
 //
@@ -16,7 +14,6 @@
 // Operations are functions (storage, args) -> result. Failures are returned as
 // { ok: false, error }; anything else thrown is an internal error.
 import { REMOVE_WINDOW_MS, isExpired, planSchedule } from "./core.js";
-import { indexOps, mailOps } from "./backbone.js";
 
 const OWNER = "owner";
 const RELAY = "relay";
@@ -120,9 +117,18 @@ export const areaOps = {
     const booked = [];
     for (const other of members) {
       if (other === relay) continue;
-      for (const slot of state.slots[other]?.slots ?? []) {
+      const rec = state.slots[other];
+      for (const slot of rec?.slots ?? []) {
         if (slot.start + slot.duration > nowS) {
-          booked.push({ area, channel: slot.channel, start: slot.start, duration: slot.duration });
+          // Every relay's slots are kept in this one object, so the planner sees them all:
+          // same-area slots of any direction, and transmit slots of every area (HF is global).
+          booked.push({
+            area: rec.area ?? area,
+            channel: slot.channel,
+            start: slot.start,
+            duration: slot.duration,
+            direction: slot.direction,
+          });
         }
       }
     }
@@ -136,6 +142,7 @@ export const areaOps = {
     }
     const slots = plan.slots[relay];
     state.slots[relay] = {
+      area,
       slots: slots.map((s2) => ({ channel: s2.channel, start: s2.start, duration: s2.duration, direction: s2.direction })),
       refreshed_at: nowMs,
     };
@@ -183,25 +190,5 @@ export class AreaObject {
   }
   fetch(request) {
     return serve(this.storage, areaOps, request);
-  }
-}
-
-/** One per callsign: the HF backbone queue, claims and receipts (see backbone.js). */
-export class MailObject {
-  constructor(ctx) {
-    this.storage = ctx.storage;
-  }
-  fetch(request) {
-    return serve(this.storage, mailOps, request);
-  }
-}
-
-/** One for the whole backbone: heard index, wanted list, relay rate counters. */
-export class IndexObject {
-  constructor(ctx) {
-    this.storage = ctx.storage;
-  }
-  fetch(request) {
-    return serve(this.storage, indexOps, request);
   }
 }

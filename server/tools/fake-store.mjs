@@ -5,15 +5,15 @@
 // `slow` adds random latency, like KV, to shake out ordering bugs.
 // The maps are exposed (recs, owners, relays, areas) so tests can seed and inspect them.
 import { areaOps, callsignOps } from "../src/objects.js";
-import { indexOps, mailOps } from "../src/backbone.js";
+import { Mesh, meshOp } from "../src/mesh.js";
 
 export function fakeStore({ slow = false } = {}) {
   const recs = new Map();
   const owners = new Map();
   const relays = new Map();
   const areas = new Map();
-  const mailboxes = new Map();
-  let indexState;
+  // The relay mesh runs in-process; plans are signed with a stand-in (the real signing is tested in mesh.test.mjs).
+  const mesh = new Mesh({ sign: async (t) => `test-signature:${t.length}` });
   let chain = Promise.resolve();
   const lag = () => (slow ? new Promise((r) => setTimeout(r, Math.random() * 4)) : Promise.resolve());
   /** Runs fn after every earlier call has finished. */
@@ -43,35 +43,11 @@ export function fakeStore({ slow = false } = {}) {
     async put(_key, value) { areas.set(area, structuredClone(value)); },
   });
 
-  /** Storage for one mailbox object (per callsign). */
-  const mailStorage = (name) => ({
-    async get() { return copy(mailboxes.get(name)); },
-    async put(_key, value) { mailboxes.set(name, structuredClone(value)); },
-  });
-  const indexStorage = {
-    async get() { return copy(indexState); },
-    async put(_key, value) { indexState = structuredClone(value); },
-  };
-  const mail = (name, op, args) => one(() => mailOps[op](mailStorage(name), args));
-  const index = (op, args) => one(() => indexOps[op](indexStorage, args));
-
   return {
-    mailboxes,
-    get indexState() { return indexState; },
-    msgClaim: (origin, id, dest, nowMs) => mail(origin, "claim", { id, dest, nowMs }),
-    msgGetClaim: (origin, id, nowMs) => mail(origin, "getClaim", { id, nowMs }),
-    msgEnqueue: (dest, message, nowMs) => mail(dest, "enqueue", { message, nowMs }),
-    msgPeek: (dest, nowMs) => mail(dest, "peek", { nowMs }),
-    msgHandout: (dest, ids, relay, nowMs) => mail(dest, "handout", { ids, relay, nowMs }),
-    msgComplete: (dest, id, relay, nowMs) => mail(dest, "complete", { id, relay, nowMs }),
-    msgPutReceipt: (origin, receipt, nowMs) => mail(origin, "putReceipt", { ...receipt, nowMs }),
-    msgTakeReceipts: (origin, nowMs) => mail(origin, "takeReceipts", { nowMs }),
-    idxNoteHeard: (relay, heard, nowMs) => index("noteHeard", { relay, heard, nowMs }),
-    idxGetHeard: (callsign, nowMs) => index("getHeard", { callsign, nowMs }),
-    idxWant: (dest, until) => index("want", { dest, until }),
-    idxUnwant: (dest) => index("unwant", { dest }),
-    idxWanted: (nowMs) => index("wanted", { nowMs }),
-    idxRate: (relay, nowMs, limit) => index("rate", { relay, nowMs, limit }),
+    mesh,
+    meshOp: (op, args) => one(async () => meshOp(mesh, op, args, args.nowMs)),
+    // The test store has no socket of its own: it answers "authenticated" and tools/serve-local.mjs runs the socket.
+    meshSocket: async (call) => new Response(JSON.stringify({ call }), { status: 200 }),
     recs,
     owners,
     relays,
@@ -88,8 +64,13 @@ export function fakeStore({ slow = false } = {}) {
       one(() => callsignOps.claimRelay(callsignStorage(callsign), { callsign, area, publicKey, nowMs })),
     getRelay: (callsign) => one(() => callsignOps.getRelay(callsignStorage(callsign))),
     joinArea: (area, callsign, nowMs) => one(() => areaOps.join(areaStorage(area), { callsign, nowMs })),
-    leaveArea: (area, callsign) => one(() => areaOps.leave(areaStorage(area), { callsign })),
+    leaveArea: (area, callsign) =>
+      one(async () => {
+        await areaOps.leave(areaStorage(area), { callsign });
+        await areaOps.leave(areaStorage("world-slots"), { callsign });
+      }),
+    // One object for the whole world, like src/store.ts: HF transmit slots are global.
     bookSchedule: (area, relay, requests, nowMs) =>
-      one(() => areaOps.book(areaStorage(area), { area, relay, requests, nowMs })),
+      one(() => areaOps.book(areaStorage("world-slots"), { area, relay, requests, nowMs })),
   };
 }

@@ -85,6 +85,11 @@ impl HopLog {
         self.hops.push(hop);
     }
 
+    /// The newest `n` hops, newest first, and the total number recorded.
+    pub fn recent_counted(&self, n: usize) -> (Vec<Hop>, usize) {
+        (self.hops.iter().rev().take(n).cloned().collect(), self.hops.len())
+    }
+
     /// All hops for one message, in recorded order.
     pub fn chain_for(&self, message_id: u64) -> Vec<Hop> {
         self.hops

@@ -35,6 +35,12 @@ pub struct StationKey {
     key: SigningKey,
 }
 
+impl Clone for StationKey {
+    fn clone(&self) -> Self {
+        Self::from_bytes(&self.secret())
+    }
+}
+
 impl StationKey {
     /// Generate a new random key from the OS random number generator.
     pub fn generate() -> Self {
@@ -174,6 +180,12 @@ pub fn verify(block: &[u8], body: &[u8]) -> Result<(String, [u8; 32]), String> {
     Ok((callsign.to_string(), public))
 }
 
+/// True when `sig` is a valid Ed25519 signature of `data` by `public` (no callsign framing): used for the
+/// server's signed plans and for the relay mesh calls.
+pub fn verify_raw(public: &[u8; 32], data: &[u8], sig: &[u8; 64]) -> bool {
+    VerifyingKey::from_bytes(public).is_ok_and(|vk| vk.verify(data, &Signature::from_bytes(sig)).is_ok())
+}
+
 /// Short readable fingerprint of a public key for manual comparison:
 /// first 8 bytes of SHA-256 as hex, grouped in 4-hex-digit blocks.
 pub fn fingerprint(public: &[u8; 32]) -> String {
@@ -192,6 +204,19 @@ mod tests {
 
     fn key() -> StationKey {
         StationKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn raw_signature_verifies_with_plain_ed25519_and_not_with_the_domain_prefix() {
+        let key = StationKey::generate();
+        let msg = br#"{"area":"N51W1","callsign":"G4ABC"}"#;
+        let sig = Signature::from_bytes(&key.sign_raw(msg));
+        let public = VerifyingKey::from_bytes(&key.to_public()).unwrap();
+        assert!(
+            public.verify(msg, &sig).is_ok(),
+            "the server checks plain Ed25519"
+        );
+        assert!(public.verify(&signed_data("G4ABC", msg), &sig).is_err());
     }
 
     #[test]

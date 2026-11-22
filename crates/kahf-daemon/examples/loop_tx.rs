@@ -72,7 +72,7 @@ fn encode_audio(data: &[u8]) -> Result<Vec<f32>, String> {
     let mut out = Vec::new();
     for (n, chunk) in data.chunks(CHUNK_BYTES).enumerate() {
         if n > 0 {
-            out.extend(std::iter::repeat(0.0f32).take(GAP_SAMPLES));
+            out.extend(std::iter::repeat_n(0.0f32, GAP_SAMPLES));
         }
         let bits = frame::build_payload(chunk);
         if bits.len() != ldpc::K {
@@ -118,7 +118,7 @@ fn run() -> Result<(), String> {
         let audio = encode_audio(o.text.as_bytes())?;
         (audio_to_iq(&audio), o.freq_hz as f64)
     } else {
-        // Channel centres 2.7 kHz apart, starting at the first 20 m channel.
+        // Channel centres 2.7 kHz apart, starting at the first 17 m lane.
         let mut parts = Vec::new();
         for k in 0..o.channels {
             let audio = encode_audio(format!("{} CH{}", o.text, k + 1).as_bytes())?;

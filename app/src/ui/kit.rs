@@ -18,6 +18,37 @@ pub fn lab_hint(label: &str, control: impl Into<V>, hint: &str) -> V {
         .into()
 }
 
+/// Word-wrap `body` into lines of at most `width_chars` characters. A word longer than the
+/// width gets a line of its own.
+pub fn wrap_lines(body: &str, width_chars: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in body.split_whitespace() {
+        let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
+        if !cur.is_empty() && need > width_chars {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// A long paragraph. Alloy does not count the extra lines of wrapped text when laying out
+/// what follows, so we wrap it ourselves: one small dim line per widget, so every line has height.
+pub fn para(body: &str, width_chars: usize) -> V {
+    let mut c = col![].gap(2.0);
+    for line in wrap_lines(body, width_chars) {
+        c = c.push(text(line).caption().dim());
+    }
+    c.into()
+}
+
 /// A boxed note. `warn` makes it stand out.
 pub fn note(body: impl Into<String>, warn: bool) -> V {
     let t = text(body).caption();
@@ -29,7 +60,7 @@ pub fn note(body: impl Into<String>, warn: bool) -> V {
 pub fn choice(selected: bool, title: &str, sub: &str, on: impl Fn(&mut Kahf) + Send + Sync + 'static) -> V {
     let mut c = col![button(title).nav(selected).fill_w().act(on)].gap(2.0);
     if !sub.is_empty() {
-        c = c.push(caption(sub).dim());
+        c = c.push(para(sub, 60));
     }
     c.fill_w().into()
 }
@@ -184,9 +215,7 @@ pub fn file_notice(k: &Kahf, files: &[crate::types::PickedFile]) -> V {
     };
     col![
         if over { text(line).caption().danger() } else { text(line).caption() }.fill_w(),
-        caption("Files go straight to the other station and cannot be passed on through relays, so you must be in direct range of them. Keep KAHF open and the radio connected until it finishes.")
-            .dim()
-            .fill_w(),
+        para("Files go straight to the other station and cannot be passed on through relays, so you must be in direct range of them. Keep KAHF open and the radio connected until it finishes.", 100),
     ]
     .gap(4.0)
     .pad(10.0)
@@ -194,4 +223,22 @@ pub fn file_notice(k: &Kahf, files: &[crate::types::PickedFile]) -> V {
     .outline()
     .fill_w()
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_lines;
+
+    #[test]
+    fn wraps_on_words_within_width() {
+        let lines = wrap_lines("one two three four five six", 10);
+        assert_eq!(lines, vec!["one two", "three four", "five six"]);
+        assert!(lines.iter().all(|l| l.chars().count() <= 10));
+    }
+
+    #[test]
+    fn long_word_gets_own_line_and_empty_is_empty() {
+        assert_eq!(wrap_lines("a verylongword b", 5), vec!["a", "verylongword", "b"]);
+        assert!(wrap_lines("   ", 10).is_empty());
+    }
 }

@@ -206,6 +206,25 @@ pub struct RelaySlot {
     pub direction: String,
 }
 
+/// What the relay referee has done: rounds run, requests heard, grants given, and "I am here"
+/// calls heard from operators.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default)]
+pub struct RefereeCounts {
+    pub rounds: u64,
+    pub requests: u64,
+    pub grants: u64,
+    pub heres: u64,
+}
+
+/// What the transmit gate says: "off" (with the reason), "bench" (test table, no antenna) or "real".
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default)]
+pub struct TxGate {
+    pub state: String,
+    pub reason: String,
+}
+
 /// What the relay's link to kahf.dev last did.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default)]
@@ -230,6 +249,8 @@ pub struct RelayStatus {
     pub outbox: Vec<OutboxItem>,
     pub server: Option<ServerSync>,
     pub server_note: Option<String>,
+    /// What the relay referee has done since the radio started (a relay only).
+    pub referee: Option<RefereeCounts>,
     pub now_unix: i64,
     /// The one-degree square the relay is listed in, if it is on the map.
     pub area: Option<String>,

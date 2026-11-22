@@ -644,8 +644,7 @@ mod tests {
     #[test]
     fn missing_library_says_what_to_install() {
         let err = load_with_names(&["/nonexistent/path/libairspy-test.dylib"])
-            .err()
-            .expect("the library must not load");
+            .expect_err("the library must not load");
         assert!(
             err.starts_with("Airspy: the libairspy host library was not found"),
             "{err}"
@@ -656,7 +655,7 @@ mod tests {
 
     #[test]
     fn empty_library_list_is_reported() {
-        let err = load_with_names(&[]).err().expect("no names, no library");
+        let err = load_with_names(&[]).expect_err("no names, no library");
         assert!(err.contains("no library name is known"), "{err}");
     }
 

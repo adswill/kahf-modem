@@ -16,6 +16,14 @@ use std::collections::VecDeque;
 const TAG_CONNECT: u8 = 0x01;
 const TAG_CONNECT_ACK: u8 = 0x02;
 const TAG_DISCONNECT: u8 = 0x03;
+const TAG_ADVERT: u8 = 0x04;
+const TAG_BEACON: u8 = 0x05;
+const TAG_BUSY: u8 = 0x06;
+/// A connected link with nothing to send and nothing heard from the peer for this long is
+/// closed (the peer left without a goodbye, or the goodbye was lost).
+pub const LINK_IDLE_MS: u64 = 60_000;
+/// A new caller may take over a link that has been quiet for this long.
+const TAKEOVER_IDLE_MS: u64 = 15_000;
 const TAG_DATA: u8 = 0x10;
 const TAG_ACK: u8 = 0x11;
 
@@ -62,6 +70,21 @@ pub enum Action {
     /// Deliver this payload to the session layer.
     Deliver(Vec<u8>),
     StateChanged(LinkState),
+    /// A station announced itself (no link needed). Relays pass it on while `ttl` lasts.
+    Advert {
+        call: String,
+        ttl: u8,
+        seq: u8,
+        flags: u8,
+        loc: Option<(f32, f32)>,
+    },
+    /// A relay announced itself (identity, whether it is online, the time, how busy it is).
+    Beacon {
+        call: String,
+        flags: u8,
+        time_s: u32,
+        load: u8,
+    },
     /// Link quality snapshot, emitted from `tick` every `METRICS_INTERVAL_MS` while connected.
     Metrics(LinkMetrics),
 }
@@ -80,6 +103,10 @@ pub struct LinkMetrics {
     pub retransmits: u64,
     /// Share of the last `FER_WINDOW_FRAMES` received frames that were lost, in percent.
     pub frame_error_pct: f32,
+    /// SNR (dB) of what we receive, smoothed over recent frames, when a KAMI frame has been heard.
+    pub own_snr_db: Option<f32>,
+    /// SNR (dB) the peer last reported for what it receives from us.
+    pub peer_snr_db: Option<f32>,
     /// Suggested modulation level: 0 = robust, 1 = normal, 2 = fast.
     pub suggested_modulation: u8,
     /// Text name of `suggested_modulation`: "robust", "normal" or "fast".
@@ -95,6 +122,15 @@ struct InFlight {
 }
 
 pub struct Link {
+    /// Extra time added to every retransmit timer: the air time of a frame in both directions
+    /// plus the peer's processing delay. Zero until `set_air_ms` is called.
+    air_extra: u64,
+    /// Stations that said they are busy, and until when (ms on our clock).
+    busy_until: Vec<(String, u64)>,
+    /// Clock at the last frame of the current exchange (sent or received).
+    last_activity: u64,
+    /// Data or an acknowledgement has been exchanged on this link (not just a connect).
+    peer_active: bool,
     pub callsign: String,
     pub state: LinkState,
     clock: u64,
@@ -107,7 +143,11 @@ pub struct Link {
     send_base: u8,
     next_seq: u8,
     peer_fer: Option<u8>,
+    peer_snr: Option<f32>,
+    /// Callsigns of stations heard in handshake frames, not yet handed to the caller.
+    heard: Vec<String>,
     // Receiver side.
+    rx_snr: Option<f32>,
     rcv_base: u8,
     rx_buf: Vec<Option<Vec<u8>>>,
     /// Highest sequence number accepted so far (used for gap-based FER).
@@ -130,6 +170,13 @@ impl Link {
             callsign: callsign.to_string(),
             state: LinkState::Idle,
             clock: 0,
+            air_extra: 0,
+            busy_until: Vec::new(),
+            last_activity: 0,
+            peer_active: false,
+            peer_snr: None,
+            heard: Vec::new(),
+            rx_snr: None,
             hs_deadline: 0,
             hs_retries: 0,
             tx_queue: VecDeque::new(),
@@ -154,14 +201,26 @@ impl Link {
 
     /// Start the handshake with `peer`. Returns nothing unless the link is Idle and both
     /// callsigns are 1..=15 bytes.
+    /// Tell the link how long one frame takes on the air (ms) in the current mode. The retransmit
+    /// timers grow by two frames (ours and the answer) plus a second for the peer's search.
+    pub fn set_air_ms(&mut self, frame_ms: u64) {
+        self.air_extra = 2 * frame_ms + 1000;
+    }
+
     pub fn connect(&mut self, peer: &str) -> Vec<Action> {
         if self.state != LinkState::Idle || !valid_callsign(peer) || !valid_callsign(&self.callsign) {
             return Vec::new();
         }
         self.begin_session();
         self.hs_retries = 0;
-        self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS;
-        let mut out = vec![Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer))];
+        self.hs_deadline = self.clock + CONNECT_TIMEOUT_MS + self.air_extra;
+        let mut out = Vec::new();
+        // The station said it is busy: do not call into its busy exchange, wait it out.
+        if let Some(until) = self.busy_for(peer) {
+            self.hs_deadline = until;
+        } else {
+            out.push(Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, peer)));
+        }
         self.set_state(
             LinkState::Connecting {
                 peer: peer.to_string(),
@@ -187,12 +246,54 @@ impl Link {
 
     /// Feed one decoded frame payload from the air.
     pub fn on_receive(&mut self, payload: &[u8]) -> Vec<Action> {
+        if matches!(
+            payload.first(),
+            Some(&TAG_CONNECT) | Some(&TAG_CONNECT_ACK) | Some(&TAG_DISCONNECT)
+        ) {
+            if let Some((from, _)) = decode_hs(payload) {
+                self.note_heard(&from);
+            }
+        }
         match payload.first() {
             Some(&TAG_CONNECT) => self.on_connect(payload),
             Some(&TAG_CONNECT_ACK) => self.on_connect_ack(payload),
             Some(&TAG_DISCONNECT) => self.on_disconnect(payload),
-            Some(&TAG_DATA) => self.on_data(payload),
-            Some(&TAG_ACK) => self.on_ack(payload),
+            Some(&TAG_DATA) => {
+                self.last_activity = self.clock;
+                self.peer_active = true;
+                self.on_data(payload)
+            }
+            Some(&TAG_ACK) => {
+                self.last_activity = self.clock;
+                self.peer_active = true;
+                self.on_ack(payload)
+            }
+            Some(&TAG_BUSY) => self.on_busy(payload),
+            Some(&TAG_BEACON) => match decode_beacon(payload) {
+                Some((call, flags, time_s, load)) if call != self.callsign && valid_callsign(&call) => {
+                    self.note_heard(&call);
+                    vec![Action::Beacon {
+                        call,
+                        flags,
+                        time_s,
+                        load,
+                    }]
+                }
+                _ => Vec::new(),
+            },
+            Some(&TAG_ADVERT) => match decode_advert(payload) {
+                Some((call, ttl, seq, flags, loc)) if call != self.callsign && valid_callsign(&call) => {
+                    self.note_heard(&call);
+                    vec![Action::Advert {
+                        call,
+                        ttl,
+                        seq,
+                        flags,
+                        loc,
+                    }]
+                }
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
@@ -203,12 +304,28 @@ impl Link {
         if !matches!(self.state, LinkState::Connected { .. }) {
             return Vec::new();
         }
+        self.last_activity = self.clock;
+        self.peer_active = true;
         for chunk in data.chunks(MAX_CHUNK) {
             self.tx_queue.push_back(chunk.to_vec());
         }
         let mut out = Vec::new();
         self.pump(&mut out);
         out
+    }
+
+    /// A burst has finished going out at `now_ms`. The wait for its answer starts now, not when
+    /// it was queued: a slow channel or a long burst must not look like a lost frame, and
+    /// resending while the other station is still answering collides with its reply.
+    pub fn tx_finished(&mut self, now_ms: u64) {
+        self.clock = self.clock.max(now_ms);
+        let data_deadline = now_ms + DATA_TIMEOUT_MS + self.air_extra;
+        for f in self.slots.iter_mut().flatten() {
+            f.deadline = f.deadline.max(data_deadline);
+        }
+        if matches!(self.state, LinkState::Connecting { .. }) {
+            self.hs_deadline = self.hs_deadline.max(now_ms + CONNECT_TIMEOUT_MS + self.air_extra);
+        }
     }
 
     /// True when every data chunk handed to `send` has been acknowledged by the peer:
@@ -227,7 +344,7 @@ impl Link {
                 if now_ms >= self.hs_deadline {
                     if self.hs_retries < MAX_CONNECT_RETRIES {
                         self.hs_retries += 1;
-                        self.hs_deadline = now_ms + CONNECT_TIMEOUT_MS;
+                        self.hs_deadline = now_ms + CONNECT_TIMEOUT_MS + self.air_extra;
                         out.push(Action::Transmit(encode_hs(TAG_CONNECT, &self.callsign, &peer)));
                     } else {
                         self.reset_arq();
@@ -236,6 +353,11 @@ impl Link {
                 }
             }
             LinkState::Connected { .. } => {
+                if self.nothing_pending() && now_ms.saturating_sub(self.last_activity) >= LINK_IDLE_MS {
+                    self.reset_arq();
+                    self.set_state(LinkState::Idle, &mut out);
+                    return out;
+                }
                 if now_ms >= self.metrics_due {
                     self.metrics_due = now_ms + METRICS_INTERVAL_MS;
                     out.push(Action::Metrics(self.metrics()));
@@ -249,7 +371,7 @@ impl Link {
                                 break;
                             }
                             f.retries += 1;
-                            f.deadline = now_ms + DATA_TIMEOUT_MS;
+                            f.deadline = now_ms + DATA_TIMEOUT_MS + self.air_extra;
                             self.retransmits += 1;
                             out.push(Action::Transmit(encode_data(f.seq, &f.payload)));
                         }
@@ -278,6 +400,46 @@ impl Link {
         }
     }
 
+    /// Record the SNR (dB) the receiver measured on a frame it has just decoded. It is smoothed
+    /// and sent back to the peer in every ACK, so the peer can pick its mode.
+    pub fn note_rx_snr(&mut self, snr_db: f32) {
+        let x = snr_db.clamp(-30.0, 90.0);
+        self.rx_snr = Some(self.rx_snr.map_or(x, |p| 0.6 * p + 0.4 * x));
+    }
+
+    /// Remember a station we heard, once per burst of frames.
+    fn note_heard(&mut self, call: &str) {
+        if call != self.callsign
+            && valid_callsign(call)
+            && self.heard.last().map(|c| c.as_str()) != Some(call)
+        {
+            if self.heard.len() >= 32 {
+                self.heard.remove(0);
+            }
+            self.heard.push(call.to_string());
+        }
+    }
+
+    /// Stations heard since the last call, oldest first. The caller reports them to the operator.
+    pub fn take_heard(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.heard)
+    }
+
+    /// SNR (dB) the peer last reported for our transmissions, if it has reported one.
+    /// Sets the peer's reported SNR from another carrier (a datagram acknowledgement).
+    pub fn set_peer_snr(&mut self, snr_db: Option<f32>) {
+        self.peer_snr = snr_db;
+    }
+
+    pub fn peer_snr_db(&self) -> Option<f32> {
+        self.peer_snr
+    }
+
+    /// SNR (dB) of what we receive from the peer, smoothed, if known.
+    pub fn own_snr_db(&self) -> Option<f32> {
+        self.rx_snr
+    }
+
     /// Frame error rate (percent) the peer last reported for our transmissions.
     pub fn peer_frame_error_pct(&self) -> Option<u8> {
         self.peer_fer
@@ -303,6 +465,8 @@ impl Link {
             frames_received: self.frames_received,
             retransmits: self.retransmits,
             frame_error_pct,
+            own_snr_db: self.rx_snr,
+            peer_snr_db: self.peer_snr,
             suggested_modulation: level,
             suggested_modulation_name: name,
         }
@@ -346,18 +510,31 @@ impl Link {
             LinkState::Connecting { peer } if peer == from => self.accept(&from, &mut out),
             // Our CONNECT_ACK was lost and the peer retried: acknowledge again.
             LinkState::Connected { peer } if peer == from => {
+                self.last_activity = self.clock;
                 out.push(Action::Transmit(encode_hs(
                     TAG_CONNECT_ACK,
                     &self.callsign,
                     &from,
                 )));
             }
-            _ => {}
+            // Already in an exchange with someone else: say so once, with how long to wait,
+            // instead of letting the caller retry into it.
+            LinkState::Connected { .. } if self.quiet_for_takeover() => {
+                // The old peer has gone quiet with nothing pending: the new caller gets the link.
+                self.reset_arq();
+                self.accept(&from, &mut out);
+            }
+            _ => {
+                let wait = self.busy_wait_s();
+                out.push(Action::Transmit(encode_busy(&self.callsign, &from, wait)));
+            }
         }
         out
     }
 
     fn accept(&mut self, from: &str, out: &mut Vec<Action>) {
+        self.last_activity = self.clock;
+        self.peer_active = false;
         self.begin_session();
         self.set_state(
             LinkState::Connected {
@@ -366,6 +543,57 @@ impl Link {
             out,
         );
         out.push(Action::Transmit(encode_hs(TAG_CONNECT_ACK, &self.callsign, from)));
+    }
+
+    fn nothing_pending(&self) -> bool {
+        self.tx_queue.is_empty() && self.slots.iter().all(|s| s.is_none())
+    }
+
+    fn quiet_for_takeover(&self) -> bool {
+        self.peer_active
+            && self.nothing_pending()
+            && self.clock.saturating_sub(self.last_activity) >= TAKEOVER_IDLE_MS
+    }
+
+    /// Seconds a caller should stay away: a fixed part plus what we still have to send.
+    fn busy_wait_s(&self) -> u8 {
+        let queued = self.tx_queue.len() + self.slots.iter().flatten().count();
+        (8 + 2 * queued as u64).min(90) as u8
+    }
+
+    fn busy_for(&self, peer: &str) -> Option<u64> {
+        self.busy_until
+            .iter()
+            .find(|(c, u)| c == peer && *u > self.clock)
+            .map(|(_, u)| *u)
+    }
+
+    /// A busy notice. Everyone who hears it leaves that station alone for a while, whoever it
+    /// was addressed to (a hidden caller learns from the notice the others hear).
+    fn on_busy(&mut self, p: &[u8]) -> Vec<Action> {
+        let Some((from, to, wait)) = decode_busy(p) else {
+            return Vec::new();
+        };
+        if from == self.callsign {
+            return Vec::new();
+        }
+        self.note_heard(&from);
+        // A small spread by callsign, so the callers do not all return at the same moment.
+        let spread: u64 = to.bytes().map(u64::from).sum::<u64>() % 7 * 400;
+        let until = self.clock + wait as u64 * 1000 + spread;
+        self.busy_until.retain(|(c, u)| c != &from && *u > self.clock);
+        self.busy_until.push((from.clone(), until));
+        // Only the station the notice was for puts its retry off. Others just remember it for
+        // when they next start a call; if their own retries were pushed back by every notice
+        // sent to somebody else, two callers could keep each other waiting for ever.
+        if to == self.callsign {
+            if let LinkState::Connecting { peer } = &self.state {
+                if *peer == from {
+                    self.hs_deadline = self.hs_deadline.max(until);
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn on_connect_ack(&mut self, p: &[u8]) -> Vec<Action> {
@@ -379,6 +607,8 @@ impl Link {
         if let LinkState::Connecting { peer } = self.state.clone() {
             if peer == from {
                 self.reset_arq();
+                self.last_activity = self.clock;
+                self.peer_active = false;
                 self.set_state(LinkState::Connected { peer: from }, &mut out);
             }
         }
@@ -446,6 +676,9 @@ impl Link {
             self.rcv_base,
             bitmap,
             self.measured_fer_pct(),
+            // SNR report: half dB steps from -30 dB, 0 means unknown.
+            self.rx_snr
+                .map_or(0, |s| ((s + 30.0) * 2.0).round().clamp(1.0, 255.0) as u8),
         ]));
         out
     }
@@ -456,6 +689,9 @@ impl Link {
         }
         let (base, bitmap, fer) = (p[1], p[2], p[3]);
         self.peer_fer = Some(fer.min(100));
+        if let Some(&b) = p.get(4) {
+            self.peer_snr = (b > 0).then(|| b as f32 / 2.0 - 30.0);
+        }
         let inflight = self.next_seq.wrapping_sub(self.send_base);
         let adv = base.wrapping_sub(self.send_base);
         // Cumulative part; a stale or out-of-range base is ignored.
@@ -491,7 +727,7 @@ impl Link {
             self.slots[seq as usize % WINDOW] = Some(InFlight {
                 seq,
                 payload: chunk.clone(),
-                deadline: self.clock + DATA_TIMEOUT_MS,
+                deadline: self.clock + DATA_TIMEOUT_MS + self.air_extra,
                 retries: 0,
             });
             out.push(Action::Transmit(encode_data(seq, &chunk)));
@@ -533,6 +769,8 @@ impl Link {
         self.send_base = 0;
         self.next_seq = 0;
         self.peer_fer = None;
+        self.peer_snr = None;
+        self.rx_snr = None;
         self.rcv_base = 0;
         self.rx_buf = vec![None; WINDOW];
         self.hi_seen = 255; // so that sequence 0 is the first expected frame without a gap
@@ -563,6 +801,83 @@ fn metric_modulation(raw: u8) -> (u8, &'static str) {
 
 fn valid_callsign(c: &str) -> bool {
     !c.is_empty() && c.len() <= MAX_CALLSIGN
+}
+
+/// Beacon flag: the relay has its internet connection, so it can reach other areas.
+pub const BEACON_ONLINE: u8 = 1;
+
+/// A relay's announcement, sent every minute or so: tag, flags, time (unix seconds, so a
+/// station with no clock source learns the time), load (0 idle to 255 saturated), callsign.
+pub fn encode_beacon(call: &str, flags: u8, time_s: u32, load: u8) -> Vec<u8> {
+    let mut v = vec![TAG_BEACON, flags];
+    v.extend_from_slice(&time_s.to_be_bytes());
+    v.push(load);
+    v.push(call.len() as u8);
+    v.extend_from_slice(call.as_bytes());
+    v
+}
+
+fn decode_beacon(p: &[u8]) -> Option<(String, u8, u32, u8)> {
+    let n = *p.get(7)? as usize;
+    if n == 0 || n > MAX_CALLSIGN || p.len() != 8 + n {
+        return None;
+    }
+    let call = String::from_utf8(p[8..].to_vec()).ok()?;
+    Some((call, p[1], u32::from_be_bytes([p[2], p[3], p[4], p[5]]), p[6]))
+}
+
+/// Advert flag: the announcing station runs a relay.
+pub const ADVERT_RELAY: u8 = 1;
+/// Advert flag: four bytes of position follow the callsign (hundredths of a degree).
+pub const ADVERT_LOCATION: u8 = 2;
+/// How many more relays an advert may be passed through.
+pub const ADVERT_TTL: u8 = 4;
+
+/// An announcement of a station, for everyone who can hear it: tag, hops left, sequence number,
+/// flags, callsign.
+pub fn encode_advert(call: &str, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)>) -> Vec<u8> {
+    let flags = if loc.is_some() {
+        flags | ADVERT_LOCATION
+    } else {
+        flags & !ADVERT_LOCATION
+    };
+    let mut v = vec![TAG_ADVERT, ttl, seq, flags, call.len() as u8];
+    v.extend_from_slice(call.as_bytes());
+    if let Some((lat, lon)) = loc {
+        v.extend_from_slice(&((lat * 100.0).round().clamp(-9000.0, 9000.0) as i16).to_be_bytes());
+        v.extend_from_slice(&((lon * 100.0).round().clamp(-18000.0, 18000.0) as i16).to_be_bytes());
+    }
+    v
+}
+
+type DecodedAdvert = (String, u8, u8, u8, Option<(f32, f32)>);
+
+fn decode_advert(p: &[u8]) -> Option<DecodedAdvert> {
+    let n = *p.get(4)? as usize;
+    let flags = *p.get(3)?;
+    let extra = if flags & ADVERT_LOCATION != 0 { 4 } else { 0 };
+    if n == 0 || n > MAX_CALLSIGN || p.len() != 5 + n + extra {
+        return None;
+    }
+    let call = String::from_utf8(p[5..5 + n].to_vec()).ok()?;
+    let loc = (extra == 4).then(|| {
+        let lat = i16::from_be_bytes([p[5 + n], p[6 + n]]) as f32 / 100.0;
+        let lon = i16::from_be_bytes([p[7 + n], p[8 + n]]) as f32 / 100.0;
+        (lat, lon)
+    });
+    Some((call, p[1], p[2], flags, loc))
+}
+
+fn encode_busy(from: &str, to: &str, wait_s: u8) -> Vec<u8> {
+    let mut v = encode_hs(TAG_BUSY, from, to);
+    v.push(wait_s);
+    v
+}
+
+fn decode_busy(p: &[u8]) -> Option<(String, String, u8)> {
+    let (&wait, body) = p.split_last()?;
+    let (from, to) = decode_hs(body)?;
+    Some((from, to, wait))
 }
 
 fn encode_hs(tag: u8, from: &str, to: &str) -> Vec<u8> {
@@ -641,7 +956,10 @@ mod tests {
                             self.b_rx.push(p)
                         }
                     }
-                    Action::StateChanged(_) | Action::Metrics(_) => {}
+                    Action::StateChanged(_)
+                    | Action::Metrics(_)
+                    | Action::Advert { .. }
+                    | Action::Beacon { .. } => {}
                 }
             }
         }
@@ -952,5 +1270,80 @@ mod tests {
 
         n.a.state = LinkState::Disconnecting;
         assert_eq!(n.a.describe(), "Disconnecting");
+    }
+
+    #[test]
+    fn snr_travels_in_the_ack_and_is_smoothed() {
+        let mut n = connected_pair();
+        assert_eq!(n.a.peer_snr_db(), None);
+        n.b.note_rx_snr(10.0);
+        n.b.note_rx_snr(20.0);
+        let own = n.b.own_snr_db().unwrap();
+        assert!((own - 14.0).abs() < 0.01, "smoothed {own}");
+        // b answers a data frame with an ACK that carries its SNR.
+        n.send_a(b"x");
+        let heard = n.a.peer_snr_db().expect("a hears b's snr");
+        assert!((heard - own).abs() <= 0.5, "heard {heard} vs {own}");
+        let m = n.a.metrics();
+        assert_eq!(m.peer_snr_db, Some(heard));
+        // An ACK from an old peer without the byte leaves the value alone.
+        let _ = n.a.on_receive(&[TAG_ACK, 1, 0, 0]);
+        assert_eq!(n.a.peer_snr_db(), Some(heard));
+    }
+
+    #[test]
+    fn stations_heard_in_handshakes_are_reported_once() {
+        let mut n = connected_pair();
+        assert_eq!(n.a.take_heard(), vec!["BBB2".to_string()]);
+        assert_eq!(n.b.take_heard(), vec!["AAA1".to_string()]);
+        assert!(n.a.take_heard().is_empty(), "taken once");
+        // Our own callsign and junk are never reported.
+        let own = encode_hs(TAG_CONNECT, "AAA1", "BBB2");
+        let _ = n.a.on_receive(&own);
+        assert!(n.a.take_heard().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod advert_tests {
+    use super::*;
+
+    #[test]
+    fn a_beacon_carries_the_relay_and_the_time() {
+        let mut l = Link::new("KB2BRV");
+        let acts = l.on_receive(&encode_beacon("RR1RRR", BEACON_ONLINE, 1_800_000_000, 40));
+        assert_eq!(
+            acts,
+            vec![Action::Beacon {
+                call: "RR1RRR".into(),
+                flags: BEACON_ONLINE,
+                time_s: 1_800_000_000,
+                load: 40
+            }]
+        );
+        assert!(l.on_receive(&encode_beacon("KB2BRV", 0, 1, 0)).is_empty());
+        assert!(l.on_receive(&[TAG_BEACON, 0, 0, 0, 0, 0, 0, 5, b'x']).is_empty());
+    }
+
+    #[test]
+    fn an_advert_is_heard_without_a_link() {
+        let mut l = Link::new("KB2BRV");
+        let acts = l.on_receive(&encode_advert("KA1ALF", 3, 7, ADVERT_RELAY, Some((25.2, 55.27))));
+        assert_eq!(
+            acts,
+            vec![Action::Advert {
+                call: "KA1ALF".into(),
+                ttl: 3,
+                seq: 7,
+                flags: ADVERT_RELAY | ADVERT_LOCATION,
+                loc: Some((25.2, 55.27))
+            }]
+        );
+        let plain = l.on_receive(&encode_advert("KC3CCC", 1, 2, 0, None));
+        assert!(matches!(&plain[0], Action::Advert { loc: None, .. }));
+        assert_eq!(l.take_heard(), vec!["KA1ALF".to_string(), "KC3CCC".to_string()]);
+        // Our own advert coming back, and nonsense, do nothing.
+        assert!(l.on_receive(&encode_advert("KB2BRV", 3, 7, 0, None)).is_empty());
+        assert!(l.on_receive(&[TAG_ADVERT, 1, 1, 0, 9, b'x']).is_empty());
     }
 }

@@ -226,6 +226,18 @@ figcaption { font: 12px/1.5 var(--mono); color: var(--muted); margin-top: 10px; 
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-all; }
 .maplibregl-ctrl-attrib { font-size: 11px; }
+.mk.sel { outline: 3px solid var(--live); outline-offset: 3px; }
+.mapempty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; pointer-events: none; z-index: 2; }
+.mapempty[hidden] { display: none; }
+.mapempty p { background: var(--bg); border: 1px solid var(--line); padding: 14px 18px; max-width: 400px; text-align: center; }
+.nodepop .maplibregl-popup-content { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 0; padding: 10px 12px; }
+.nodepop .maplibregl-popup-tip { border-top-color: var(--line); border-bottom-color: var(--line); }
+.nodecard + .nodecard { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.nodecard h3 { margin: 0 0 4px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; }
+.nodecard h3 span { font-family: var(--mono); font-weight: 700; }
+.nodecard h3 em { font-style: normal; color: var(--muted); font-size: 12px; }
+.nodecard p { margin: 2px 0; font-size: 13px; }
+.nodecard .meta { color: var(--muted); font-size: 12px; }
 @media (max-width: 860px) {
   .livestage { grid-template-columns: 1fr; }
   .livemap { min-height: 380px; height: 58vh; }

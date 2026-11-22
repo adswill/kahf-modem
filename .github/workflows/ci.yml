@@ -1,8 +1,8 @@
 name: ci
 
 on:
-  # Pull requests run one quick Linux check (including the headless kahf-ui
-  # smoke test). Windows and macOS build and test on pushes to main and nightly,
+  # Pull requests run one quick Linux check.
+  # Windows and macOS build and test on pushes to main and nightly,
   # not on every PR, to keep the runner queue short. Docs and site only changes
   # skip everything. Start the full platform matrix by hand with workflow_dispatch.
   push:

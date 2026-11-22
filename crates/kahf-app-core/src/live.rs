@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use kahf_core::relay::{Direction, Hop, Slot, Stats};
-use kahf_daemon::SyncStatus;
 use kahf_log::contacts::{self, Contact};
 use kahf_log::Qso;
 use serde::Serialize;
@@ -72,27 +71,6 @@ impl From<&Hop> for HopView {
             at_unix: h.at_unix,
             channel_khz: h.channel_khz,
             heard_by_next: h.heard_by_next,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct SyncView {
-    pub registered: bool,
-    pub last_schedule_unix: Option<u64>,
-    pub slots: usize,
-    pub last_error: Option<String>,
-    pub next_attempt_unix: u64,
-}
-
-impl From<&SyncStatus> for SyncView {
-    fn from(s: &SyncStatus) -> Self {
-        Self {
-            registered: s.registered,
-            last_schedule_unix: s.last_schedule_unix,
-            slots: s.slots,
-            last_error: s.last_error.clone(),
-            next_attempt_unix: s.next_attempt_unix,
         }
     }
 }

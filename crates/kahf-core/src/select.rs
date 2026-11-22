@@ -5,13 +5,9 @@
 //! by channel index: lower third Online, middle third Open, top third Emergency.
 //! This split is a default; the server may change the plan.
 
-use crate::bandplan;
-
-/// Channel spacing in Hz. The default grid uses only channels that lie wholly inside a
-/// KAHF segment (bandplan::KAHF_SEGMENTS, IARU Region 1): 40 m 7.040 to 7.045 MHz,
-/// 20 m 14.101 to 14.112 MHz and the 17 m relay segment 18.111 to 18.120 MHz. That gives
-/// eight channels. 14.070 to 14.100 MHz (beacons),
-/// 14.230 MHz (SSTV and FAX) and 30 m are left out on purpose.
+/// Channel spacing in Hz of the plain grids used by `Plan::grid` (tests, other plans). The
+/// default plan is not a grid: it is the 12 narrow 17 m lanes of `lanes.rs` (18.111 to
+/// 18.120 MHz, IARU Region 1), 700 Hz apart. Everything else is left out on purpose.
 pub const DEFAULT_SPACING_HZ: f32 = 2_700.0;
 
 /// Failed attempts allowed before the caller is told to give up.
@@ -75,19 +71,25 @@ impl Plan {
         Plan { channels }
     }
 
-    /// The default plan: 2.7 kHz channels, each wholly inside a KAHF segment (see above).
+    /// The default plan: the 12 lanes of 17 m (`lanes::BandTable::builtin_r1`), by their centre
+    /// frequency. Relay lanes are the Online pool, the two calling lanes the Open pool, the two
+    /// spare lanes the Emergency pool.
     pub fn default_plan() -> Plan {
-        let step = DEFAULT_SPACING_HZ as u64;
-        let half = step / 2;
-        let mut freqs = Vec::new();
-        for seg in bandplan::KAHF_SEGMENTS {
-            let mut c = seg.lower_hz + half;
-            while c + (step - half) <= seg.upper_hz {
-                freqs.push(c as f32);
-                c += step;
-            }
-        }
-        Plan::from_freqs(freqs)
+        use crate::lanes::{BandTable, Role};
+        let table = BandTable::builtin_r1();
+        let channels = table.bands[0]
+            .lanes
+            .iter()
+            .map(|l| {
+                let pool = match l.role {
+                    Role::Relay => Pool::Online,
+                    Role::Calling => Pool::Open,
+                    Role::Spare => Pool::Emergency,
+                };
+                (l.centre_hz as f32, pool)
+            })
+            .collect();
+        Plan { channels }
     }
 }
 
@@ -219,8 +221,8 @@ mod tests {
     use super::*;
     use crate::bandplan::{self, Region};
 
-    /// First channel centre of the test grid, in Hz (inside the 20 m KAHF segment).
-    const T0: f32 = 14_102_350.0;
+    /// First channel centre of the test grid, in Hz (inside the 17 m KAHF segment).
+    const T0: f32 = 18_112_350.0;
 
     fn small_plan() -> Plan {
         // 9 channels: 3 Online, 3 Open, 3 Emergency, from the default grid start.
@@ -228,33 +230,30 @@ mod tests {
     }
 
     #[test]
-    fn default_grid_is_the_eight_kahf_channels() {
+    fn default_plan_is_the_twelve_17m_lanes() {
         let plan = Plan::default_plan();
         let freqs: Vec<f32> = plan.channels.iter().map(|c| c.0).collect();
-        // 40 m: one channel (7 041 350 Hz). 20 m: four from 14 102 350 Hz. 17 m: three
-        // from 18 112 350 Hz.
+        let want: Vec<f32> = (0..12).map(|k| (18_111_440 + 700 * k) as f32).collect();
+        assert_eq!(freqs, want);
+        let pools: Vec<Pool> = plan.channels.iter().map(|c| c.1).collect();
+        assert_eq!(pools.iter().filter(|p| **p == Pool::Online).count(), 8);
+        assert_eq!(pools.iter().filter(|p| **p == Pool::Open).count(), 2);
+        assert_eq!(pools.iter().filter(|p| **p == Pool::Emergency).count(), 2);
         assert_eq!(
-            freqs,
-            vec![
-                7_041_350.0,
-                14_102_350.0,
-                14_105_050.0,
-                14_107_750.0,
-                14_110_450.0,
-                18_112_350.0,
-                18_115_050.0,
-                18_117_750.0
-            ]
+            (pools[5], pools[6]),
+            (Pool::Open, Pool::Open),
+            "C1 and C2 are the open pool"
         );
     }
 
     #[test]
-    fn every_default_channel_fits_a_kahf_segment() {
+    fn every_default_channel_fits_the_kahf_segment() {
+        // A lane is 480 Hz wide; its whole signal must lie inside the segment.
         let plan = Plan::default_plan();
         for (f, _) in &plan.channels {
             let c = *f as u64;
             assert!(
-                bandplan::allowed_segment(c, bandplan::KAHF_CHANNEL_WIDTH_HZ).is_some(),
+                bandplan::allowed_segment(c, crate::lanes::LANE_WIDTH_HZ).is_some(),
                 "channel {} Hz is outside every KAHF segment",
                 c
             );
@@ -262,13 +261,12 @@ mod tests {
     }
 
     #[test]
-    fn default_grid_avoids_beacons_sstv_and_30m() {
+    fn default_plan_avoids_the_beacons_and_everything_below_18_111() {
         let plan = Plan::default_plan();
         for (f, _) in &plan.channels {
             let f = *f as u64;
-            assert!(!(14_070_000..=14_100_000).contains(&f), "beacon segment used");
-            assert!(!(14_225_000..=14_235_000).contains(&f), "SSTV/FAX calling used");
-            assert!(!(10_100_000..=10_150_000).contains(&f), "30 m used");
+            assert!(f - 240 >= 18_111_000, "below the 17 m data segment");
+            assert!(!(18_109_000..=18_111_000).contains(&f), "IBP beacon segment used");
         }
     }
 
@@ -287,10 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn default_split_is_thirds() {
-        let plan = Plan::default_plan();
+    fn the_plain_grid_splits_in_thirds() {
+        let plan = Plan::grid(T0, T0 + 8.0 * 2700.0, 2700.0);
         let n = plan.channels.len();
-        assert!(n > 3);
+        assert_eq!(n, 9);
         assert_eq!(plan.channels[0].1, Pool::Online);
         assert_eq!(plan.channels[n - 1].1, Pool::Emergency);
         let online = plan.channels.iter().filter(|c| c.1 == Pool::Online).count();

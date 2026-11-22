@@ -9,7 +9,8 @@ import { encodeBase64, radiusDegrees } from "./core.js";
 import { CSS } from "./web/styles.js";
 import { HOME_SCRIPT } from "./web/script.js";
 import { LIVE_MAP_SCRIPT } from "./web/live-map.js";
-import { homeBody } from "./web/home.js";
+import { homeBody, homeHead, HOME_FOOT } from "./web/home.js";
+import { HOME_CSS } from "./web/home-css.js";
 import { SITE_PAGES } from "./web/pages.js";
 
 /**
@@ -250,8 +251,11 @@ const EMPTY_STATE = `<p>No relays or stations have reported in the last 48 hours
  * @param {string} body
  * @param {string} script the inline script text for this page
  * @param {boolean} [wide] let the page use the full window width
+ * @param {string} [head] extra markup for the head
+ * @param {string} [beforeScript] markup just before the script
+ * @param {boolean} [ownFrame] the printed-chart look: the home page and the inner pages
  */
-function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "") {
+function shell(title, description, current, body, script, wide = false, head = "", beforeScript = "", ownFrame = false) {
   const cur = (name) => (current === name ? ' aria-current="page"' : "");
   return `<!doctype html>
 <html lang="en">
@@ -262,11 +266,11 @@ function shell(title, description, current, body, script, wide = false, head = "
 <meta name="color-scheme" content="light dark">
 <title>${esc(title)}</title>
 <style>${CSS}</style>
-${head}
+${ownFrame ? `<style>${HOME_CSS}</style>\n` : ""}${head}
 </head>
-<body data-page="${current}">
+<body data-page="${current}"${ownFrame ? ' class="paper"' : ""}>
 <a class="skip" href="#main">Skip to content</a>
-<header class="top">
+${ownFrame ? homeHead(current) : `<header class="top">
 <div class="wrap${wide ? " wide" : ""}">
 <a class="brand" href="/">KAHF</a>
 <nav aria-label="Main">
@@ -279,11 +283,11 @@ ${head}
 </nav>
 <div class="tools"><button type="button" class="btn js-only" data-act="theme">Dark theme</button></div>
 </div>
-</header>
+</header>`}
 <main id="main" tabindex="-1">
 ${body}
 </main>
-<footer class="foot">
+${ownFrame ? HOME_FOOT : `<footer class="foot">
 <div class="wrap${wide ? " wide" : ""}">
 <div class="cols">
 <div><p class="label">KAHF</p><p>An HF digital modem and relay network for licensed amateur radio operators, with a focus on 17 metres. Pre-release software. Free software under the GNU GPL v3 or later. Copyright (c) 2026 Kristijonas Adomaitis (adswill).</p></div>
@@ -291,7 +295,7 @@ ${body}
 <div><p class="label">Project</p><ul><li><a href="/start">Get started</a></li><li><a href="/protocol">Modem details</a></li><li><a href="/legal">Licence and privacy</a></li></ul></div>
 </div>
 </div>
-</footer>
+</footer>`}
 ${beforeScript}
 <script>${script}</script>
 </body>
@@ -306,7 +310,7 @@ ${beforeScript}
 export function renderSite(path) {
   const page = SITE_PAGES[path];
   if (!page) return null;
-  return shell(page.title, page.description, path.slice(1), page.body(), HOME_SCRIPT);
+  return shell(page.title, page.description, path.slice(1), page.body(), HOME_SCRIPT, false, "", "", true);
 }
 
 /** The paths of the inner pages. */
@@ -315,11 +319,15 @@ export const SITE_PATHS = Object.keys(SITE_PAGES);
 /** The kahf.dev home page. */
 export function renderHome() {
   return shell(
-    "KAHF: HF data modem and relay network for 17 metres",
-    "KAHF sends messages, mail and files between amateur radio stations over HF, relayed across a network of volunteer stations. Built for 17 metres, works with ordinary radios or SDRs.",
+    "KAHF: messages by radio, with no internet",
+    "KAHF sends chat, mail, files and voice notes between computers over HF radio on 17 metres, for licensed amateur radio operators.",
     "home",
     homeBody(),
     HOME_SCRIPT,
+    false,
+    "",
+    "",
+    true,
   );
 }
 
@@ -347,7 +355,7 @@ export function renderMap(stations, generatedIso, relays = []) {
 <p class="status" id="refresh-status" role="status"><span class="dot" aria-hidden="true"></span><span>Connecting to the live feed.</span></p>
 </div>
 <div class="livestage">
-<div class="livemap" id="map" role="region" aria-label="Map of relays and stations"><noscript>The live map needs JavaScript.</noscript></div>
+<div class="livemap" id="map" role="region" aria-label="Map of relays and stations"><noscript>The live map needs JavaScript.</noscript><div class="mapempty" id="map-empty" hidden><p><strong>No stations are on the map yet.</strong> Relays and stations appear here when their operators choose to share a location in the KAHF app.</p></div></div>
 <aside class="liveside">
 <section class="panel" aria-live="polite" aria-label="Selected node">
 <h2>Selected</h2>
@@ -356,11 +364,12 @@ export function renderMap(stations, generatedIso, relays = []) {
 <dt>Role</dt><dd id="p-role">-</dd>
 <dt>Last seen</dt><dd id="p-seen">-</dd>
 <dt>Position</dt><dd id="p-loc">-</dd>
+<dt>Details</dt><dd id="p-info">-</dd>
 </dl>
-<p class="note">Choose a point on the map to see its details.</p>
+<p class="note">Click a point on the map to see what is known about it.</p>
 </section>
 <p class="count" id="count">${relays.length} relay${relays.length === 1 ? "" : "s"}, ${reporters} station${reporters === 1 ? "" : "s"} reporting. Updated ${esc(generatedIso.replace(/\.\d+Z$/, "Z"))}.</p>
-<p class="note">Map tiles from OpenStreetMap contributors. Green circles are relays, dark circles are stations, grey circles are stations heard by others. A dashed ring marks a position given only as an area.</p>
+<p class="note">Map tiles from OpenStreetMap contributors. A <strong>station</strong> is one person's KAHF setup. A <strong>relay</strong> is a station that passes messages on for others. Green circles are relays, dark circles are stations that share their location, and grey circles are stations known only because another station heard them, so their position is approximate. A dashed ring marks a position given only as an area.</p>
 </aside>
 </div>
 </div>`;

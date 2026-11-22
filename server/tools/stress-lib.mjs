@@ -7,23 +7,21 @@
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 
-// The band segment is the one value shared with the server: it comes from the single
-// constant in src/core.js, so a segment change needs no edit here. Everything derived
-// from it (channel count, frequencies, expected channels) is calculated again below.
-// A remote run therefore expects the server under test to use the same segment as this
-// checkout; a server deployed before the 17 m move fails every band scenario.
-const { BAND_SEGMENT_KHZ, CHANNEL_WIDTH_KHZ } = await import("../src/core.js");
+// The channel plan comes from the one table in src/band.js (twelve 17 m lanes, channel =
+// lane number). Everything the scenarios expect is calculated again below from plain
+// numbers (lane k lower edge = 18_111_200 + 700 k Hz, 700 Hz cells), not from the server's
+// functions. A remote run expects the server under test to use the same plan as this checkout.
+const { BAND_SEGMENT_KHZ, BAND_CHANNELS, reportKhz } = await import("../src/core.js");
 const LOW = BAND_SEGMENT_KHZ.low;
 const HIGH = BAND_SEGMENT_KHZ.high;
-const W10 = Math.round(CHANNEL_WIDTH_KHZ * 10); // channel width in tenths of a kHz
-const NCH = Math.floor(((HIGH - LOW) * 10) / W10);
+const NCH = BAND_CHANNELS;
 const LAST = NCH - 1;
-/** Integer kHz inside channel n. */
-const freqOf = (n) => Math.ceil(LOW + CHANNEL_WIDTH_KHZ * n);
-/** A channel in the middle of the band (channel 1 of 3), used where any valid channel will do. */
+/** Integer kHz inside lane n (reports carry whole kHz; lanes 0, 3, 7 and 10 have none, so fall back to 18112). */
+const freqOf = (n) => reportKhz(n) ?? 18_112;
+/** A lane in the middle of the band, used where any valid channel will do. */
 const MID = Math.floor(NCH / 2);
-/** The channel the default test report is heard on: channel 0, which is in the online pool. */
-const BUSY_CH = 0;
+/** The lane the default test report is heard on: lane 1 (R2), in the online pool. */
+const BUSY_CH = 1;
 
 const enc = new TextEncoder();
 const BASE = "https://kahf.test";
@@ -243,10 +241,10 @@ const tx = (channel, duration, extra = {}) => ({ channel, duration, direction: "
 
 /** Independent channel number for an integer kHz, written without the server's constants. */
 function expectedChannel(khz) {
-  const tenths = Math.round((khz - LOW) * 10);
-  if (tenths < 0) return null;
-  const c = Math.floor(tenths / W10);
-  return c < NCH ? c : null;
+  const off = khz * 1000 - 18_111_200;
+  if (off < 0) return null;
+  const c = Math.floor(off / 700);
+  return c < 12 ? c : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +309,7 @@ S(G.sig, "signature over a different body (frequency changed after signing)", "4
   const k = await h.key();
   const f = reportFields(h);
   const body = await h.sign(k, f);
-  const r = await h.post("/report", { ...body, frequency_khz: LOW + 1 });
+  const r = await h.post("/report", { ...body, frequency_khz: freqOf(BUSY_CH) + 1 });
   status(r, 401);
   eq((await stationsOf(h, f.reporter_call)).length, 0, "stored records");
 });
@@ -826,13 +824,15 @@ S(G.freq, `every integer kHz from ${LOW - 5} to ${HIGH + 5} maps to the channel 
   const missing = [...want].filter((c) => !got.has(c)), extra = [...got].filter((c) => !want.has(c));
   check(missing.length === 0 && extra.length === 0, `missing channels ${snip(missing)}, extra channels ${snip(extra)}`);
 }, {});
-S(G.freq, `channel pools are consistent (${NCH} channels, online and open split cleanly)`, `pools cover 0..${LAST} once; busy channel removed from the area's list`, async (h) => {
+S(G.freq, `channel pools are consistent (12 lanes: online, open and emergency split cleanly)`, `pools cover 0..${LAST} once, by lane role; busy channel removed from the area's list`, async (h) => {
   status((await report(h, { frequency_khz: freqOf(BUSY_CH) })).res, 200);
   const z = (await h.get("/zones")).json;
-  eq(z.pools.bandChannels, NCH, "bandChannels");
-  const all = [...z.pools.online, ...z.pools.open].sort((a, b) => a - b);
-  eq(all, Array.from({ length: NCH }, (_, i) => i), "online + open");
-  check(z.pools.online.every((c) => !z.pools.open.includes(c)), "online and open overlap");
+  eq(z.pools.bandChannels, 12, "bandChannels");
+  const all = [...z.pools.online, ...z.pools.open, ...z.pools.emergency].sort((a, b) => a - b);
+  eq(all, Array.from({ length: 12 }, (_, i) => i), "online + open + emergency");
+  eq(z.pools.online, [0, 1, 2, 3, 8, 9, 10, 11], "online pool is the relay lanes R1-R8");
+  eq(z.pools.open, [5, 6], "open pool is the calling lanes C1, C2");
+  eq(z.pools.emergency, [4, 7], "emergency pool is the spare lanes X1, X2");
   const entry = z.pools.areas.N51W1;
   check(entry, "N51W1 missing from pools.areas");
   check(!entry.channels.includes(BUSY_CH) || !z.pools.online.includes(BUSY_CH), "busy channel is still offered");
@@ -895,12 +895,13 @@ S(G.sched, "30 relays in one area, same channel, each asks 20 times in turn: no 
   for (let i = 1; i < all.length; i++) check(all[i].start >= all[i - 1].start + all[i - 1].duration, `overlap on channel ${MID}: ${snip(all[i - 1])} and ${snip(all[i])}`);
   check(all[0].start >= nowS(h) - 5, "first slot starts before now");
 });
-S(G.sched, "relays in different areas may use the same channel at the same time", "both start now", async (h) => {
+S(G.sched, "relays in different areas never transmit on one channel at the same time (HF is global)", "second transmit slot starts after the first", async (h) => {
   const a = await relayWith(h, "N10E10"), b = await relayWith(h, "N11E10");
   const ra = await schedule(h, a.call, [tx(MID, 30)], a.key);
   const rb = await schedule(h, b.call, [tx(MID, 30)], b.key);
   status(ra, 200); status(rb, 200);
-  check(Math.abs(ra.json.slots[0].start - rb.json.slots[0].start) <= 5, `slots should start together: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
+  const x = ra.json.slots[0], y = rb.json.slots[0];
+  check(y.start >= x.start + x.duration || x.start >= y.start + y.duration, `transmit slots overlap: ${snip(ra.json.slots)} ${snip(rb.json.slots)}`);
 });
 S(G.sched, "urgent request placed before earlier non-urgent ones on the same channel", "urgent slot (20 s) starts first, then non-urgent in request order", async (h) => {
   const r = await relayWith(h);
@@ -1028,9 +1029,9 @@ S(G.sched, "relay that moves area is planned against its new area only", "same-c
   const y = x === "N5E5" ? "N6E6" : "N5E5";
   const a = await relayWith(h, x);
   const m = await relayWith(h, x);
-  status(await schedule(h, a.call, [tx(MID, 300)], a.key), 200);
+  status(await schedule(h, a.call, [{ channel: MID, duration: 300, direction: "rx" }], a.key), 200);
   status((await registerRelay(h, m.call, y, m.key)).res, 200);
-  const res = await schedule(h, m.call, [tx(MID, 30)], m.key);
+  const res = await schedule(h, m.call, [{ channel: MID, duration: 30, direction: "rx" }], m.key);
   status(res, 200);
   check(Math.abs(res.json.slots[0].start - nowS(h)) <= 5, `moved relay still waits behind the old area: ${snip(res.json.slots)}`);
 });
@@ -1505,7 +1506,8 @@ S(G.page, "home page: one hashed inline script, no external URL, strict CSP", "2
   check(/connect-src 'self'(;|$)/.test(csp), `CSP lacks connect-src 'self': ${csp}`);
   check(!/unsafe-eval|unsafe-inline[^;]*script|script-src[^;]*(unsafe-inline|\*)|https?:|data:|wasm-unsafe/.test(csp.replace(/style-src[^;]*;?/, "")), `CSP too loose: ${csp}`);
   for (const d of ["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) check(csp.includes(d), `CSP lacks ${d}`);
-  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, ""), "home");
+  // The home page links to the project source and the support page; nothing else leaves the site.
+  noExternal(r.text.replace(/<script>[\s\S]*?<\/script>/, "").replace(/href="https:\/\/(?:github\.com\/adswill\/kahf-modem|ko-fi\.com\/adswill)" rel="noopener noreferrer"/g, 'href="#"'), "home");
   check(!/http-equiv\s*=\s*["']?refresh/i.test(r.text), "meta refresh");
   scriptCalls(scripts[0][1], "home");
   eq(r.headers.get("x-content-type-options"), "nosniff", "nosniff");

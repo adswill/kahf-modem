@@ -42,13 +42,14 @@ test("busy zones: malformed and far-future reports are skipped", () => {
   assert.deepEqual(busyZones(reports, NOW), { AB: [LAST] });
 });
 
-test("pools: lower third is online for listed areas, open pool for the rest", () => {
+test("pools: relay lanes online, calling lanes open, spare lanes emergency", () => {
   const plan = poolPlan({ AB12: [1, 2] });
   assert.equal(plan.defaultPool, "open");
-  assert.equal(plan.online.length, Math.floor(BAND_CHANNELS / 3));
-  assert.equal(plan.online[0], 0);
-  assert.equal(plan.open[0], plan.online.length);
-  assert.equal(plan.open.at(-1), BAND_CHANNELS - 1);
+  assert.equal(plan.bandChannels, 12);
+  assert.deepEqual(plan.online, [0, 1, 2, 3, 8, 9, 10, 11]);
+  assert.deepEqual(plan.open, [5, 6]);
+  assert.deepEqual(plan.emergency, [4, 7]);
+  assert.deepEqual([...plan.online, ...plan.open, ...plan.emergency].sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => i));
   assert.deepEqual(plan.areas.AB12.channels, plan.online.filter((c) => c !== 1 && c !== 2));
   assert.equal(plan.areas.AB12.pool, "online");
 });

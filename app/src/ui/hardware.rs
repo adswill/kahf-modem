@@ -79,8 +79,7 @@ pub fn audio_picker(k: &Kahf, w: Where) -> V {
             .gap(12.0),
         );
         c = c.push(
-            caption("The input test listens for a moment. The output test plays silence. The level check listens for three seconds with the band open. None of them transmits.")
-                .dim(),
+            para("The input test listens for a moment. The output test plays silence. The level check listens for three seconds with the band open. None of them transmits.", pw(w)),
         );
     }
     c = c.push(choice(
@@ -134,7 +133,7 @@ pub fn rig_picker(k: &Kahf, w: Where) -> V {
 
     // Direct control: KAHF talks to the radio's serial port itself, without Hamlib.
     c = c.push(heading("Control the radio directly (no Hamlib needed)").sub());
-    c = c.push(caption("For the radios listed here KAHF talks to the serial port itself, and can key the transmitter by command or by a port line.").dim().fill_w());
+    c = c.push(para("For the radios listed here KAHF talks to the serial port itself, and can key the transmitter by command or by a port line.", pw(w)));
     let mut models = vec!["Not used".to_string()];
     models.extend(k.ui.direct_rigs.iter().map(|m| m.label.clone()));
     let sel = if h.d_model.is_empty() {
@@ -357,7 +356,7 @@ fn hamlib_choice(k: &Kahf, w: Where) -> V {
                 k.ui.tests.get("rig_model"),
                 Some(TestState::Done { ok: false, .. })
             ) {
-                c = c.push(caption("Check that the radio is on, the cable is in, and its USB or CAT speed matches. On an Icom the CI-V address must match too.").dim().fill_w());
+                c = c.push(para("Check that the radio is on, the cable is in, and its USB or CAT speed matches. On an Icom the CI-V address must match too.", pw(w)));
             }
         }
     }
@@ -505,4 +504,13 @@ pub fn location_editor(k: &Kahf, w: Where) -> V {
         ));
     }
     c.into()
+}
+
+/// Paragraph width in characters: the Radio screen's side panel is narrower than the other screens.
+fn pw(w: Where) -> usize {
+    if w == Where::Radio {
+        60
+    } else {
+        100
+    }
 }

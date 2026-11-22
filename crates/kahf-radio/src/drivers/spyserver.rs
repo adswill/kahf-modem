@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn a_server_that_closes_at_once_is_not_a_server() {
-        let (addr, h) = fake_server(|s| drop(s));
+        let (addr, h) = fake_server(drop);
         let err = open(Some(&addr)).err().expect("an error");
         assert!(err.contains("not a SpyServer"), "{err}");
         h.join().expect("server thread");
@@ -847,8 +847,7 @@ mod tests {
             let mut r = open(Some(&addr)).expect("open");
             let e = r
                 .set_gain("gain", GainSetting::Manual(3.0))
-                .err()
-                .expect("an error");
+                .expect_err("an error");
             assert!(e.contains("read only"), "{e}");
             assert!(r.set_gain("nope", GainSetting::Manual(1.0)).is_err());
         }

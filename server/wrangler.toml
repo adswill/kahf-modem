@@ -1,6 +1,12 @@
 name = "kahf-station-map"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# node:crypto is used by the router (24 bit callsign hashes).
+compatibility_flags = ["nodejs_compat"]
+
+# Hourly: the mesh reads today's solar flux and K index from NOAA.
+[triggers]
+crons = ["7 * * * *"]
 
 # Public address: kahf.dev, served by this Worker.
 routes = [{ pattern = "kahf.dev", custom_domain = true }]
@@ -23,15 +29,10 @@ class_name = "CallsignObject"
 name = "AREAS"
 class_name = "AreaObject"
 
-#   MAILBOXES: one per callsign (HF backbone queue, id claims, receipts).
-#   BACKBONE: one object for the heard index, wanted list and rate counters.
+#   MESH: one object for the whole relay mesh: WebSockets, routing, signed plans. RAM only.
 [[durable_objects.bindings]]
-name = "MAILBOXES"
-class_name = "MailObject"
-
-[[durable_objects.bindings]]
-name = "BACKBONE"
-class_name = "IndexObject"
+name = "MESH"
+class_name = "MeshObject"
 
 # SQLite-backed storage for both classes (Workers Paid plan).
 [[migrations]]
@@ -41,3 +42,10 @@ new_sqlite_classes = ["CallsignObject", "AreaObject"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["MailObject", "IndexObject"]
+
+# The queued-message backbone (MailObject, IndexObject) is removed: the network stores no messages.
+# Deleting a class deletes its stored data.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["MeshObject"]
+deleted_classes = ["MailObject", "IndexObject"]

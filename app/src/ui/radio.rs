@@ -15,6 +15,11 @@ pub fn view(k: &Kahf) -> V {
     if let Some((tone, t)) = geo::reach_notice(s.location.lat, s.location.lon, now_unix()) {
         left = left.push(note(t, tone == Tone::Warn));
     }
+    if k.m.tx_gate.state == "off" && !k.m.tx_gate.reason.is_empty() {
+        left = left.push(note(k.m.tx_gate.reason.clone(), true));
+    } else if k.m.tx_gate.state == "bench" {
+        left = left.push(note(k.m.tx_gate.reason.clone(), false));
+    }
     left = left.push(
         row![
             heading("The channel"),
@@ -31,27 +36,43 @@ pub fn view(k: &Kahf) -> V {
         k.m.waterfall.iter().cloned().collect(),
         330.0,
     ));
-    left = left.push(caption("Brighter is stronger. The scale is the sound from your radio, in kilohertz. The shaded band is where KAHF listens.").dim());
+    left = left.push(para("Brighter is stronger. The scale is the sound from your radio, in kilohertz. The shaded band is where KAHF listens.", 60));
 
     let current = bands::index_of(s.freq_khz);
+    let lanes = bands::channels();
     let mut side = col![
-        heading("Channel").sub(),
+        heading("Lane").sub(),
         row![
-            tabs(bands::channels().iter().map(|c| c.name), current.unwrap_or(0))
-                .act(|k: &mut Kahf, i: usize| k.set_frequency(bands::channels()[i].khz)),
-            text(fmt::mhz(s.freq_khz)),
+            text(current.map_or("not a KAHF lane".to_string(), |i| lanes[i].name.clone())).heading(),
+            text(format!("dial {}", fmt::mhz(s.freq_khz))),
         ]
         .gap(10.0)
         .align_center(),
-        caption("KAHF uses 17 metres only (18.111 to 18.120 MHz), in three channels, each 2.7 kHz wide. Tune your radio to the frequency shown. A relay works on all three.")
-            .dim(),
+        para("KAHF uses 17 metres only (18.111 to 18.120 MHz), in twelve narrow lanes, each 480 Hz wide. Set your radio to upper sideband and to the dial shown for the lane. C1 is where stations call each other; R lanes belong to relays. Relays take care of the rest, so start with C1.", 60),
+    ]
+    .gap(10.0);
+    for half in lanes.chunks(6) {
+        let mut r = row![].gap(6.0);
+        for ch in half {
+            let khz = ch.khz;
+            r = r.push(
+                button(ch.name.clone())
+                    .nav(current == Some(ch.index))
+                    .act(move |k: &mut Kahf| k.set_frequency(khz)),
+            );
+        }
+        side = side.push(r);
+    }
+    if let Some(i) = current {
+        side = side.push(caption(format!("{}: {}.", lanes[i].name, lanes[i].what)).dim());
+    }
+    side = side.push(col![
         heading("How the radio is heard").sub(),
         audio_picker(k, Where::Radio),
         heading("Radio control").sub(),
-        caption("Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card.").dim(),
+        para("Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card.", 60),
         rig_picker(k, Where::Radio),
-    ]
-    .gap(10.0);
+    ].gap(10.0));
     if k.hardware_dirty() {
         side = side.push(
             row![

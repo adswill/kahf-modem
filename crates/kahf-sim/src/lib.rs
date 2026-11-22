@@ -96,6 +96,12 @@ pub enum Profile {
     FreqOffset,
     ClockOffset,
     Fade,
+    /// Alias of `WattersonGood`, kept for the lane and ladder examples.
+    HfGood,
+    /// Alias of `WattersonModerate`.
+    HfModerate,
+    /// Alias of `WattersonPoor`.
+    HfPoor,
     /// ITU-R F.1487 / CCIR 520 Watterson "good" channel: 2 paths, 0.5 ms, 0.1 Hz spread.
     WattersonGood,
     /// Watterson "moderate": 1 ms, 0.5 Hz spread.
@@ -121,9 +127,9 @@ pub fn apply(samples: &[f32], profile: Profile, snr_db: f32, seed: u64) -> Vec<f
         }
         Profile::ClockOffset => clock_offset(samples),
         Profile::Fade => fade(samples),
-        Profile::WattersonGood => watterson(samples, 0.0005, 0.1, seed),
-        Profile::WattersonModerate => watterson(samples, 0.001, 0.5, seed),
-        Profile::WattersonPoor => watterson(samples, 0.002, 1.0, seed),
+        Profile::HfGood | Profile::WattersonGood => watterson(samples, 0.0005, 0.1, seed),
+        Profile::HfModerate | Profile::WattersonModerate => watterson(samples, 0.001, 0.5, seed),
+        Profile::HfPoor | Profile::WattersonPoor => watterson(samples, 0.002, 1.0, seed),
         Profile::WattersonFlutter => watterson(samples, 0.0005, 10.0, seed),
     };
     awgn(&impaired, snr_db, seed)
@@ -182,18 +188,7 @@ fn fft(buf: &mut [(f64, f64)], inverse: bool) {
 ///
 /// The input is zero-padded to at least twice its length so the circular
 /// Hilbert transform does not wrap around the buffer.
-fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
-    let z = analytic(x);
-    z.iter()
-        .enumerate()
-        .map(|(i, &(zr, zi))| {
-            let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
-            (zr * theta.cos() - zi * theta.sin()) as f32
-        })
-        .collect()
-}
-
-/// Analytic signal z = x + i*H{x} (FFT method, zero-padded against wrap-around).
+/// The analytic signal of `x` (the real signal plus i times its Hilbert transform).
 fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
     let n = x.len();
     if n == 0 {
@@ -205,7 +200,6 @@ fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
         *s = (v as f64, 0.0);
     }
     fft(&mut spec, false);
-    // Analytic signal: keep DC and Nyquist, double positive frequencies, drop negative.
     let half = big / 2;
     for s in spec.iter_mut().take(half).skip(1) {
         *s = (s.0 * 2.0, s.1 * 2.0);
@@ -215,53 +209,90 @@ fn analytic(x: &[f32]) -> Vec<(f64, f64)> {
     }
     fft(&mut spec, true);
     let scale = 1.0 / big as f64;
-    (0..n).map(|i| (spec[i].0 * scale, spec[i].1 * scale)).collect()
+    spec.into_iter()
+        .take(n)
+        .map(|(r, i)| (r * scale, i * scale))
+        .collect()
 }
 
-/// Number of sinusoids per Rayleigh tap in the sum-of-sinusoids fading generator.
-const FADE_SINUSOIDS: usize = 64;
-
-/// Complex Rayleigh gain process with a Gaussian Doppler power spectrum. `spread_hz`
-/// is the two-sigma Doppler spread (ITU-R F.1487 definition). Unit mean power.
-/// Sum of sinusoids at Gaussian-distributed frequencies with random phases.
-fn rayleigh_gain(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> {
-    let sigma = spread_hz / 2.0;
-    let comps: Vec<(f64, f64)> = (0..FADE_SINUSOIDS)
-        .map(|_| (2.0 * PI * sigma * rng.gaussian(), 2.0 * PI * rng.uniform_open()))
+/// A complex fading process of `len` samples at 8 kHz with a Gaussian Doppler spectrum of
+/// total width `spread_hz` (the ITU "Doppler spread") and unit mean power. It is made at a low
+/// rate (white complex noise through a Gaussian filter) and interpolated up.
+fn fading_process(len: usize, spread_hz: f64, rng: &mut Rng) -> Vec<(f64, f64)> {
+    const LOW_HZ: f64 = 50.0;
+    let step = SAMPLE_RATE_HZ / LOW_HZ;
+    let sigma_f = spread_hz / 2.0;
+    // Filter impulse response h(t) ~ exp(-2 pi^2 sigma_f^2 t^2), out to four time constants.
+    let tau = 1.0 / (2.0 * PI * sigma_f);
+    let half = (4.0 * tau * LOW_HZ).ceil() as isize;
+    let taps: Vec<f64> = (-half..=half)
+        .map(|k| (-((k as f64 / LOW_HZ) / tau).powi(2) / 2.0).exp())
         .collect();
-    let a = (1.0 / FADE_SINUSOIDS as f64).sqrt();
+    let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
+    let n_low = (len as f64 / step).ceil() as usize + 2;
+    let noise: Vec<(f64, f64)> = (0..n_low + 2 * half as usize)
+        .map(|_| (rng.gaussian() / 2f64.sqrt(), rng.gaussian() / 2f64.sqrt()))
+        .collect();
+    let low: Vec<(f64, f64)> = (0..n_low)
+        .map(|i| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (j, t) in taps.iter().enumerate() {
+                re += t * noise[i + j].0;
+                im += t * noise[i + j].1;
+            }
+            (re / norm, im / norm)
+        })
+        .collect();
     (0..len)
         .map(|n| {
-            let t = n as f64 / SAMPLE_RATE_HZ;
-            comps.iter().fold((0.0, 0.0), |(re, im), &(w, ph)| {
-                let th = w * t + ph;
-                (re + a * th.cos(), im + a * th.sin())
-            })
+            let pos = n as f64 / step;
+            let i = pos.floor() as usize;
+            let f = pos - i as f64;
+            (
+                low[i].0 * (1.0 - f) + low[i + 1].0 * f,
+                low[i].1 * (1.0 - f) + low[i + 1].1 * f,
+            )
         })
         .collect()
 }
 
-/// Watterson two-path channel: two independent Rayleigh paths of equal power, the second
-/// delayed by `delay_s`, each with Gaussian Doppler spread `spread_hz` (two-sigma).
-/// Applied to the analytic signal; the real part is returned. Output power averages
-/// to the input power.
+/// The Watterson HF channel (ITU-R F.1487): two independent Rayleigh-fading paths of equal
+/// mean power, `delay_s` apart, each with a Gaussian Doppler spectrum of width `spread_hz`.
 fn watterson(x: &[f32], delay_s: f64, spread_hz: f64, seed: u64) -> Vec<f32> {
-    let z = analytic(x);
-    let n = z.len();
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let a = analytic(x);
     let d = (delay_s * SAMPLE_RATE_HZ).round() as usize;
-    let mut rng = Rng::new(seed ^ 0x57A7_7E55_0000_0001);
-    let g1 = rayleigh_gain(n, spread_hz, &mut rng);
-    let g2 = rayleigh_gain(n, spread_hz, &mut rng);
-    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let mut rng = Rng::new(seed ^ 0x5741_5454_4552_534F);
+    let g1 = fading_process(n, spread_hz, &mut rng);
+    let g2 = fading_process(n, spread_hz, &mut rng);
+    let s = 1.0 / 2f64.sqrt();
     (0..n)
         .map(|i| {
-            let (zr, zi) = z[i];
-            let mut re = h * (g1[i].0 * zr - g1[i].1 * zi);
-            if i >= d {
-                let (dr, di) = z[i - d];
-                re += h * (g2[i].0 * dr - g2[i].1 * di);
-            }
-            re as f32
+            let p1 = (
+                g1[i].0 * a[i].0 - g1[i].1 * a[i].1,
+                g1[i].0 * a[i].1 + g1[i].1 * a[i].0,
+            );
+            let p2 = if i >= d {
+                let b = a[i - d];
+                (g2[i].0 * b.0 - g2[i].1 * b.1, g2[i].0 * b.1 + g2[i].1 * b.0)
+            } else {
+                (0.0, 0.0)
+            };
+            ((p1.0 + p2.0) * s) as f32
+        })
+        .collect()
+}
+
+fn freq_shift(x: &[f32], shift_hz: f64) -> Vec<f32> {
+    let z = analytic(x);
+    z.iter()
+        .enumerate()
+        .map(|(i, &(zr, zi))| {
+            let theta = 2.0 * PI * shift_hz * i as f64 / SAMPLE_RATE_HZ;
+            (zr * theta.cos() - zi * theta.sin()) as f32
         })
         .collect()
 }
@@ -360,6 +391,45 @@ pub fn run_point(snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
 ///
 /// Returns (frame errors, frames).
 pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64) -> (usize, usize) {
+    run_point_mod(BLER_MOD, profile, snr_db, frames, seed)
+}
+
+/// As `run_point_profile`, for any modulation (the frame carries that modulation's id).
+pub fn run_point_mod(
+    m: phy::Modulation,
+    profile: Profile,
+    snr_db: f32,
+    frames: usize,
+    seed: u64,
+) -> (usize, usize) {
+    run_point_with(m, frames, seed, |tx, trial_seed| {
+        apply(tx, profile, snr_db, trial_seed)
+    })
+}
+
+/// The most general sweep: `channel` turns each transmitted frame into what the receiver gets.
+pub fn run_point_with<F>(m: phy::Modulation, frames: usize, seed: u64, channel: F) -> (usize, usize)
+where
+    F: Fn(&[f32], u64) -> Vec<f32> + Sync,
+{
+    let id = match m {
+        phy::Modulation::Qpsk => 0,
+        phy::Modulation::Qam16 => 1,
+        phy::Modulation::Qam64 => 2,
+        phy::Modulation::Kami32 => kahf_core::kami::ID,
+        phy::Modulation::Kami16 => kahf_core::kami::ID16,
+        phy::Modulation::Kami8 => kahf_core::kami::ID8,
+        phy::Modulation::Kami8H => kahf_core::kami::ID8H,
+        phy::Modulation::Kami64 => kahf_core::kami::ID64,
+        phy::Modulation::Kami128 => kahf_core::kami::ID128,
+        phy::Modulation::Kami256 => kahf_core::kami::ID256,
+        phy::Modulation::Kami4 => kahf_core::kami::ID4,
+        phy::Modulation::Kami2 => kahf_core::kami::ID2,
+        phy::Modulation::Kami1a => kahf_core::kami::ID1A,
+        phy::Modulation::Kami1b => kahf_core::kami::ID1B,
+        phy::Modulation::Kami1c => kahf_core::kami::ID1C,
+        phy::Modulation::Kami1d => kahf_core::kami::ID1D,
+    };
     const PAYLOAD_BYTES: usize = 36;
     let errors = (0..frames)
         .into_par_iter()
@@ -367,11 +437,11 @@ pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64
             let trial_seed = seed ^ (i as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
             let mut rng = Rng::new(trial_seed);
             let payload: Vec<u8> = (0..PAYLOAD_BYTES).map(|_| (rng.next_u64() >> 56) as u8).collect();
-            let info = kahf_core::frame::build_payload(&payload);
+            let info = kahf_core::frame::build_payload_as(&payload, id);
             let coded = kahf_core::ldpc::encode(&info);
-            let tx = kahf_core::phy::modulate_frame(&coded, BLER_MOD);
-            let rx = apply(&tx, profile, snr_db, trial_seed);
-            let decoded = kahf_core::phy::demodulate_frame(&rx, BLER_MOD, kahf_core::ldpc::N)
+            let tx = kahf_core::phy::modulate_frame(&coded, m);
+            let rx = channel(&tx, trial_seed);
+            let decoded = kahf_core::phy::demodulate_frame(&rx, m, kahf_core::ldpc::N)
                 .and_then(|llr| kahf_core::ldpc::decode(&llr, BLER_MAX_ITER))
                 .and_then(|bits| kahf_core::frame::parse_payload(&bits));
             decoded.as_deref() != Some(payload.as_slice())
@@ -380,9 +450,51 @@ pub fn run_point_profile(profile: Profile, snr_db: f32, frames: usize, seed: u64
     (errors, frames)
 }
 
+/// The Watterson channel with explicit parameters, then AWGN: for probing which impairment a
+/// receiver cannot take. `delay_s` 0 makes the second path add in phase (a flat fade).
+pub fn hf_channel(samples: &[f32], delay_s: f64, spread_hz: f64, snr_db: f32, seed: u64) -> Vec<f32> {
+    awgn(&watterson(samples, delay_s, spread_hz, seed), snr_db, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two equal-strength Rayleigh paths 1 ms apart (a normal HF echo) must not break KAMI-32 at a
+    /// good SNR. Before the receiver had an equalizer this lost more than 70 percent of the frames.
+    #[test]
+    fn kami_32_survives_an_hf_echo() {
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 5, |tx, s| {
+            hf_channel(tx, 0.001, 0.05, 30.0, s)
+        });
+        assert!(err * 10 <= n, "{err} of {n} frames lost through a 1 ms echo");
+        let (err, n) = run_point_with(phy::Modulation::Kami32, 20, 6, |tx, s| {
+            hf_channel(tx, 0.002, 0.05, 30.0, s)
+        });
+        assert!(err * 10 <= n, "{err} of {n} frames lost through a 2 ms echo");
+    }
+
+    #[test]
+    fn the_hf_channel_keeps_mean_power_and_fades() {
+        let n = 8000 * 120;
+        let tone: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 1500.0 * i as f64 / 8000.0).sin() as f32)
+            .collect();
+        let p_in: f64 = tone.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        let out = watterson(&tone, 0.001, 0.5, 3);
+        let p_out: f64 = out.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n as f64;
+        let db = 10.0 * (p_out / p_in).log10();
+        assert!(db.abs() < 3.0, "mean power changed by {db:.1} dB");
+        // Power in one-second blocks must vary: that is the fading.
+        let blocks: Vec<f64> = out
+            .chunks(8000)
+            .map(|c| c.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / 8000.0)
+            .collect();
+        let (lo, hi) = blocks
+            .iter()
+            .fold((f64::MAX, 0.0f64), |(l, h), &b| (l.min(b), h.max(b)));
+        assert!(10.0 * (hi / lo).log10() > 6.0, "no fading: {lo:.3} to {hi:.3}");
+    }
 
     #[test]
     fn noise_power_matches_target_snr() {

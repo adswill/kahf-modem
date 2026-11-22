@@ -42,145 +42,10 @@ pub const NEAR_EDGE_HZ: u64 = 5_000;
 
 use Region::{Region1 as R1, Region2 as R2, Region3 as R3};
 
-/// Amateur allocations. Verify against the current national table before release.
-///
-/// Region 3 entries for 80 m (3500-3900 kHz) and 40 m (7000-7200 kHz) and
-/// Region 2 40 m (7000-7300 kHz) are the least certain; check them first.
+/// Amateur allocation KAHF works in: 17 m, the same 18.068 to 18.168 MHz in all three regions.
+/// Verify against the current national table before release. KAHF knows no other band, so a
+/// frequency anywhere else is reported as out of band.
 pub static ALLOCATIONS: &[Allocation] = &[
-    // 2200 m
-    Allocation {
-        band: "2200m",
-        region: R1,
-        lower_hz: 135_700,
-        upper_hz: 137_800,
-    },
-    Allocation {
-        band: "2200m",
-        region: R2,
-        lower_hz: 135_700,
-        upper_hz: 137_800,
-    },
-    Allocation {
-        band: "2200m",
-        region: R3,
-        lower_hz: 135_700,
-        upper_hz: 137_800,
-    },
-    // 630 m
-    Allocation {
-        band: "630m",
-        region: R1,
-        lower_hz: 472_000,
-        upper_hz: 479_000,
-    },
-    Allocation {
-        band: "630m",
-        region: R2,
-        lower_hz: 472_000,
-        upper_hz: 479_000,
-    },
-    Allocation {
-        band: "630m",
-        region: R3,
-        lower_hz: 472_000,
-        upper_hz: 479_000,
-    },
-    // 160 m
-    Allocation {
-        band: "160m",
-        region: R1,
-        lower_hz: 1_810_000,
-        upper_hz: 2_000_000,
-    },
-    Allocation {
-        band: "160m",
-        region: R2,
-        lower_hz: 1_800_000,
-        upper_hz: 2_000_000,
-    },
-    Allocation {
-        band: "160m",
-        region: R3,
-        lower_hz: 1_800_000,
-        upper_hz: 2_000_000,
-    },
-    // 80 m
-    Allocation {
-        band: "80m",
-        region: R1,
-        lower_hz: 3_500_000,
-        upper_hz: 3_800_000,
-    },
-    Allocation {
-        band: "80m",
-        region: R2,
-        lower_hz: 3_500_000,
-        upper_hz: 4_000_000,
-    },
-    Allocation {
-        band: "80m",
-        region: R3,
-        lower_hz: 3_500_000,
-        upper_hz: 3_900_000,
-    },
-    // 40 m
-    Allocation {
-        band: "40m",
-        region: R1,
-        lower_hz: 7_000_000,
-        upper_hz: 7_200_000,
-    },
-    Allocation {
-        band: "40m",
-        region: R2,
-        lower_hz: 7_000_000,
-        upper_hz: 7_300_000,
-    },
-    Allocation {
-        band: "40m",
-        region: R3,
-        lower_hz: 7_000_000,
-        upper_hz: 7_200_000,
-    },
-    // 30 m
-    Allocation {
-        band: "30m",
-        region: R1,
-        lower_hz: 10_100_000,
-        upper_hz: 10_150_000,
-    },
-    Allocation {
-        band: "30m",
-        region: R2,
-        lower_hz: 10_100_000,
-        upper_hz: 10_150_000,
-    },
-    Allocation {
-        band: "30m",
-        region: R3,
-        lower_hz: 10_100_000,
-        upper_hz: 10_150_000,
-    },
-    // 20 m
-    Allocation {
-        band: "20m",
-        region: R1,
-        lower_hz: 14_000_000,
-        upper_hz: 14_350_000,
-    },
-    Allocation {
-        band: "20m",
-        region: R2,
-        lower_hz: 14_000_000,
-        upper_hz: 14_350_000,
-    },
-    Allocation {
-        band: "20m",
-        region: R3,
-        lower_hz: 14_000_000,
-        upper_hz: 14_350_000,
-    },
-    // 17 m
     Allocation {
         band: "17m",
         region: R1,
@@ -198,82 +63,6 @@ pub static ALLOCATIONS: &[Allocation] = &[
         region: R3,
         lower_hz: 18_068_000,
         upper_hz: 18_168_000,
-    },
-    // 15 m
-    Allocation {
-        band: "15m",
-        region: R1,
-        lower_hz: 21_000_000,
-        upper_hz: 21_450_000,
-    },
-    Allocation {
-        band: "15m",
-        region: R2,
-        lower_hz: 21_000_000,
-        upper_hz: 21_450_000,
-    },
-    Allocation {
-        band: "15m",
-        region: R3,
-        lower_hz: 21_000_000,
-        upper_hz: 21_450_000,
-    },
-    // 12 m
-    Allocation {
-        band: "12m",
-        region: R1,
-        lower_hz: 24_890_000,
-        upper_hz: 24_990_000,
-    },
-    Allocation {
-        band: "12m",
-        region: R2,
-        lower_hz: 24_890_000,
-        upper_hz: 24_990_000,
-    },
-    Allocation {
-        band: "12m",
-        region: R3,
-        lower_hz: 24_890_000,
-        upper_hz: 24_990_000,
-    },
-    // 10 m
-    Allocation {
-        band: "10m",
-        region: R1,
-        lower_hz: 28_000_000,
-        upper_hz: 29_700_000,
-    },
-    Allocation {
-        band: "10m",
-        region: R2,
-        lower_hz: 28_000_000,
-        upper_hz: 29_700_000,
-    },
-    Allocation {
-        band: "10m",
-        region: R3,
-        lower_hz: 28_000_000,
-        upper_hz: 29_700_000,
-    },
-    // 6 m
-    Allocation {
-        band: "6m",
-        region: R1,
-        lower_hz: 50_000_000,
-        upper_hz: 52_000_000,
-    },
-    Allocation {
-        band: "6m",
-        region: R2,
-        lower_hz: 50_000_000,
-        upper_hz: 54_000_000,
-    },
-    Allocation {
-        band: "6m",
-        region: R3,
-        lower_hz: 50_000_000,
-        upper_hz: 54_000_000,
     },
 ];
 
@@ -311,30 +100,19 @@ pub struct Segment {
     pub upper_hz: u64,
 }
 
-/// Segments KAHF uses by default, IARU Region 1, ascending order.
+/// The segment KAHF uses: 17 m only, 18.111 to 18.120 MHz (IARU Region 1: "all modes, digimodes,
+/// automatically controlled data stations", 2700 Hz). Read from the IARU Region 1 HF band plan
+/// effective 16 Oct 2020; the engine still refuses to transmit by it until the owner marks the
+/// table verified (see `lanes.rs`).
 ///
-/// SOURCE NOTE: these values come from the 2002-era IARU Region 1 band plan text.
-/// The owner must confirm them against the current IARU Region 1 document before release.
-///
-/// Left out on purpose:
-/// - 14.070 to 14.100 MHz (digital beacons) and 14.230 MHz (SSTV and FAX calling).
-/// - 30 m: its only digital segment is 500 Hz wide, too narrow for KAHF's 2.4 kHz signal.
-pub static KAHF_SEGMENTS: &[Segment] = &[
-    Segment {
-        name: "40 m, 7.040 to 7.045 MHz",
-        lower_hz: 7_040_000,
-        upper_hz: 7_045_000,
-    },
-    Segment {
-        name: "20 m, 14.101 to 14.112 MHz",
-        lower_hz: 14_101_000,
-        upper_hz: 14_112_000,
-    },
-    // The relay band. IARU Region 1 marks 18.111 to 18.120 MHz for digital modes and
-    // automatically controlled data stations, which suits unattended relays. It sits above
-    // the 18.110 MHz beacon and clear of FT8 (18.100) and FT4 (18.104).
-    RELAY_SEGMENT,
-];
+/// Left out on purpose: 18.109 to 18.111 MHz (International Beacon Project) and everything below
+/// 18.111 MHz (FT8, FT4, WSPR and narrow digimodes). The 12 narrow lanes inside this segment are
+/// in `lanes.rs`.
+pub static KAHF_SEGMENTS: &[Segment] = &[Segment {
+    name: "17 m, 18.111 to 18.120 MHz",
+    lower_hz: 18_111_000,
+    upper_hz: 18_120_000,
+}];
 
 /// Where relays work by default: 17 m, 18.111 to 18.120 MHz (three channels).
 pub const RELAY_SEGMENT: Segment = Segment {
@@ -363,13 +141,11 @@ pub fn allowed_segment(centre_hz: u64, width_hz: u64) -> Option<&'static str> {
 pub fn tuning_warning(centre_hz: u64, width_hz: u64) -> Option<String> {
     match allowed_segment(centre_hz, width_hz) {
         Some(_) => None,
-        None => {
-            let names: Vec<&str> = KAHF_SEGMENTS.iter().map(|s| s.name).collect();
-            Some(format!(
-                "This tuning is outside the planned KAHF segments ({}). Check the band plan before you transmit.",
-                names.join("; ")
-            ))
-        }
+        None => Some(
+            "This tuning is outside the KAHF segment (17 m, 18.111 to 18.120 MHz). \
+             Check the band plan before you transmit."
+                .to_string(),
+        ),
     }
 }
 
@@ -378,105 +154,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fourteen_mhz_is_in_20m() {
-        assert_eq!(check(14_100_000, Region::Region1), Check::InBand { band: "20m" });
+    fn mid_17m_is_in_band() {
+        assert_eq!(check(18_115_000, Region::Region1), Check::InBand { band: "17m" });
+        assert_eq!(check(18_115_000, Region::Region2), Check::InBand { band: "17m" });
     }
 
     #[test]
-    fn thirteen_point_nine_mhz_is_out_of_band_region1() {
-        assert_eq!(check(13_900_000, Region::Region1), Check::OutOfBand);
+    fn everything_but_17m_is_out_of_band() {
+        for hz in [14_100_000, 7_042_000, 3_600_000, 18_067_999, 18_168_001] {
+            for r in [Region::Region1, Region::Region2, Region::Region3] {
+                assert_eq!(check(hz, r), Check::OutOfBand, "{hz}");
+            }
+        }
     }
 
     #[test]
-    fn near_lower_edge_is_detected() {
+    fn near_edges_are_detected() {
         assert_eq!(
-            check(14_001_500, Region::Region1),
+            check(18_069_500, Region::Region1),
             Check::NearEdge {
-                band: "20m",
+                band: "17m",
                 margin_hz: 1_500
             }
         );
-    }
-
-    #[test]
-    fn near_upper_edge_is_detected() {
         assert_eq!(
-            check(14_348_000, Region::Region1),
+            check(18_166_000, Region::Region1),
             Check::NearEdge {
-                band: "20m",
+                band: "17m",
                 margin_hz: 2_000
             }
         );
-    }
-
-    #[test]
-    fn exactly_5khz_inside_edge_is_near_edge() {
         assert_eq!(
-            check(14_005_000, Region::Region1),
+            check(18_073_000, Region::Region1),
             Check::NearEdge {
-                band: "20m",
+                band: "17m",
                 margin_hz: 5_000
             }
         );
     }
 
+    const N17: &str = "17 m, 18.111 to 18.120 MHz";
+
     #[test]
-    fn well_inside_band_is_in_band() {
-        assert_eq!(check(14_200_000, Region::Region2), Check::InBand { band: "20m" });
+    fn segment_17m_lower_edge_inclusive() {
+        // Centre 18_112_350 with 2.7 kHz width: lower edge is exactly 18_111_000.
+        assert_eq!(allowed_segment(18_112_350, KAHF_CHANNEL_WIDTH_HZ), Some(N17));
+        assert_eq!(allowed_segment(18_112_349, KAHF_CHANNEL_WIDTH_HZ), None);
     }
 
     #[test]
-    fn region_specific_edge_80m() {
-        // 3.85 MHz: amateur in Region 2 only.
-        assert_eq!(check(3_850_000, Region::Region1), Check::OutOfBand);
-        assert_eq!(check(3_850_000, Region::Region2), Check::InBand { band: "80m" });
+    fn segment_17m_upper_edge_inclusive() {
+        // Centre 18_118_650: upper edge is exactly 18_120_000.
+        assert_eq!(allowed_segment(18_118_650, KAHF_CHANNEL_WIDTH_HZ), Some(N17));
+        assert_eq!(allowed_segment(18_118_651, KAHF_CHANNEL_WIDTH_HZ), None);
     }
 
     #[test]
-    fn six_metre_region1_stops_at_52_mhz() {
-        assert_eq!(check(52_500_000, Region::Region1), Check::OutOfBand);
-        assert_eq!(check(52_500_000, Region::Region2), Check::InBand { band: "6m" });
-    }
-
-    const N20: &str = "20 m, 14.101 to 14.112 MHz";
-    const N40: &str = "40 m, 7.040 to 7.045 MHz";
-
-    #[test]
-    fn segment_20m_lower_edge_inclusive() {
-        // Centre 14_102_350 with 2.7 kHz width: lower edge is exactly 14_101_000.
-        assert_eq!(allowed_segment(14_102_350, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
-        assert_eq!(allowed_segment(14_102_349, KAHF_CHANNEL_WIDTH_HZ), None);
-    }
-
-    #[test]
-    fn segment_20m_upper_edge_inclusive() {
-        // Centre 14_110_650: upper edge is exactly 14_112_000.
-        assert_eq!(allowed_segment(14_110_650, KAHF_CHANNEL_WIDTH_HZ), Some(N20));
-        assert_eq!(allowed_segment(14_110_651, KAHF_CHANNEL_WIDTH_HZ), None);
-    }
-
-    #[test]
-    fn segment_40m_edges() {
-        assert_eq!(allowed_segment(7_041_350, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
-        assert_eq!(allowed_segment(7_041_349, KAHF_CHANNEL_WIDTH_HZ), None);
-        assert_eq!(allowed_segment(7_043_650, KAHF_CHANNEL_WIDTH_HZ), Some(N40));
-        assert_eq!(allowed_segment(7_043_651, KAHF_CHANNEL_WIDTH_HZ), None);
+    fn old_20m_and_40m_segments_are_gone() {
+        assert_eq!(allowed_segment(14_105_050, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(allowed_segment(7_041_350, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(KAHF_SEGMENTS.len(), 1);
     }
 
     #[test]
     fn channel_must_fit_fully_not_just_its_centre() {
-        // Centre inside 20 m but the lower half of the channel is below 14.101 MHz.
-        assert_eq!(allowed_segment(14_101_500, KAHF_CHANNEL_WIDTH_HZ), None);
+        // Centre inside 17 m but the lower half of the channel is below 18.111 MHz.
+        assert_eq!(allowed_segment(18_111_500, KAHF_CHANNEL_WIDTH_HZ), None);
         // Centre inside the segment, width larger than the segment is not allowed.
-        assert_eq!(allowed_segment(14_106_000, 12_000), None);
+        assert_eq!(allowed_segment(18_115_000, 12_000), None);
     }
 
     #[test]
     fn beacons_sstv_and_30m_are_not_allowed() {
-        assert_eq!(allowed_segment(14_085_000, KAHF_CHANNEL_WIDTH_HZ), None); // beacons
-        assert_eq!(allowed_segment(14_230_000, KAHF_CHANNEL_WIDTH_HZ), None); // SSTV and FAX
-        assert_eq!(allowed_segment(10_120_000, KAHF_CHANNEL_WIDTH_HZ), None); // 30 m
-        assert_eq!(allowed_segment(14_200_000, KAHF_CHANNEL_WIDTH_HZ), None);
+        assert_eq!(allowed_segment(18_110_000, 480), None); // IBP beacons, 18.109 to 18.111
+        assert_eq!(allowed_segment(18_103_000, 480), None); // FT8
+        assert_eq!(allowed_segment(18_130_000, 480), None); // SSB QRP, above the data segment
+        assert_eq!(allowed_segment(14_230_000, KAHF_CHANNEL_WIDTH_HZ), None); // outside 17 m
+        assert_eq!(allowed_segment(10_120_000, KAHF_CHANNEL_WIDTH_HZ), None); // outside 17 m
     }
 
     #[test]
@@ -487,9 +241,9 @@ mod tests {
 
     #[test]
     fn tuning_warning_is_only_a_warning() {
-        assert_eq!(tuning_warning(14_105_050, KAHF_CHANNEL_WIDTH_HZ), None);
-        let w = tuning_warning(14_230_000, KAHF_CHANNEL_WIDTH_HZ).expect("warning expected");
-        assert!(w.contains("outside the planned"));
+        assert_eq!(tuning_warning(18_115_050, KAHF_CHANNEL_WIDTH_HZ), None);
+        let w = tuning_warning(14_105_050, KAHF_CHANNEL_WIDTH_HZ).expect("warning expected");
+        assert!(w.contains("outside the KAHF segment"));
         assert!(!w.contains("refused"));
     }
 }

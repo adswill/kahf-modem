@@ -592,7 +592,7 @@ impl App {
             log_search: String::new(),
             audio_in: String::new(),
             audio_out: String::new(),
-            band: spectrum::Band::M40,
+            band: spectrum::Band::M17,
             vol_in: 70.0,
             vol_out: 70.0,
             rig: RigControl::None,
@@ -1289,6 +1289,13 @@ impl App {
                     self.bins = bins;
                     self.live_spectrum = Some(now);
                 }
+            }
+            EngineEvent::Heard { .. } | EngineEvent::Advert { .. } | EngineEvent::Relay { .. } | EngineEvent::FileReceived { .. } | EngineEvent::MailReceived { .. } => {}
+            EngineEvent::Metrics(st) => {
+                self.engine_note = format!(
+                    "Link: {} (auto {}), net {} bit/s, we hear {:?} dB, they hear {:?} dB, lost {:.0}%",
+                    st.mode, st.auto, st.net_bps, st.own_snr_db, st.peer_snr_db, st.fer_pct
+                );
             }
             EngineEvent::Log(msg) => {
                 if msg.starts_with("Could not reach") {
@@ -2452,12 +2459,11 @@ mod tests {
 
     #[test]
     fn segments_are_found_and_outside_is_reported() {
-        assert!(spectrum::segment_at(7_042_000.0).is_some());
-        let _ = App::init().update(Message::BandChosen(spectrum::Band::M20));
+        assert!(spectrum::segment_at(18_115_000.0).is_some());
+        let _ = App::init().update(Message::BandChosen(spectrum::Band::M17));
         assert!(!spectrum::channels().is_empty());
-        let _ = App::init().update(Message::BandChosen(spectrum::Band::M40));
-        assert!(spectrum::segment_at(14_105_000.0).is_some());
-        assert!(spectrum::segment_at(7_050_000.0).is_none());
+        assert!(spectrum::segment_at(14_105_000.0).is_none());
+        assert!(spectrum::segment_at(7_042_000.0).is_none());
         assert_eq!(spectrum::segment_text(7_050_000.0), "No segment");
         assert!(spectrum::channels()
             .iter()

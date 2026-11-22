@@ -112,7 +112,7 @@ fn earliest_start(intervals: &[(u64, u64)], now_s: u64, duration_s: u64, guard_s
 }
 
 /// One plain sentence for the operator, for example
-/// "Send at 14:05 on 14.105 MHz, after a 10 second gap."
+/// "Send at 14:05 on 18.115 MHz, after a 10 second gap."
 pub fn explain(slot: &Slot) -> String {
     let of_day = slot.start_s % 86_400;
     let (hh, mm) = (of_day / 3600, (of_day % 3600) / 60);
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn planner_no_overlap_on_one_channel() {
         let reqs: Vec<Request> = (1..=5).map(|i| req(i, Priority::Normal, 60)).collect();
-        let channels = [(14_105, 0.2)];
+        let channels = [(18_115, 0.2)];
         let slots = plan(&reqs, &channels, 1_000, 10);
         assert_eq!(slots.len(), 5);
 
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn planner_no_overlap_across_two_channels() {
         let reqs: Vec<Request> = (1..=6).map(|i| req(i, Priority::Low, 30)).collect();
-        let channels = [(14_105, 0.1), (7_040, 0.3)];
+        let channels = [(18_115, 0.1), (18_117, 0.3)];
         let slots = plan(&reqs, &channels, 0, 5);
         assert_eq!(slots.len(), 6);
         for a in &slots {
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn planner_urgent_before_normal() {
         let reqs = [req(1, Priority::Normal, 60), req(2, Priority::Urgent, 60)];
-        let channels = [(14_105, 0.0)];
+        let channels = [(18_115, 0.0)];
         let slots = plan(&reqs, &channels, 500, 10);
         let urgent = slots.iter().find(|s| s.request_id == 2).unwrap();
         let normal = slots.iter().find(|s| s.request_id == 1).unwrap();
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn planner_never_starts_before_now() {
         let reqs: Vec<Request> = (1..=4).map(|i| req(i, Priority::Normal, 20)).collect();
-        let channels = [(14_105, 0.0), (14_100, 0.5)];
+        let channels = [(18_115, 0.0), (18_113, 0.5)];
         let now = 9_999;
         for slot in plan(&reqs, &channels, now, 3) {
             assert!(slot.start_s >= now, "{slot:?}");
@@ -209,20 +209,20 @@ mod tests {
 
     #[test]
     fn planner_busy_channel_used_last() {
-        let channels = [(14_105, 0.9), (14_100, 0.1)];
+        let channels = [(18_115, 0.9), (18_113, 0.1)];
         let one = plan(&[req(1, Priority::Normal, 60)], &channels, 0, 10);
-        assert_eq!(one[0].channel_khz, 14_100);
+        assert_eq!(one[0].channel_khz, 18_113);
 
         // Equal start times: the quieter channel wins regardless of input order.
-        let reversed = [(14_100, 0.1), (14_105, 0.9)];
+        let reversed = [(18_113, 0.1), (18_115, 0.9)];
         let again = plan(&[req(1, Priority::Normal, 60)], &reversed, 0, 10);
-        assert_eq!(again[0].channel_khz, 14_100);
+        assert_eq!(again[0].channel_khz, 18_113);
     }
 
     #[test]
     fn planner_unplanned_when_no_channel_fits() {
         let reqs = [req(1, Priority::Urgent, 60), req(2, Priority::Low, 60)];
-        let channels = [(14_105, 1.0), (7_040, f32::NAN)];
+        let channels = [(18_115, 1.0), (18_117, f32::NAN)];
         let slots = plan(&reqs, &channels, 0, 10);
         assert!(slots.is_empty());
         assert_eq!(unplanned(&reqs, &slots), vec![1, 2]);
@@ -231,14 +231,14 @@ mod tests {
     #[test]
     fn planner_unplanned_lists_only_missing() {
         let reqs = [req(7, Priority::Normal, 60)];
-        let slots = plan(&reqs, &[(14_105, 0.0)], 0, 0);
+        let slots = plan(&reqs, &[(18_115, 0.0)], 0, 0);
         assert!(unplanned(&reqs, &slots).is_empty());
         assert_eq!(unplanned(&reqs, &[]), vec![7]);
     }
 
     #[test]
     fn planner_empty_requests_give_no_slots() {
-        assert!(plan(&[], &[(14_105, 0.0)], 0, 10).is_empty());
+        assert!(plan(&[], &[(18_115, 0.0)], 0, 10).is_empty());
         assert!(unplanned(&[], &[]).is_empty());
     }
 
@@ -246,14 +246,14 @@ mod tests {
     fn planner_explain_sentence() {
         let slot = Slot {
             request_id: 1,
-            channel_khz: 14_105,
+            channel_khz: 18_115,
             start_s: 1_728_000_000 + 14 * 3600 + 5 * 60,
             end_s: 0,
             gap_s: 10,
         };
         assert_eq!(
             explain(&slot),
-            "Send at 14:05 on 14.105 MHz, after a 10 second gap."
+            "Send at 14:05 on 18.115 MHz, after a 10 second gap."
         );
     }
 }

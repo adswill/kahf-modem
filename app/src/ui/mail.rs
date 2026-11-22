@@ -73,9 +73,10 @@ fn folders(k: &Kahf) -> V {
                 k.ui.mail_compose = false;
             }),
         space(),
-        caption("Mail is for longer messages with a subject and attachments. For quick lines, use Chats.")
-            .dim()
-            .fill_w(),
+        para(
+            "Mail is for longer messages with a subject and attachments. For quick lines, use Chats.",
+            100
+        ),
     ]
     .gap(6.0)
     .pad(10.0)

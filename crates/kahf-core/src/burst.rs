@@ -80,6 +80,7 @@ fn bits_per_symbol(m: Modulation) -> usize {
         Modulation::Qpsk => 2,
         Modulation::Qam16 => 4,
         Modulation::Qam64 => 6,
+        _ => unreachable!("KAMI modes are not OFDM burst modes"),
     }
 }
 
@@ -117,6 +118,7 @@ pub fn long_codewords(mode: &Mode) -> usize {
         Modulation::Qpsk => 5,
         Modulation::Qam16 => 8,
         Modulation::Qam64 => 16,
+        _ => unreachable!("KAMI modes are not OFDM burst modes"),
     }
 }
 

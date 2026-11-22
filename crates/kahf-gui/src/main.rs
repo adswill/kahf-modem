@@ -280,7 +280,7 @@ fn frequency_text(sdr: Option<&str>) -> String {
     match spec.split_once('@').map(|(_, f)| f.trim().parse::<u64>()) {
         Some(Ok(hz)) => format!("{:.3} MHz (from the SDR setting)", hz as f64 / 1e6),
         Some(Err(_)) => "Frequency in the SDR setting is not a number".to_string(),
-        None => "14.100 MHz (SDR default)".to_string(),
+        None => "18.113 MHz (SDR default)".to_string(),
     }
 }
 
@@ -484,7 +484,12 @@ impl App {
             Event::Spectrum(values) => self.push_spectrum(ctx, &values),
             Event::Tx { state } => self.on_tx(state),
             Event::Log(line) => self.log_line(line),
-            Event::Relay { .. } => {}
+            Event::Heard { .. } | Event::Advert { .. } | Event::Relay { .. } | Event::FileReceived { .. } | Event::MailReceived { .. } => {}
+            // The status line shows the mode and SNR once the window exposes it; the log keeps it.
+            Event::Metrics(s) => self.log_line(format!(
+                "Link: {} (auto {}), net {} bit/s, we hear {:?} dB, they hear {:?} dB, lost {:.0}%",
+                s.mode, s.auto, s.net_bps, s.own_snr_db, s.peer_snr_db, s.fer_pct
+            )),
         }
     }
 

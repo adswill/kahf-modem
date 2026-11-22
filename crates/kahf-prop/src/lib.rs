@@ -44,18 +44,7 @@ const LUF_THRESHOLD_DB: f64 = 10.0;
 const ABSORPTION_C: f64 = 60.0;
 
 /// Amateur HF bands checked by [`predict`]: (name, centre frequency in MHz).
-pub const HF_BANDS: &[(&str, f64)] = &[
-    ("160m", 1.9),
-    ("80m", 3.6),
-    ("60m", 5.35),
-    ("40m", 7.1),
-    ("30m", 10.12),
-    ("20m", 14.1),
-    ("17m", 18.1),
-    ("15m", 21.2),
-    ("12m", 24.9),
-    ("10m", 28.5),
-];
+pub const HF_BANDS: &[(&str, f64)] = &[("17m", 18.1)];
 
 /// Inputs for one path prediction.
 ///

@@ -208,7 +208,7 @@ fn route(k: &Kahf, peer: &str, linked: bool, heard: bool) -> String {
 fn start_panel(k: &Kahf) -> V {
     let mut c = col![
         heading("Start a conversation"),
-        text("Pick someone on the left, or type their callsign above. Then write below. KAHF handles the radio.").dim().fill_w(),
+        para("Pick someone on the left, or type their callsign above. Then write below. KAHF handles the radio.", 100),
     ]
     .gap(10.0);
     for s in k.m.steps() {

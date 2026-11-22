@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use kahf_core::link::LinkState;
-use kahf_daemon::{Event, RelayStep, TxState};
+use kahf_daemon::{Delivery, Event, TxState};
 use serde_json::{json, Value};
 
 /// A message the window sent that is still in the engine's outbox.
@@ -142,16 +142,37 @@ pub fn event_json(ev: &Event, ctx: &Ctx) -> Vec<Value> {
             None => Vec::new(),
         },
         Event::Spectrum(bins) => vec![json!({ "type": "spectrum", "bins": thin_spectrum(bins) })],
-        Event::Relay { from, to, step } => {
-            let what = match step {
-                RelayStep::Held => format!("Holding a message from {from} to {to}."),
-                RelayStep::Sent => format!("Passed on a message from {from} to {to}."),
-                RelayStep::Dropped(why) => format!("Dropped a message from {from} to {to}: {why}"),
+        Event::Relay { call, online, .. } => {
+            let what = if *online {
+                format!("Relay {call} is on the air.")
+            } else {
+                format!("Relay {call} went off the air.")
             };
             vec![
                 json!({ "type": "log", "text": what }),
-                json!({ "type": "heard", "heard": { "call": from, "snr": Value::Null, "at": now_ms() } }),
+                json!({ "type": "heard", "heard": { "call": call, "snr": Value::Null, "at": now_ms() } }),
             ]
+        }
+        Event::Heard { call, snr_db } => {
+            vec![json!({ "type": "heard", "heard": { "call": call, "snr": snr_db, "at": now_ms() } })]
+        }
+        Event::Advert { call, .. } => {
+            vec![json!({ "type": "heard", "heard": { "call": call, "snr": Value::Null, "at": now_ms() } })]
+        }
+        Event::MailReceived { .. } | Event::FileReceived { .. } => Vec::new(),
+        Event::Metrics(_) => Vec::new(),
+        Event::Delivery { id, state, note } => {
+            let mut out = Vec::new();
+            if !note.is_empty() {
+                out.push(json!({ "type": "log", "text": note }));
+            }
+            // A relay or the station answered: the message left the outbox for good.
+            if matches!(state, Delivery::AtRelay | Delivery::Delivered) {
+                if let Some(p) = pending.iter().find(|p| p.engine_id == *id && *id != 0) {
+                    out.push(json!({ "type": "sent", "id": p.ui_id }));
+                }
+            }
+            out
         }
         Event::Tx { state } => {
             let (s, reason) = match state {
@@ -367,15 +388,16 @@ mod tests {
     }
 
     #[test]
-    fn relay_steps_are_logged() {
+    fn relay_events_are_logged() {
         let out = event_json(
             &Event::Relay {
-                from: "A1AAA".into(),
-                to: "B2BBB".into(),
-                step: RelayStep::Sent,
+                call: "A1AAA".into(),
+                online: true,
+                time_s: 0,
+                load: 0,
             },
             &ctx(&[], Path::new("/x")),
         );
-        assert!(out[0]["text"].as_str().unwrap().contains("Passed on"));
+        assert!(out[0]["text"].as_str().unwrap().contains("on the air"));
     }
 }

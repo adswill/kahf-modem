@@ -16,8 +16,7 @@
 //   GET  /map-data   relays and live stations as JSON (buildMapData)
 //   GET  /release    the current release announcement, or null
 //   POST /release    signed release announcement from the owner's release key
-//   POST /relay/heard, /msg/submit, /msg/pull, /msg/receipt  signed HF backbone calls (backbone.js)
-//   GET  /relay/wanted  destination callsigns that have queued messages
+//   GET  /mesh/ws, POST /mesh/frames, /mesh/poll  signed relay mesh (mesh.js)
 import {
   BUSY_WINDOW_S,
   EXPIRY_MS,
@@ -28,6 +27,7 @@ import {
   decodeBase64,
   encodeBase64,
   isExpired,
+  normalizeCall,
   poolPlan,
   validateRegister,
   validateRelease,
@@ -37,16 +37,7 @@ import {
   verifySignature,
   zoneReports,
 } from "./core.js";
-import {
-  MAX_BACKBONE_BODY_BYTES,
-  MAX_PULL_MESSAGES,
-  RELAY_RATE_PER_MINUTE,
-  parseMessageId,
-  validateHeard,
-  validatePull,
-  validateReceipt,
-  validateSubmit,
-} from "./backbone.js";
+import { FORBIDDEN_KEYS } from "./hub.js";
 import { OPERATE_PNG_BASE64 } from "./web/operate-png.js";
 import { DISPLAY_FONT_BASE64 } from "./web/display-font.js";
 import { homeScriptSha256, mapScriptSha256, renderHome, renderMap, renderSite, SITE_PATHS } from "./page.ts";
@@ -64,9 +55,9 @@ function mapCsp(scriptSource) {
     "default-src 'none'",
     `script-src ${scriptSource} https://unpkg.com`,
     "style-src 'unsafe-inline' https://unpkg.com",
-    "img-src 'self' data: blob: https://tile.openstreetmap.org",
+    "img-src 'self' data: blob:",
     "font-src 'self'",
-    "connect-src 'self' https://tile.openstreetmap.org",
+    "connect-src 'self'",
     "worker-src blob:",
     "base-uri 'none'",
     "form-action 'none'",
@@ -401,119 +392,69 @@ async function postSchedule({ request, store, nowMs }) {
   });
 }
 
-// ---- HF backbone ------------------------------------------------------------
+// ---- the relay mesh: signed WebSocket and HTTPS fallback (mesh.js) -----------------------------
+
+const MESH_TS_WINDOW_S = 600;
+const MESH_MAX_BODY_BYTES = 16_384;
+const MESH_MAX_FRAMES = 50;
 
 /**
- * Reads and checks one signed backbone request: size cap, shape (validate), signature,
- * a registered live relay with that key, and the per-relay rate limit.
- * @returns {Promise<{ ok: true, check: any } | { ok: false, response: Response }>}
+ * Checks who is calling: a plausible callsign, a signing time within ten minutes, a valid Ed25519
+ * signature over `mesh1|CALL|ts|kind[|extra]`, and a live registration with that very key.
+ * @returns {Promise<{ ok: true, call: string } | { ok: false, response: Response }>}
  */
-async function backboneAuth({ request, store, nowMs, options }, validate) {
-  const parsed = await readJson(request, MAX_BACKBONE_BODY_BYTES);
-  if (!parsed.ok) return parsed;
-  const check = validate(parsed.body, nowMs);
-  if (!check.ok) return { ok: false, response: json({ error: check.error }, 400) };
-  if (!(await verifySignature(check.publicKey, check.signature, check.canonical))) {
+async function meshAuth({ store, nowMs }, who, kind, extra = "") {
+  const call = normalizeCall(who.relay);
+  if (!call) return { ok: false, response: json({ error: "relay is not a valid callsign" }, 400) };
+  const ts = Number(who.ts);
+  if (!Number.isSafeInteger(ts) || Math.abs(Math.floor(nowMs / 1000) - ts) > MESH_TS_WINDOW_S) {
+    return { ok: false, response: json({ error: "ts is not within ten minutes of the server clock" }, 400) };
+  }
+  const canonical = `mesh1|${call}|${ts}|${kind}${extra ? "|" + extra : ""}`;
+  if (!(await verifySignature(String(who.key ?? ""), String(who.sig ?? ""), canonical))) {
     return { ok: false, response: json({ error: "signature check failed" }, 401) };
   }
-  const me = await store.getRelay(check.relay);
-  if (!me || isExpired(me.refreshed_at, nowMs)) {
-    return { ok: false, response: json({ error: "relay is not registered" }, 404) };
-  }
-  if (me.public_key !== check.publicKey) {
-    return { ok: false, response: json({ error: "this callsign is registered with another key" }, 403) };
-  }
-  const limit = options.relayRateLimit ?? RELAY_RATE_PER_MINUTE;
-  if (!(await store.idxRate(check.relay, nowMs, limit)).ok) {
-    return { ok: false, response: json({ error: "too many requests from this relay" }, 429, { "retry-after": "60" }) };
-  }
-  return { ok: true, check };
+  const me = await store.getRelay(call);
+  if (!me || isExpired(me.refreshed_at, nowMs)) return { ok: false, response: json({ error: "relay is not registered" }, 404) };
+  if (me.public_key !== who.key) return { ok: false, response: json({ error: "this callsign is registered with another key" }, 403) };
+  return { ok: true, call };
 }
 
-async function postRelayHeard(ctx) {
-  const auth = await backboneAuth(ctx, validateHeard);
+async function getMeshWs(ctx) {
+  const { request, store } = ctx;
+  if (request.headers.get("upgrade") !== "websocket") return json({ error: "this is a WebSocket endpoint" }, 426);
+  const q = new URL(request.url).searchParams;
+  const auth = await meshAuth(ctx, { relay: q.get("relay"), ts: q.get("ts"), key: q.get("key"), sig: q.get("sig") }, "ws");
   if (!auth.ok) return auth.response;
-  const { relay, heard } = auth.check;
-  const done = await ctx.store.idxNoteHeard(relay, heard, ctx.nowMs);
-  return json({ ok: true, recorded: done.recorded, ignored: done.ignored });
+  return store.meshSocket(auth.call, request);
 }
 
-async function postMsgSubmit(ctx) {
-  const auth = await backboneAuth(ctx, validateSubmit);
+async function postMeshFrames(ctx) {
+  const parsed = await readJson(ctx.request, MESH_MAX_BODY_BYTES);
+  if (!parsed.ok) return parsed.response ?? json({ error: parsed.error ?? "bad request" }, 400);
+  const b = parsed.body;
+  if (typeof b?.frames_json !== "string") return json({ error: "frames_json must be a string" }, 400);
+  const auth = await meshAuth(ctx, { relay: b.relay, ts: b.ts, key: b.public_key, sig: b.signature }, "frames", b.frames_json);
   if (!auth.ok) return auth.response;
-  const { message } = auth.check;
-  const { store, nowMs } = ctx;
-  // The first submit of an id wins; the claim lives on the origin's object.
-  const claim = await store.msgClaim(message.origin, message.id, message.dest, nowMs);
-  if (claim.duplicate) return json({ ok: true, duplicate: true });
-  const queued = await store.msgEnqueue(message.dest, { ...message, submitted_by: auth.check.relay }, nowMs);
-  await store.idxWant(message.dest, queued.until);
-  return json({ ok: true, duplicate: false, expires_at: Math.floor((nowMs + message.ttl_s * 1000) / 1000) });
-}
-
-async function postMsgPull(ctx) {
-  const auth = await backboneAuth(ctx, validatePull);
-  if (!auth.ok) return auth.response;
-  const { relay, callsigns } = auth.check;
-  const { store, nowMs } = ctx;
-
-  // Look at every heard callsign's queue; expired messages turn into "failed" receipts.
-  const peeks = await Promise.all(callsigns.map(async (dest) => ({ dest, peek: await store.msgPeek(dest, nowMs) })));
-  for (const { dest, peek } of peeks) {
-    for (const e of peek.expired) {
-      await store.msgPutReceipt(e.origin, { id: e.id, dest: e.dest, status: "failed", reason: "expired" }, nowMs);
-    }
-    if (peek.remaining === 0) await store.idxUnwant(dest);
+  let frames;
+  try { frames = JSON.parse(b.frames_json); } catch { frames = null; }
+  if (!Array.isArray(frames) || frames.length > MESH_MAX_FRAMES || frames.some((f) => !f || typeof f.t !== "string")) {
+    return json({ error: `frames must be a list of up to ${MESH_MAX_FRAMES} objects with a type` }, 400);
   }
-
-  // Oldest first, urgent first; at most MAX_PULL_MESSAGES per call.
-  const candidates = peeks.flatMap(({ dest, peek }) => peek.messages.map((m) => ({ dest, m })));
-  candidates.sort((a, b) => Number(b.m.urgent === true) - Number(a.m.urgent === true) || a.m.created - b.m.created || (a.m.id < b.m.id ? -1 : 1));
-  const chosen = candidates.slice(0, MAX_PULL_MESSAGES);
-  const byDest = new Map();
-  for (const { dest, m } of chosen) byDest.set(dest, [...(byDest.get(dest) ?? []), m.id]);
-  const handed = new Map();
-  for (const [dest, ids] of byDest) {
-    for (const m of (await store.msgHandout(dest, ids, relay, nowMs)).messages) handed.set(m.id, m);
+  if (frames.some((f) => Object.keys(f).some((k) => FORBIDDEN_KEYS.includes(k)))) {
+    return json({ error: "frames carry ids and sizes only, never message content" }, 400);
   }
-  const messages = chosen
-    .filter(({ m }) => handed.has(m.id))
-    .map(({ m }) => ({
-      id: m.id,
-      origin: m.origin,
-      dest: m.dest,
-      kind: m.kind,
-      ...(m.subject !== undefined ? { subject: m.subject } : {}),
-      body: m.body,
-      created: m.created,
-      hops: m.hops,
-      urgent: m.urgent === true,
-      expires_at: Math.floor(m.expires_at / 1000),
-    }));
-
-  // Receipts for the heard callsigns acting as origin.
-  const receipts = (await Promise.all(callsigns.map((c) => store.msgTakeReceipts(c, nowMs)))).flatMap((r) => r.receipts);
-  return json({ messages, receipts });
+  const out = await ctx.store.meshOp("frames", { call: auth.call, frames, nowMs: ctx.nowMs });
+  return out.error ? json(out, 429, { "retry-after": "60" }) : json(out);
 }
 
-async function postMsgReceipt(ctx) {
-  const auth = await backboneAuth(ctx, validateReceipt);
+async function postMeshPoll(ctx) {
+  const parsed = await readJson(ctx.request, MESH_MAX_BODY_BYTES);
+  if (!parsed.ok) return parsed.response ?? json({ error: parsed.error ?? "bad request" }, 400);
+  const b = parsed.body;
+  const auth = await meshAuth(ctx, { relay: b?.relay, ts: b?.ts, key: b?.public_key, sig: b?.signature }, "poll");
   if (!auth.ok) return auth.response;
-  const { relay, id, status, reason } = auth.check;
-  const { store, nowMs } = ctx;
-  const origin = parseMessageId(id).origin;
-  const { claim } = await store.msgGetClaim(origin, id, nowMs);
-  if (!claim) return json({ error: "no such message" }, 404);
-  const done = await store.msgComplete(claim.dest, id, relay, nowMs);
-  if (!done.ok) return json({ error: done.error }, 409);
-  if (!done.found) return json({ ok: true, duplicate: true });
-  await store.msgPutReceipt(origin, { id, dest: claim.dest, status, reason }, nowMs);
-  if (done.remaining === 0) await store.idxUnwant(claim.dest);
-  return json({ ok: true, duplicate: false });
-}
-
-async function getRelayWanted({ store, nowMs }) {
-  return json({ wanted: (await store.idxWanted(nowMs)).wanted });
+  return json(await ctx.store.meshOp("poll", { call: auth.call, nowMs: ctx.nowMs }));
 }
 
 const TILE_PATH = /^\/tiles\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})\.png$/;
@@ -559,6 +500,7 @@ async function getTile({ request, options }, m) {
   return res;
 }
 
+
 /** Path to method to handler. A path or method missing here gets 404 or 405. */
 const ROUTES = {
   "/": { GET: getHome, HEAD: getHome },
@@ -574,11 +516,9 @@ const ROUTES = {
   "/remove": { POST: postRemove },
   "/register": { POST: postRegister },
   "/schedule": { POST: postSchedule },
-  "/relay/heard": { POST: postRelayHeard },
-  "/relay/wanted": { GET: getRelayWanted },
-  "/msg/submit": { POST: postMsgSubmit },
-  "/msg/pull": { POST: postMsgPull },
-  "/msg/receipt": { POST: postMsgReceipt },
+  "/mesh/ws": { GET: getMeshWs },
+  "/mesh/frames": { POST: postMeshFrames },
+  "/mesh/poll": { POST: postMeshPoll },
 };
 
 /**
@@ -587,7 +527,7 @@ const ROUTES = {
  * @param {Request} request
  * @param {{ get: Function, put: Function, remove: Function, listAll: Function, claimOwner: Function, claimRemoval: Function, claimRelay: Function, getRelay: Function, joinArea: Function, leaveArea: Function, bookSchedule: Function }} store
  * @param {number} [nowMs]
- * @param {{ releaseKey?: string, relayRateLimit?: number }} [options] relayRateLimit: backbone calls per relay per minute; releaseKey: base64 Ed25519 key allowed to post releases
+ * @param {{ releaseKey?: string }} [options] releaseKey: base64 Ed25519 key allowed to post releases
  * @returns {Promise<Response>}
  */
 export async function handleRequest(request, store, nowMs = Date.now(), options = {}) {

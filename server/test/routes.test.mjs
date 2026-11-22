@@ -7,9 +7,9 @@ import { register } from "node:module";
 import {
   BAND_CHANNELS,
   BAND_SEGMENT_KHZ,
-  CHANNEL_WIDTH_KHZ,
   canonicalJson,
   channelOf,
+  reportKhz,
   encodeBase64,
   EXPIRY_MS,
   MAX_SCHEDULE_REQUESTS,
@@ -67,7 +67,7 @@ async function sha256Base64(s) {
 }
 
 // Whole-kHz frequency inside channel n (the report validator wants integer kHz).
-const freqOf = (n) => Math.ceil(BAND_SEGMENT_KHZ.low + CHANNEL_WIDTH_KHZ * n);
+const freqOf = (n) => reportKhz(n);
 const LAST = BAND_CHANNELS - 1;
 
 const REPORT = {
@@ -133,8 +133,9 @@ test("GET /map: the CSP allows the one inline script by hash, and only the map's
   assert.ok(csp.includes(`'sha256-${hash}'`), `CSP should allow the script hash: ${csp}`);
   assert.doesNotMatch(csp, /'unsafe-eval'|script-src[^;]*'unsafe-inline'|script-src[^;]*\*/);
   assert.match(csp, /script-src [^;]*https:\/\/unpkg\.com/);
-  assert.match(csp, /connect-src 'self' https:\/\/tile\.openstreetmap\.org/);
-  assert.match(csp, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/);
+  assert.match(csp, /connect-src 'self';/);
+  assert.match(csp, /img-src 'self' data: blob:;/);
+  assert.doesNotMatch(csp, /tile\.openstreetmap/);
 });
 
 test("GET /map with no reports still answers with a valid page", async () => {
@@ -174,7 +175,7 @@ test("GET /zones: busy channels per area from live records, with the pool split"
   await store.put({
     ...REPORT,
     reporter_call: "K2BUSY",
-    frequency_khz: freqOf(0),
+    frequency_khz: freqOf(1),
     heard_at: "2026-11-17T11:55:00Z",
     public_key: "k",
     refreshed_at: NOW,
@@ -192,10 +193,10 @@ test("GET /zones: busy channels per area from live records, with the pool split"
   const body = await res.json();
   assert.equal(body.busy_window_s, 600);
   // K1ABC at 51.5074, -0.1278 lies in N51W1; K2BUSY too.
-  assert.deepEqual(body.zones, { N51W1: [0, LAST] });
+  assert.deepEqual(body.zones, { N51W1: [1, LAST] });
   assert.equal(body.pools.defaultPool, "open");
-  assert.equal(body.pools.bandChannels, body.pools.online.length + body.pools.open.length);
-  assert.ok(!body.pools.areas.N51W1.channels.includes(0));
+  assert.equal(body.pools.bandChannels, body.pools.online.length + body.pools.open.length + body.pools.emergency.length);
+  assert.ok(!body.pools.areas.N51W1.channels.includes(1));
   assert.equal(body.pools.areas.N51W1.pool, "online");
 });
 
@@ -445,13 +446,13 @@ test("POST /schedule: a second relay in the same area avoids the first relay's s
   const [s] = second.slots;
   assert.ok(s.start >= NOW_S + 60, `W0AAB starts at ${s.start}, inside W0AAA's slot`);
 
-  // Same channel in another area does not clash.
+  // HF is global: the same channel in another area still waits for both transmit slots.
   const regC = { area: "N51W3", callsign: "W0AAC" };
   const c = await newKey();
   await handleRequest(post("/register", await signed(c, regC)), store, NOW);
   const reqC = { relay: "W0AAC", requests: [{ channel: 1, duration: 60, direction: "tx" }] };
   const third = await (await handleRequest(post("/schedule", await signed(c, reqC)), store, NOW)).json();
-  assert.equal(third.slots[0].start, NOW_S);
+  assert.ok(third.slots[0].start >= s.start + 60, "a relay in another area must not transmit over the others");
 });
 
 test("POST /schedule: a relay's slots that have already ended are not booked", async () => {
@@ -502,5 +503,68 @@ test("an unexpected failure returns a plain JSON 500 with no details", async () 
     assert.doesNotMatch(String(log.mock.calls[0].arguments.join(" ")), /secret/);
   } finally {
     mock.restoreAll();
+  }
+});
+
+// ---- map tile proxy ---------------------------------------------------------
+
+function tileOptions(calls, reply) {
+  const stash = new Map();
+  return {
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return reply();
+    },
+    tileCache: {
+      match: async (req) => stash.get(req.url)?.clone(),
+      put: async (req, res) => void stash.set(req.url, res),
+    },
+  };
+}
+
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+const okTile = () => new Response(PNG, { headers: { "content-type": "image/png" } });
+
+test("GET /tiles/z/x/y.png fetches from OpenStreetMap with a KAHF user agent and caches", async () => {
+  const calls = [];
+  const options = tileOptions(calls, okTile);
+  const res = await handleRequest(new Request(`${BASE}/tiles/3/4/2.png`), fakeStore(), NOW, options);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/png");
+  assert.match(res.headers.get("cache-control"), /max-age=604800/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual([...new Uint8Array(await res.arrayBuffer())], [...PNG]);
+  assert.equal(calls[0].url, "https://tile.openstreetmap.org/3/4/2.png");
+  assert.match(calls[0].init.headers["user-agent"], /^KAHF-live-map\//);
+  const again = await handleRequest(new Request(`${BASE}/tiles/3/4/2.png`), fakeStore(), NOW, options);
+  assert.equal(again.status, 200);
+  assert.equal(calls.length, 1, "second request comes from the cache");
+});
+
+test("tile requests outside the grid or the allowed shape are refused without calling out", async () => {
+  const calls = [];
+  const options = tileOptions(calls, okTile);
+  for (const path of ["/tiles/20/0/0.png", "/tiles/2/4/0.png", "/tiles/2/0/4.png", "/tiles/1/0/0.jpg", "/tiles/a/b/c.png", "/tiles/../x.png"]) {
+    const res = await handleRequest(new Request(`${BASE}${path}`), fakeStore(), NOW, options);
+    assert.ok([404].includes(res.status), `${path} gave ${res.status}`);
+  }
+  const post = await handleRequest(new Request(`${BASE}/tiles/1/0/0.png`, { method: "POST" }), fakeStore(), NOW, options);
+  assert.equal(post.status, 405);
+  assert.equal(calls.length, 0);
+});
+
+test("a failing, wrong-type or oversize upstream tile gives a plain 502", async () => {
+  for (const reply of [
+    () => new Response("no", { status: 403, headers: { "content-type": "text/plain" } }),
+    () => new Response("<html>", { headers: { "content-type": "text/html" } }),
+    () => new Response(new Uint8Array(300_000), { headers: { "content-type": "image/png" } }),
+    () => {
+      throw new Error("down");
+    },
+  ]) {
+    const options = tileOptions([], reply);
+    const res = await handleRequest(new Request(`${BASE}/tiles/1/0/0.png`), fakeStore(), NOW, options);
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { error: "tile unavailable" });
   }
 });

@@ -11,9 +11,9 @@ use alloy_ui::Path;
 const DB_MIN: f32 = -105.0;
 const DB_MAX: f32 = -45.0;
 const AXIS: f32 = 26.0;
-/// The modem uses 312 Hz to 2690 Hz of the 0 to 4 kHz audio.
-const SIGNAL_LO: f32 = 312.0;
-const SIGNAL_HI: f32 = 2690.0;
+/// A KAHF lane uses 1260 Hz to 1740 Hz of the 0 to 4 kHz audio (480 Hz wide, centred on 1500 Hz).
+const SIGNAL_LO: f32 = 1260.0;
+const SIGNAL_HI: f32 = 1740.0;
 const AUDIO_HZ: f32 = 4000.0;
 
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rectangle {

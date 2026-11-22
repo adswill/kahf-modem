@@ -4,7 +4,7 @@ The window for KAHF, drawn natively in Rust with [Alloy UI](https://github.com/a
 no web view, no JavaScript. It runs on macOS, Linux and Windows.
 
 Screens: Radio, Chats, Mail, Stations (with a map that works offline), Relays, Logbook, and
-Settings, Help and a short tour. It uses the 17 m band only (18.111 to 18.120 MHz, three channels).
+Settings, Help and a short tour. It uses the 17 m band only: 12 narrow lanes of 480 Hz at 700 Hz pitch between 18.111 and 18.120 MHz. Nothing has been tried on a real radio yet, and the app refuses to transmit until the 17 m band table is verified.
 
 ## Layout
 

@@ -12,7 +12,8 @@ KAHF is an HF data modem. It sends and receives digital data over a radio link. 
 - send mail,
 - send a file.
 
-KAHF is in early development. The modem is not yet ready for on-air use. Test it with a
+KAHF is in early development. It has never been used on a real radio channel, and the app will not
+transmit until the 17 m band table has been checked against the current band plan (`docs/ON-AIR-PLAN.md`). The modem is not yet ready for on-air use. Test it with a
 dummy load or a station you have agreed to test with, and only transmit when your licence allows
 it on the frequency you use.
 
@@ -23,6 +24,17 @@ it on the frequency you use.
   set the radio to a data mode.
 - Everything KAHF sends goes out under your callsign. Check the frequency is clear before you
   connect.
+
+## 2a. The 17 m lanes
+
+KAHF uses the 17 metre band only, in 12 narrow lanes of 480 Hz at 700 Hz pitch between 18.111 and 18.120 MHz. You
+do not choose a band. Chats go as small coded frames; the first lane, **C1**, is the calling lane.
+
+Set the transceiver to **USB** and to the **dial frequency shown in the app** for the lane (for C1: 18.11344 MHz). That
+dial puts the lane at 1500 Hz of audio. KAHF refuses to transmit on any other dial, because a wrong dial would put the
+signal on top of other lanes. With a rig control program the app can set it for you. Set the transmit level with a
+test tone on a dummy load first: the radio's ALC must not move, because over-driving spreads the signal into the
+neighbouring lanes, which are only 220 Hz away.
 
 ## 3. Install and start KAHF
 
@@ -177,7 +189,7 @@ How radio relay works in the engine:
   A relay holds at most 64 messages for other stations.
 - A relay that cannot reach the station either passes the message to its own relays, so a
   message can cross several relays (up to four hops are planned).
-- Relays work on 17 m by default, 18.111 to 18.120 MHz, in three 2.7 kHz channels. IARU Region 1
+- Relays work on 17 m, in the 12 narrow lanes between 18.111 and 18.120 MHz. IARU Region 1
   marks this part of 17 m for digital modes and automatically controlled data stations. It sits
   above the 18.110 MHz beacon and clear of FT8 and FT4. Check your own country's rules.
 - Which relays to name can come from the route planner, which estimates when 17 m is open
@@ -275,3 +287,30 @@ frequency or wait for it to clear.
 - **The data folder cannot be used.** Choose another folder in Settings.
 - **The radio engine has stopped.** Restart KAHF to use the radio again.
 - **Could not save the settings.** Check that the KAHF folder can be written.
+
+## What "slow" means
+
+Each lane is the KAMI modem slowed five times to fit 480 Hz. At the fastest mode a lane carries about 1000 bit/s;
+at the most robust about 8 bit/s. A short chat takes seconds on a good path and minutes on a poor one. These are figures
+from the modem, not measurements on a real radio.
+
+## When 17 metres is closed
+
+17 m is a daytime, long-distance band: roughly 1000 to 4000 km by day; the first several hundred to a thousand
+kilometres are often silent, and at night the band usually closes. The app keeps your message and listens.
+
+## Never transmitting by accident
+
+- **Listen only** turns every transmit path off.
+- Nothing is sent without your action (or, for a relay, without relay mode being on).
+- Before every transmission the app checks the lane, and both neighbours, for other signals and waits if they are busy.
+- It yields to anyone: voice, CW, digital modes or other KAHF stations.
+
+## Your responsibility
+
+KAHF is for licensed amateur radio operators. You are responsible for staying inside your licence: bands, modes, power,
+identification and rules on third-party traffic differ from country to country. KAHF asks you to confirm each
+transmission. It does not decide for you.
+
+Location sharing on the map is off by default. If you turn it on you share a point accurate to about 200 m, or a
+circle of 1 to 100 km with your real position somewhere inside.

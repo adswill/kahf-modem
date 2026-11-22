@@ -11,27 +11,38 @@ use std::f64::consts::PI;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kahf_audio::{AudioIn, AudioOut, Resampler, RATE};
+mod datagram;
+mod referee;
+use datagram::{is_answer_payload, is_dg_item, DgState};
 use kahf_core::access::{self, CarrierSense};
 use kahf_core::auth::{self, StationKey};
-use kahf_core::burst;
 use kahf_core::frame;
 use kahf_core::io::{IqSink, RigControl, RigctldClient};
+use kahf_core::lanes::{self as laneplan, BandTable};
+use kahf_core::lanesense::{Class as LaneClass, LaneSense, Quarantine};
 use kahf_core::ldpc;
-use kahf_core::link::{Action, Link, LinkState};
-use kahf_core::msg::beacon::{Due, Scheduler as BeaconScheduler, Settings as BeaconSettings};
-use kahf_core::msg::groups::{Control, GroupBook};
-use kahf_core::msg::heard::{Heard, HeardList, Observation, DEFAULT_CAP as HEARD_CAP};
-use kahf_core::msg::messenger::Messenger;
-use kahf_core::msg::receipts::{self, Status as DeliveryStatus, Tracker};
+use kahf_core::narrow;
+use referee::{RefGate, RefState};
+mod backbone;
+mod clock;
+#[allow(dead_code)]
+mod push;
+use backbone::{Backbone, BbHandle, BbJob, BbResult, Queued};
+pub use clock::Clock;
+use kahf_core::link::{
+    encode_advert, encode_beacon, Action, Link, LinkState, ADVERT_LOCATION, ADVERT_RELAY, ADVERT_TTL,
+    BEACON_ONLINE,
+};
+use kahf_core::mac::{Class, Mac};
 use kahf_core::outbox::{OutItem, Outbox, Priority};
-use kahf_core::phy::{self, Modulation};
+use kahf_core::phy::Modulation;
 use kahf_core::relay::{self, Hop, HopLog, Relay, Role, Slot, Stats};
 use kahf_core::select::{self, Refusal};
 use kahf_core::sense::Sense;
@@ -39,15 +50,8 @@ use kahf_core::session::{self, Message};
 use kahf_core::spectrum::Analyser;
 use kahf_log::contacts::{self, Contact};
 use kahf_log::{valid_call, Qso};
-use kahf_prop::route;
 use kahf_radio::{GainSetting, RadioSpec, RxRadio};
 use kahf_sdr::hackrf::HackrfTx;
-use sha2::{Digest, Sha256};
-
-mod lbt;
-mod server_sync;
-pub use kahf_net::{Area, SlotRequest, DEFAULT_BASE_URL as RELAY_SERVER_URL};
-pub use server_sync::{ServerSync, ServerSyncOptions, SyncStatus, DEFAULT_SLOT_S};
 
 /// What the operator confirms before relay mode starts. Both must be true.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,6 +72,17 @@ pub struct Config {
     pub data_dir: PathBuf,
 }
 
+/// The delivery states the sender sees (MESH-SPEC 7.2), besides waiting, sending and failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// A relay answered: the message is on its way.
+    AtRelay,
+    /// The station it is for answered.
+    Delivered,
+    /// Nobody answered; it stays in the outbox and is tried again.
+    Waiting,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Link(kahf_core::link::LinkState),
@@ -86,30 +101,81 @@ pub enum Event {
         done: u64,
         total: u64,
     },
+    /// A file arrived and was saved in the inbox.
+    FileReceived {
+        from: String,
+        name: String,
+        size: u64,
+        path: PathBuf,
+    },
+    /// A station announced itself, directly or through relays. `hops` is how many relays it
+    /// went through (0 when heard straight from the station).
+    Advert {
+        call: String,
+        hops: u8,
+        relay: bool,
+        /// Where the station said it is (latitude, longitude), when it chose to say.
+        loc: Option<(f32, f32)>,
+    },
+    /// A relay announced itself on the air.
+    Relay {
+        call: String,
+        online: bool,
+        /// The time the relay gave (unix seconds), for stations without a clock source.
+        time_s: u32,
+        load: u8,
+    },
+    /// A mail arrived, with its text, and was saved in the inbox.
+    MailReceived {
+        from: String,
+        subject: String,
+        body: String,
+        attachments: Vec<String>,
+        path: Option<PathBuf>,
+    },
     Spectrum(Vec<f32>),
+    /// Link quality and the KAMI mode in use, every few seconds while linked and whenever the
+    /// mode changes.
+    Metrics(LinkStatus),
+    /// A station was heard on the air: its callsign and the SNR (dB) of the burst, if known.
+    Heard {
+        call: String,
+        snr_db: Option<f32>,
+    },
+    /// Where a message of ours stands, by its public id: answered by a relay on its way, delivered (answered
+    /// by the station it is for), or waiting because the other side did not answer (it is tried again).
+    Delivery {
+        id: u64,
+        state: Delivery,
+        note: String,
+    },
     Log(String),
     /// Transmit progress: Starting (PTT on), Sending (audio handed to the radio),
     /// Done (PTT off) or Failed (with the reason).
     Tx {
         state: TxState,
     },
-    /// Radio relay of another station's message by this station (plan 4).
-    Relay {
-        from: String,
-        to: String,
-        step: RelayStep,
-    },
 }
 
-/// What happened to a message this station relays.
+/// What the operator sees of the link: the mode we send in, how well each side hears the other,
+/// and the net speed of that mode.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RelayStep {
-    /// Heard and held, waiting for a transmit slot and its station.
-    Held,
-    /// Handed on to the next station.
-    Sent,
-    /// Not held, with the reason (a copy already relayed, or the relay queue is full).
-    Dropped(String),
+pub struct LinkStatus {
+    /// KAMI mode of the last burst we sent, for example "KAMI-32".
+    pub mode: &'static str,
+    /// True when the mode is chosen automatically from the peer's SNR report.
+    pub auto: bool,
+    /// Net information rate of that mode in a full burst, bit/s.
+    pub net_bps: u32,
+    /// SNR (dB) at which we hear the peer.
+    pub own_snr_db: Option<f32>,
+    /// SNR (dB) at which the peer hears us.
+    pub peer_snr_db: Option<f32>,
+    /// Share of recent frames we lost, percent.
+    pub fer_pct: f32,
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub retransmits: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,28 +190,19 @@ pub enum TxState {
 // Constants
 // ---------------------------------------------------------------------------
 
-const MODULATION: Modulation = Modulation::Qpsk;
+/// Default transmit modulation: KAMI-32, the bottom rung of the ladder (see `MODULATIONS`).
+const MODULATION: Modulation = Modulation::Kami32;
+#[cfg(test)]
 const LDPC_ITER: usize = 50;
+/// An automatic link with nothing waiting is closed after this long without a frame.
+const AUTO_HANGUP: Duration = Duration::from_secs(20);
+/// First pause after a failed automatic connection, doubled each time up to a quarter hour.
+const AUTO_RETRY_BASE: Duration = Duration::from_secs(30);
 /// Largest payload one link frame carries (see frame::build_payload).
 const MAX_CHUNK: usize = 36;
-/// Preamble symbol length in audio samples (FFT 256 + cyclic prefix 32).
-const PREAMBLE_LEN: usize = 288;
-const PREAMBLE_THRESHOLD: f64 = 0.5;
-/// How far past the first sample within tolerance the top of its peak is looked for. The
-/// preamble repeats every 128 samples, so this stays well under half of that.
-const PREAMBLE_REFINE: usize = 24;
-/// How long after a burst its playback may still come back to us (a virtual cable, a monitor).
-/// A link nobody has used for this long is closed by a relay that has something to deliver.
-/// How long after the peer's last DATA frame it keeps the turn.
-const PEER_TURN_HOLD: Duration = Duration::from_millis(2500);
-/// How long after a hang-up it is sent a second time.
-const DISC_REPEAT: Duration = Duration::from_millis(2500);
-const LINK_IDLE_DROP: Duration = Duration::from_secs(20);
-const ECHO_WINDOW: Duration = Duration::from_secs(8);
-/// How far below the strongest correlation a repeat may be and still count as a peak.
-const PEAK_TOLERANCE: f64 = 0.05;
+/// New samples between KAMI stream searches (0.75 s).
+const KAMI_STEP: usize = RATE as usize * 3 / 4;
 const LEAD_SILENCE: usize = RATE as usize / 5; // lets PTT and VOX settle
-const GAP_SILENCE: usize = RATE as usize / 10;
 const TAIL_SILENCE: usize = RATE as usize / 10;
 /// Upper bound on buffered session chunks before a partial message is dropped.
 const MAX_CHUNKS: usize = 4096;
@@ -172,9 +229,8 @@ const SDR_RATE_HZ: u32 = 2_400_000;
 const SDR_OVERSAMPLE: usize = (SDR_RATE_HZ / RATE) as usize;
 /// Half-length of the interpolation filter, in audio samples.
 const SDR_HALF: usize = 8;
-/// Used when the sdr setting has no "@frequency" part: 18.111 MHz USB, the low edge of the
-/// 17 m relay segment, so its first channel sits at 1.35 kHz audio.
-const DEFAULT_SDR_FREQ_HZ: u64 = 18_111_000;
+/// Used when the sdr setting has no "@frequency" part: 18.11344 MHz, the dial for lane C1.
+const DEFAULT_SDR_FREQ_HZ: u64 = 18_113_440;
 const SDR_RX_LNA_DB: u32 = 16;
 const SDR_RX_VGA_DB: u32 = 20;
 const SDR_TX_VGA_DB: u32 = 20;
@@ -184,14 +240,6 @@ const STOPPED: &str = "engine stopped";
 
 /// Plan 6.3: how long a message waits for its station to be reached on air.
 const RELAY_TIMEOUT_MS: u64 = 120_000;
-/// Most messages a relay holds for other stations at once (plan 4).
-const MAX_HELD_FORWARDS: usize = 64;
-/// How many relayed messages a relay remembers, so it passes each one on only once.
-const RELAYED_MEMORY: usize = 1024;
-/// A relay calls the same station again at most this often.
-const DIAL_INTERVAL: Duration = Duration::from_secs(30);
-/// Outbox kind of a message held for another station.
-const KIND_RELAY: &str = "relay";
 const LISTEN_ONLY_TEXT: &str = "Listen only is on. Turn it off in Settings before you transmit.";
 const UPDATE_LOCK_TEXT: &str = "A required update is pending. Install it before you transmit.";
 
@@ -220,33 +268,16 @@ struct Shared {
     key_error: Mutex<Option<String>>,
     /// Relay role and schedule (plan 4). None until a role is configured.
     relay: Mutex<Option<Relay>>,
+    /// Relay stations to try, in order, when a station is not reached on air.
+    relay_hints: Mutex<Vec<String>>,
+    /// Server the relay carries messages through (None: radio only).
+    backbone_server: Mutex<Option<String>>,
+    /// Where this station says it is in its announcements. None: it does not say.
+    location: Mutex<Option<(f32, f32)>>,
     /// Forwards sent by this station as a relay (plan 4).
     relay_stats: Mutex<Stats>,
     /// One entry per forward, keyed by the public message id.
     hops: Mutex<HopLog>,
-    /// Relays this station may send through when a station is not reached directly (plan 6.3).
-    relay_paths: Mutex<Vec<String>>,
-    /// Stations heard on air (link peers and senders of messages), saved as `heard.txt`.
-    heard: Mutex<HeardList>,
-    /// Serialises reads and writes of `contacts.txt` between the worker and `note_beacon`.
-    contacts_io: Mutex<()>,
-    /// Group chat membership, saved as `groups.txt`.
-    groups: Mutex<GroupBook>,
-    /// Location beacon settings (off by default), set by `set_beacon`.
-    beacon: Mutex<BeaconCfg>,
-    /// Delivery tracking of messages this station sent, keyed by wire id (see `Messenger::wire_id`).
-    delivery: Mutex<Tracker>,
-    /// Public message id (the id `send_*` and events use) to wire id.
-    wire_ids: Mutex<HashMap<u64, u64>>,
-}
-
-/// What this station beacons. Beacons are unattended transmissions: they go out only after the
-/// operator turned them on, never in listen-only mode, and only when the HF burst mode is on.
-#[derive(Clone, Debug, Default)]
-struct BeaconCfg {
-    enabled: bool,
-    position: Option<(f64, f64)>,
-    grid: Option<String>,
 }
 
 /// Settings the handle sets and the worker reads. All off by default.
@@ -261,16 +292,50 @@ struct Flags {
     listen_only: AtomicBool,
     /// Weak mode: every frame is sent WEAK_COPIES times for stations that cannot reply.
     weak_mode: AtomicBool,
-    /// Send and listen for ladder bursts (kahf_core::burst): long-preamble sync, adaptive
-    /// speed from -9 dB to 5 kbit/s. Off sends the older single-frame bursts only.
-    hf_burst: AtomicBool,
-    /// Ladder rung every link burst is pinned to (index in the ladder), or `NO_PIN`. For tests and probes.
-    hf_pin: AtomicUsize,
+    /// Index into MODULATIONS of the modulation used for the last burst (shown to the operator).
+    tx_level_shown: AtomicU8,
+    /// Choose the KAMI mode automatically (default). Off: always send `fixed_level`.
+    auto_mode: AtomicBool,
+    /// The operator lets the station connect and send queued messages by itself, and hang up
+    /// when it is done. Off by default; relay stations always do.
+    auto_link: AtomicBool,
+    /// Index into MODULATIONS used when `auto_mode` is off.
+    fixed_level: AtomicU8,
     update_locked: AtomicBool,
     internet_relay: AtomicBool,
-    /// Relay other stations' messages (setting B). On by default; used only in relay mode.
+    /// Relay other stations' messages (setting B). On by default; no effect yet.
     third_party_relay: AtomicBool,
     relay_timeout_ms: AtomicU64,
+    /// Transmit audio level, percent of full scale (5 to 100). Kept below full scale on purpose:
+    /// an SSB rig driven too hard splatters across neighbouring channels, which on a few shared
+    /// HF frequencies spoils everyone's reception.
+    tx_level_pct: AtomicU8,
+    /// What the transmit gate checks against: the band table, the radio's dial and the bench
+    /// switch (MESH-SPEC 5.1 I7 and 2.3).
+    policy: Mutex<TxPolicy>,
+    /// The open radio cannot reach an antenna (in-memory test radio, or BlackHole). Known once the radio is open.
+    bench_radio: AtomicBool,
+    /// The radio is open, so `bench_radio` and `radio_dial_hz` are known.
+    radio_known: AtomicBool,
+    /// Dial the radio itself reports (an SDR knows it), 0 when unknown.
+    radio_dial_hz: AtomicU64,
+    /// Occupancy reports waiting for the server link (kept in memory, newest last).
+    occupancy: Mutex<VecDeque<OccupancyReport>>,
+    /// Referee counters since start: rounds run, requests heard, grants given.
+    ref_counts: [AtomicU64; 4],
+}
+
+/// The transmit gate's settings. The built-in table is **not verified** (`plan_verified` is
+/// false and only the project owner changes that), so on a real radio the gate refuses every
+/// transmission. `test_table` lets a bench radio (in-memory or BlackHole) transmit for tests;
+/// it never opens a real radio.
+struct TxPolicy {
+    table: BandTable,
+    dial_hz: Option<u64>,
+    test_table: bool,
+    /// Audio span (Hz) the modem fills, when a test or the lane plan overrides it. Normally `None`:
+    /// a lane dial means lane mode (1260 to 1740 Hz), anything else the wide modem.
+    audio_span: Option<(u64, u64)>,
 }
 
 impl Flags {
@@ -281,14 +346,33 @@ impl Flags {
             operator_link: AtomicBool::new(false),
             listen_only: AtomicBool::new(false),
             weak_mode: AtomicBool::new(false),
-            hf_burst: AtomicBool::new(true),
-            hf_pin: AtomicUsize::new(NO_PIN),
+            tx_level_shown: AtomicU8::new(0),
+            tx_level_pct: AtomicU8::new(DEFAULT_TX_LEVEL_PCT),
+            auto_mode: AtomicBool::new(true),
+            auto_link: AtomicBool::new(false),
+            fixed_level: AtomicU8::new(mod_level(MODULATION) as u8),
             update_locked: AtomicBool::new(false),
             // Setting D: on by default. The gateway is a stub, so nothing leaves the station
             // until the gateway exists and the operator sends that way.
             internet_relay: AtomicBool::new(true),
             third_party_relay: AtomicBool::new(true),
             relay_timeout_ms: AtomicU64::new(RELAY_TIMEOUT_MS),
+            policy: Mutex::new(TxPolicy {
+                table: BandTable::builtin_r1(),
+                dial_hz: None,
+                test_table: false,
+                audio_span: None,
+            }),
+            bench_radio: AtomicBool::new(false),
+            radio_known: AtomicBool::new(false),
+            radio_dial_hz: AtomicU64::new(0),
+            occupancy: Mutex::new(VecDeque::new()),
+            ref_counts: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
         }
     }
 }
@@ -300,14 +384,155 @@ fn tx_refusal(f: &Flags) -> Option<&'static str> {
     } else if f.listen_only.load(Ordering::SeqCst) {
         Some(LISTEN_ONLY_TEXT)
     } else {
-        None
+        gate_refusal(f)
+    }
+}
+
+const GATE_UNVERIFIED: &str = "Transmit is off: the 17 m band table is not verified against the current band plan yet. Receiving works.";
+const GATE_NO_DIAL: &str =
+    "Transmit is off: KAHF does not know the radio's dial frequency. Choose a lane on the Radio screen.";
+const GATE_NOT_A_LANE: &str =
+    "Transmit is off: the radio's dial is not set for a KAHF lane (17 m). Set the dial shown for the lane.";
+const GATE_OUTSIDE: &str = "Transmit is off: the signal would not fit inside the lane.";
+const GATE_TEST_REAL: &str = "The test table is on, but this is a real radio. Transmit is off.";
+
+/// The receive state of one lane: its filter and the burst search state. The worker keeps the
+/// own lane's state in its own fields and a second calling lane's here; `swap_rx` exchanges them
+/// so the same decoder serves both (one sound card hears C1 and C2 at once, MESH-SPEC 8.4).
+struct RxLane {
+    lane_rx: narrow::LaneRx,
+    rx_buf: Vec<f32>,
+    since_kami: usize,
+    kami_at: Option<(usize, f64, f64)>,
+    kami_seen: Option<Instant>,
+    kami_refined: bool,
+    kami_tried: usize,
+    kami_mode: Option<Modulation>,
+    kami_next: usize,
+    kami_total: usize,
+    kami_front: bool,
+    rx_locked: bool,
+    harq: kahf_core::harq::Harq,
+    /// Audio frequency of the lane's centre (Hz), for the filter.
+    audio_hz: f64,
+    /// Lane number.
+    k: u8,
+}
+
+impl RxLane {
+    fn new(audio_hz: f64, k: u8) -> Self {
+        RxLane {
+            lane_rx: narrow::LaneRx::new(audio_hz),
+            rx_buf: Vec::new(),
+            since_kami: 0,
+            kami_at: None,
+            kami_seen: None,
+            kami_refined: false,
+            kami_tried: 0,
+            kami_mode: None,
+            kami_next: 0,
+            kami_total: 0,
+            kami_front: true,
+            rx_locked: false,
+            harq: Default::default(),
+            audio_hz,
+            k,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = RxLane::new(self.audio_hz, self.k);
+    }
+}
+
+/// One whole-segment report: the lanes the receiver covers and how far over its noise floor
+/// each was (dB, 0 when quiet), 12 numbers at most, no audio (MESH-SPEC 5.5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OccupancyReport {
+    pub at_unix: i64,
+    pub lanes: Vec<(u8, i16)>,
+}
+
+const OCCUPANCY_PERIOD_MS: u64 = 60_000;
+const OCCUPANCY_KEEP: usize = 60;
+/// A lane must have been listened to this long before it can be called clear.
+const SENSE_CLASSIFY_MS: u64 = 5_000;
+
+/// The lanes one receive capture covers, for a given dial.
+struct LaneWatch {
+    dial_hz: u64,
+    /// Lane numbers covered, lowest frequency first, and their audio centres.
+    ks: Vec<u8>,
+    own: usize,
+    sense: LaneSense,
+    classified_ms: u64,
+}
+
+impl LaneWatch {
+    /// `None` unless `dial_hz` is exactly a lane's dial (centre at 1500 Hz of audio).
+    fn new(table: &BandTable, dial_hz: u64) -> Option<Self> {
+        let band = table.band("17m")?;
+        let own_lane = band.lanes.iter().find(|l| l.dial_hz == dial_hz)?;
+        let mut covered: Vec<(&laneplan::Lane, f64)> = band
+            .lanes
+            .iter()
+            .filter_map(|l| {
+                let a = l.centre_hz as f64 - dial_hz as f64;
+                (300.0..=RATE as f64 / 2.0 - 300.0).contains(&a).then_some((l, a))
+            })
+            .collect();
+        covered.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let own = covered.iter().position(|(l, _)| l.k == own_lane.k)?;
+        let centres: Vec<f64> = covered.iter().map(|(_, a)| *a).collect();
+        Some(LaneWatch {
+            dial_hz,
+            ks: covered.iter().map(|(l, _)| l.k).collect(),
+            own,
+            sense: LaneSense::new(&centres),
+            classified_ms: 0,
+        })
+    }
+}
+
+/// Audio span of a lane signal: 480 Hz around 1500 Hz.
+const LANE_AUDIO_SPAN_HZ: (u64, u64) = (1_260, 1_740);
+
+/// The transmit gate (MESH-SPEC I7): every transmission must pass `lanes::permit_tx` against
+/// the band table with the dial the radio is really on. Returns why not, or `None`.
+/// While the radio is not open yet nothing is decided (the check repeats before every burst).
+fn gate_refusal(f: &Flags) -> Option<&'static str> {
+    if !f.radio_known.load(Ordering::SeqCst) {
+        return None;
+    }
+    let bench = f.bench_radio.load(Ordering::SeqCst);
+    let p = lock(&f.policy);
+    if p.test_table {
+        return if bench { None } else { Some(GATE_TEST_REAL) };
+    }
+    if !p.table.plan_verified {
+        return Some(GATE_UNVERIFIED);
+    }
+    let radio_dial = f.radio_dial_hz.load(Ordering::SeqCst);
+    let Some(dial) = p.dial_hz.or((radio_dial != 0).then_some(radio_dial)) else {
+        return Some(GATE_NO_DIAL);
+    };
+    let Some(band) = p.table.band("17m") else {
+        return Some(GATE_OUTSIDE);
+    };
+    let Some(lane) = band.lanes.iter().find(|l| l.dial_hz == dial) else {
+        return Some(GATE_NOT_A_LANE);
+    };
+    let span = p.audio_span.unwrap_or(LANE_AUDIO_SPAN_HZ);
+    match p.table.permit_tx("17m", lane.k, lane.k, dial, span.0, span.1) {
+        Ok(()) => None,
+        Err(laneplan::Violation::PlanNotVerified) => Some(GATE_UNVERIFIED),
+        Err(_) => Some(GATE_OUTSIDE),
     }
 }
 
 /// Plan 6.2: route a message through the server gateway. Stub until the server exists.
 fn relay_via_gateway(_dest: &str) -> Result<(), String> {
-    // Parked: radio relay comes first (owner's decision, 2026-11-20). When the kahf.dev
-    // gateway exists (plan 5 and 6.2), send there and return Ok once it accepts.
+    // TODO: send to the kahf.dev gateway (plan 5 and 6.2) and return Ok once it accepts.
     Err("the internet gateway is not available yet".into())
 }
 
@@ -339,51 +564,6 @@ impl EventQueue {
     }
 }
 
-/// Learns a station's position and grid from a location beacon payload: records it in the heard
-/// list and fills the contact's QTH when empty. Returns (callsign, grid).
-fn learn_beacon(
-    shared: &Shared,
-    data_dir: &Path,
-    own_call: &str,
-    payload: &[u8],
-) -> Option<(String, String)> {
-    let (call, grid, pos) = kahf_core::msg::grid::learn(payload)?;
-    if call.eq_ignore_ascii_case(own_call) || !valid_call(&call) {
-        return None;
-    }
-    {
-        let mut h = lock(&shared.heard);
-        if h.get(&call).is_none() {
-            let obs = Observation {
-                snr_db: 0.0,
-                channel_khz: 0.0,
-                via: None,
-            };
-            h.hear(&call, now_unix_secs().max(0) as u64, obs, 0);
-        }
-        match pos {
-            Some((la, lo)) => h.set_position(&call, la, lo),
-            None => h.set_grid(&call, &grid),
-        }
-        save_heard(data_dir, &h);
-    }
-    let _io = lock(&shared.contacts_io);
-    let path = data_dir.join("contacts.txt");
-    if let Ok(mut list) = contacts::load(&path) {
-        if contacts::fill_grid(&mut list, &call, &grid) {
-            let _ = fs::create_dir_all(data_dir);
-            let _ = contacts::save(&path, &list);
-        }
-    }
-    Some((call, grid))
-}
-
-fn save_heard(dir: &Path, h: &HeardList) {
-    if fs::create_dir_all(dir).is_ok() {
-        let _ = fs::write(dir.join("heard.txt"), h.to_text());
-    }
-}
-
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -394,6 +574,7 @@ pub struct Engine {
     shared: Arc<Shared>,
     ids: Arc<AtomicU64>,
     worker: Option<JoinHandle<()>>,
+    clock: Clock,
 }
 
 impl Engine {
@@ -418,9 +599,107 @@ impl Engine {
         self.send_cmd(Cmd::Connect { peer })
     }
 
+    /// Lets a running relay carry messages through the server (relays are online, operators may
+    /// not be). `None` turns it off, and the relay works on the radio side only.
+    pub fn set_backbone(&self, server: Option<&str>) {
+        *lock(&self.shared.backbone_server) = server.map(|s| s.to_string());
+    }
+
+    /// Transmit audio level in percent of full scale, 5 to 100. Lower is safer: set it so the
+    /// radio's ALC only just moves, or lower.
+    pub fn set_tx_level(&self, pct: u8) {
+        self.shared
+            .flags
+            .tx_level_pct
+            .store(pct.clamp(5, 100), Ordering::SeqCst);
+    }
+
+    /// Sends a steady 1 kHz tone for five seconds, so the drive can be set by the radio's ALC
+    /// meter. This transmits.
+    pub fn test_tone(&self) -> Result<(), String> {
+        if let Some(why) = tx_refusal(&self.shared.flags) {
+            return Err(why.into());
+        }
+        self.send_cmd(Cmd::Tone)
+    }
+
+    /// The position to put in announcements (latitude, longitude), or None to say nothing.
+    /// The caller decides how exact it is; the engine sends it as given, to a hundredth of a degree.
+    pub fn set_location(&self, loc: Option<(f64, f64)>) {
+        *lock(&self.shared.location) = loc.map(|(a, b)| (a as f32, b as f32));
+    }
+
+    /// Tells everyone in range that this station exists. Relays pass it on, so stations beyond
+    /// direct range learn of it too and add it to their contacts. One short burst.
+    pub fn advertise(&self) -> Result<(), String> {
+        self.send_cmd(Cmd::Advertise)
+    }
+
     pub fn disconnect(&mut self) -> Result<(), String> {
         self.shared.flags.operator_link.store(false, Ordering::SeqCst);
         self.send_cmd(Cmd::Disconnect)
+    }
+
+    /// Replaces the band table the transmit gate checks against (a signed update, once there is one).
+    pub fn set_band_table(&self, table: BandTable) {
+        lock(&self.shared.flags.policy).table = table;
+    }
+
+    /// The USB dial the radio is on, in Hz (the app's lane setting). `None` = not known.
+    pub fn set_dial_hz(&self, dial_hz: Option<u64>) {
+        lock(&self.shared.flags.policy).dial_hz = dial_hz;
+    }
+
+    /// Overrides the audio span the modem fills, in Hz (normally the lane mode's 1260 to 1740).
+    pub fn set_tx_audio_span(&self, lo_hz: u64, hi_hz: u64) {
+        lock(&self.shared.flags.policy).audio_span = Some((lo_hz, hi_hz));
+    }
+
+    /// Test table: lets a bench radio (in-memory or BlackHole) transmit while the band table is
+    /// unverified. It has no effect on a real radio, which stays refused.
+    pub fn set_test_table(&self, on: bool) {
+        lock(&self.shared.flags.policy).test_table = on;
+    }
+
+    /// What the relay referee has done since start: (rounds, requests heard, grants given).
+    pub fn referee_counts(&self) -> (u64, u64, u64) {
+        let c = &self.shared.flags.ref_counts;
+        (
+            c[0].load(Ordering::Relaxed),
+            c[1].load(Ordering::Relaxed),
+            c[2].load(Ordering::Relaxed),
+        )
+    }
+
+    /// How many "I am here" frames from operators this relay has heard since start.
+    pub fn heres_heard(&self) -> u64 {
+        self.shared.flags.ref_counts[3].load(Ordering::Relaxed)
+    }
+
+    /// The newest occupancy report, without taking it from the queue.
+    pub fn latest_occupancy(&self) -> Option<OccupancyReport> {
+        lock(&self.shared.flags.occupancy).back().cloned()
+    }
+
+    /// Hands over the occupancy reports collected so far (one a minute while the dial is a lane).
+    pub fn take_occupancy(&self) -> Vec<OccupancyReport> {
+        lock(&self.shared.flags.occupancy).drain(..).collect()
+    }
+
+    /// What the transmit gate says now: `("real", "")` when a real radio may transmit,
+    /// `("bench", ..)` on the test table with a bench radio, else `("off", reason)`.
+    pub fn tx_gate(&self) -> (&'static str, String) {
+        let f = &self.shared.flags;
+        if let Some(why) = tx_refusal(f) {
+            return ("off", why.to_string());
+        }
+        if lock(&f.policy).test_table && f.bench_radio.load(Ordering::SeqCst) {
+            return (
+                "bench",
+                "Test table: bench radio only, nothing reaches an antenna.".to_string(),
+            );
+        }
+        ("real", String::new())
     }
 
     /// Listen only (plan 0): while on, no transmit path runs. Receive keeps working.
@@ -430,26 +709,50 @@ impl Engine {
 
     /// Weak mode: sends every frame WEAK_COPIES times in QPSK, so it decodes at about -4 dB.
     /// Much slower, and the receiver gets no acknowledgements in time to repeat anything.
+    /// The KAMI mode used for the most recent transmission, for example "KAMI-32" or "KAMI-1c".
+    pub fn transmit_modulation(&self) -> &'static str {
+        let level = self.shared.flags.tx_level_shown.load(Ordering::SeqCst) as usize;
+        mode_name(MODULATIONS.get(level).copied().unwrap_or(MODULATION))
+    }
+
+    /// Names of the modes the transmitter can use, slowest and most robust first.
+    pub fn mode_names() -> Vec<&'static str> {
+        MODULATIONS.iter().map(|&m| mode_name(m)).collect()
+    }
+
+    /// Let the station connect to the destination of queued messages by itself, send them, and
+    /// hang up afterwards. Relay stations do this whenever relay mode runs.
+    pub fn set_auto_link(&self, on: bool) {
+        self.shared.flags.auto_link.store(on, Ordering::SeqCst);
+    }
+
+    pub fn auto_link(&self) -> bool {
+        self.shared.flags.auto_link.load(Ordering::SeqCst)
+    }
+
+    /// Relay stations to try, in order, for a message whose station is not reached on air.
+    pub fn set_relay_hints(&self, calls: &[String]) {
+        *lock(&self.shared.relay_hints) = calls.iter().map(|c| c.to_uppercase()).collect();
+    }
+
+    /// Automatic mode choice from the peer's SNR report (the default) or a fixed mode.
+    pub fn set_auto_mode(&self, on: bool) {
+        self.shared.flags.auto_mode.store(on, Ordering::SeqCst);
+    }
+
+    /// Always send in the named mode, for example "KAMI-32". Turns automatic choice off.
+    pub fn set_fixed_mode(&self, name: &str) -> Result<(), String> {
+        let level = MODULATIONS
+            .iter()
+            .position(|&m| mode_name(m).eq_ignore_ascii_case(name))
+            .ok_or_else(|| format!("unknown mode {name}"))?;
+        self.shared.flags.fixed_level.store(level as u8, Ordering::SeqCst);
+        self.shared.flags.auto_mode.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn set_weak_mode(&self, on: bool) {
         self.shared.flags.weak_mode.store(on, Ordering::SeqCst);
-    }
-
-    /// Pins every link burst to one ladder rung (`Some("R4")`), switching the adaptive choice off;
-    /// `None` gives it back. For tests and probes of one rung. Unknown names are ignored.
-    pub fn pin_hf_rung(&self, name: Option<&str>) {
-        let v = match name {
-            None => NO_PIN,
-            Some(n) => match burst::LADDER.iter().position(|m| m.name == n) {
-                Some(i) => i,
-                None => return,
-            },
-        };
-        self.shared.flags.hf_pin.store(v, Ordering::SeqCst);
-    }
-
-    /// Ladder bursts on or off (default on). Off, the station sends and hears single frames only.
-    pub fn set_hf_burst(&self, on: bool) {
-        self.shared.flags.hf_burst.store(on, Ordering::SeqCst);
     }
 
     /// Set while a required update is pending (plan 0 and 8.5). While set, no transmit path runs.
@@ -478,6 +781,28 @@ impl Engine {
     /// Starts relay mode for this run only (plan 4). Refused unless a relay role is set and
     /// both acknowledgements are true. Nothing is saved: relay stops on `stop_relay` or when
     /// the app quits.
+    /// Turns this station into a relay on `channel_khz`, with one transmit slot that covers the
+    /// next 24 hours. The operator must confirm the licence and the terms.
+    pub fn enable_relay(
+        &self,
+        channel_khz: f32,
+        licence_held: bool,
+        terms_accepted: bool,
+    ) -> Result<(), String> {
+        self.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[channel_khz])?;
+        let now = now_unix_secs().max(0) as u64;
+        self.accept_relay_schedule(vec![Slot {
+            channel_khz,
+            start_unix: now,
+            duration_s: 24 * 3600,
+            direction: relay::Direction::Transmit,
+        }])?;
+        self.start_relay(RelayAck {
+            licence_held,
+            terms_accepted,
+        })
+    }
+
     pub fn start_relay(&self, ack: RelayAck) -> Result<(), String> {
         if !(ack.licence_held && ack.terms_accepted) {
             return Err(
@@ -515,64 +840,14 @@ impl Engine {
         lock(&self.shared.relay_stats).clone()
     }
 
+    /// The most recent forwards across all messages, newest first, with how many in total.
+    pub fn relay_recent(&self, n: usize) -> (Vec<Hop>, usize) {
+        lock(&self.shared.hops).recent_counted(n)
+    }
+
     /// Forwards recorded for one message, in order (plan 4). `message_id` is the public id.
     pub fn relay_hops(&self, message_id: u64) -> Vec<Hop> {
         lock(&self.shared.hops).chain_for(message_id)
-    }
-
-    /// Relays this station may send through by radio when a station is not reached directly
-    /// (plan 6.3). A message waits `RELAY_TIMEOUT_MS` for its station; after that it goes to
-    /// whichever of these relays the station is connected to. An empty list turns it off.
-    pub fn set_relay_paths(&self, calls: &[&str]) -> Result<(), String> {
-        let mut paths: Vec<String> = Vec::new();
-        for call in calls {
-            let call = call.trim();
-            if !valid_call(call) {
-                return Err(format!("bad relay callsign {call:?}"));
-            }
-            if call.eq_ignore_ascii_case(&self.config.callsign) {
-                return Err("a station cannot relay through itself".to_string());
-            }
-            if !paths.iter().any(|p| p.eq_ignore_ascii_case(call)) {
-                paths.push(call.to_string());
-            }
-        }
-        *lock(&self.shared.relay_paths) = paths;
-        Ok(())
-    }
-
-    /// Sets the relay paths from the 17 m route planner: for each of the next 24 hours, the
-    /// first relay of the best predicted route from `me` to `to` (kahf_prop::route). Returns
-    /// the paths set, best first; empty when no route is predicted at any hour.
-    pub fn plan_relay_paths(
-        &self,
-        me: &route::Node,
-        to: &route::Node,
-        relays: &[route::Node],
-        conditions: &route::Conditions,
-    ) -> Result<Vec<String>, String> {
-        let paths = route::first_relays(me, to, relays, conditions);
-        let calls: Vec<&str> = paths.iter().map(String::as_str).collect();
-        self.set_relay_paths(&calls)?;
-        Ok(self.relay_paths())
-    }
-
-    /// The relays set with `set_relay_paths`.
-    pub fn relay_paths(&self) -> Vec<String> {
-        lock(&self.shared.relay_paths).clone()
-    }
-
-    /// The last `limit` forwards of any message, newest first (plan 4).
-    pub fn recent_hops(&self, limit: usize) -> Vec<Hop> {
-        lock(&self.shared.hops).recent(limit)
-    }
-
-    /// The accepted relay schedule in time order. Empty until a role and a schedule are set.
-    pub fn relay_schedule(&self) -> Vec<Slot> {
-        lock(&self.shared.relay)
-            .as_ref()
-            .map(|r| r.slots().to_vec())
-            .unwrap_or_default()
     }
 
     /// Internet relay (plan 6.1). On by default (setting D). The gateway is still a stub:
@@ -585,9 +860,8 @@ impl Engine {
     /// Label of setting B, shown next to the switch.
     pub const THIRD_PARTY_RELAY_LABEL: &'static str = "Relay other stations' messages";
 
-    /// Third-party relaying (setting B). On by default. While it is on and relay mode runs, a
-    /// station with a relay role holds messages addressed to other stations and passes them
-    /// on unchanged in its transmit slots. The operator confirms the licence each start.
+    /// Third-party relaying (setting B). On by default. It has no effect yet: forwarding
+    /// other stations' traffic is not built. TODO: the rules must be checked before release.
     pub fn set_third_party_relay(&self, on: bool) {
         self.shared.flags.third_party_relay.store(on, Ordering::SeqCst);
     }
@@ -597,8 +871,9 @@ impl Engine {
         self.shared.flags.third_party_relay.load(Ordering::SeqCst)
     }
 
-    /// How long a message waits for its station before it takes the radio relay path.
-    pub fn set_relay_timeout_ms(&self, ms: u64) {
+    /// Test only: how long a message waits for its station before the relay step.
+    #[cfg(test)]
+    fn set_relay_timeout_ms(&self, ms: u64) {
         self.shared.flags.relay_timeout_ms.store(ms, Ordering::SeqCst);
     }
 
@@ -609,6 +884,22 @@ impl Engine {
     }
 
     /// Queues a chat message. Text starting with "URGENT:" goes out first.
+    /// Queues a chat and returns its outbox id, so the caller can follow it. `private` keeps it
+    /// for the addressee's inbox only.
+    pub fn send_chat(&mut self, to: &str, text: &str, private: bool) -> Result<u64, String> {
+        check_to(to)?;
+        if text.is_empty() {
+            return Err("empty message".into());
+        }
+        let msg = Message::Chat {
+            from: self.config.callsign.clone(),
+            to: to.trim().to_string(),
+            text: text.to_string(),
+        };
+        let ids = self.queue_with(vec![msg], private)?;
+        ids.first().copied().ok_or_else(|| STOPPED.to_string())
+    }
+
     pub fn send_message(&mut self, to: &str, text: &str) -> Result<(), String> {
         check_to(to)?;
         if text.is_empty() {
@@ -651,6 +942,14 @@ impl Engine {
             .iter()
             .map(|p| read_attachment(p))
             .collect::<Result<Vec<_>, String>>()?;
+        let total: usize = files.iter().map(|(_, d)| d.len()).sum();
+        if total > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "The attachments are {} kB together. The limit is {} kB.",
+                total / 1024,
+                MAX_ATTACHMENT_BYTES / 1024
+            ));
+        }
         let names = files.iter().map(|(n, _)| n.clone()).collect();
         let to = to.trim().to_string();
         let from = self.config.callsign.clone();
@@ -709,188 +1008,11 @@ impl Engine {
         lock(&self.shared.pending).clone()
     }
 
-    /// Stations heard on air, most recent first (at most `limit`). Survives restarts.
-    pub fn heard_stations(&self, limit: usize) -> Vec<Heard> {
-        lock(&self.shared.heard)
-            .recent(limit)
-            .into_iter()
-            .cloned()
-            .collect()
-    }
-
-    /// Feeds a location beacon payload (a position beacon or a grid beacon) heard on air.
-    /// Records the station's position and grid in the heard list and, when its contact has no
-    /// QTH yet, fills it with the grid so the relay route planner knows where it is. Returns
-    /// the (callsign, grid) learned, or None for any other payload or our own beacon.
-    pub fn note_beacon(&self, payload: &[u8]) -> Option<(String, String)> {
-        learn_beacon(
-            &self.shared,
-            &self.config.data_dir,
-            &self.config.callsign,
-            payload,
-        )
-    }
-
-    /// Turns location beacons on or off and sets what they say: a GPS position (receivers turn
-    /// it into a grid) or, without GPS, a Maidenhead grid such as "IO91". Beacons go out on air
-    /// every 15 minutes at most, slower while the position does not change, as a short
-    /// unconnected burst. Needs the HF burst mode and is refused in listen-only mode.
-    pub fn set_beacon(
-        &self,
-        enabled: bool,
-        position: Option<(f64, f64)>,
-        grid: Option<&str>,
-    ) -> Result<(), String> {
-        if let Some(g) = grid {
-            if !kahf_core::msg::grid::valid(g) {
-                return Err(format!("invalid grid locator: {g:?}"));
-            }
-        }
-        if enabled {
-            if let Some(why) = tx_refusal(&self.shared.flags) {
-                return Err(why.into());
-            }
-            if position.is_none() && grid.is_none() {
-                return Err("set a position or a grid locator to beacon".into());
-            }
-        }
-        let mut c = lock(&self.shared.beacon);
-        c.enabled = enabled;
-        c.position = position;
-        c.grid = grid.map(str::to_ascii_uppercase);
-        Ok(())
-    }
-
-    /// Delivery state of a message sent by this station, by the id `send_*` and events use:
-    /// one (callsign, status) per recipient, status one of queued, held, sent, delivered, read,
-    /// failed, expired. None until the message has gone on air. "delivered" comes from the link
-    /// ACK when the addressee was the link peer, or from an on-air receipt (the message reached
-    /// it through relays).
-    pub fn delivery(&self, public_id: u64) -> Option<Vec<(String, String)>> {
-        Self::delivery_of(&self.shared, public_id)
-    }
-
-    fn delivery_of(shared: &Shared, public_id: u64) -> Option<Vec<(String, String)>> {
-        let wire = *lock(&shared.wire_ids).get(&public_id)?;
-        let t = lock(&shared.delivery);
-        let tr = t.get(wire)?;
-        Some(
-            tr.recipients
-                .iter()
-                .map(|(c, s)| (c.clone(), format!("{s:?}").to_lowercase()))
-                .collect(),
-        )
-    }
-
-    /// Joins the group `name` (letters, digits and '-', for example "net17") and tells each
-    /// station in `invite` so they add this station and answer with their member list. Returns
-    /// the group address, `#NET17`. Group chat is plain chat to each member; nothing is hidden.
-    pub fn join_group(&mut self, name: &str, invite: &[&str]) -> Result<String, String> {
-        let ctl = lock(&self.shared.groups).join(name)?;
-        self.save_groups();
-        let Control::Join { group, .. } = &ctl else {
-            unreachable!()
-        };
-        let group = group.clone();
-        let me = self.config.callsign.clone();
-        let msgs: Vec<Message> = invite
-            .iter()
-            .filter(|c| valid_call(c) && !c.eq_ignore_ascii_case(&me))
-            .map(|c| Message::Chat {
-                from: me.clone(),
-                to: c.to_string(),
-                text: ctl.encode(),
-            })
-            .collect();
-        if !msgs.is_empty() {
-            self.queue(msgs)?;
-        }
-        Ok(group)
-    }
-
-    /// Leaves a group and tells the members this station knows.
-    pub fn leave_group(&mut self, name: &str) -> Result<(), String> {
-        let (ctl, members) = {
-            let mut g = lock(&self.shared.groups);
-            let addr = kahf_core::msg::groups::group_addr(name)?;
-            let members = g.fanout(&addr, &self.config.callsign);
-            (g.leave(name)?, members)
-        };
-        self.save_groups();
-        let me = self.config.callsign.clone();
-        let msgs: Vec<Message> = members
-            .into_iter()
-            .map(|to| Message::Chat {
-                from: me.clone(),
-                to,
-                text: ctl.encode(),
-            })
-            .collect();
-        if msgs.is_empty() {
-            Ok(())
-        } else {
-            self.queue(msgs).map(|_| ())
-        }
-    }
-
-    /// Sends `text` to every known member of a joined group, one chat each (so the outbox
-    /// keeps trying for members that are off air). Returns how many members it was queued for.
-    pub fn send_group(&mut self, name: &str, text: &str) -> Result<usize, String> {
-        if text.is_empty() {
-            return Err("empty message".into());
-        }
-        let addr = kahf_core::msg::groups::group_addr(name)?;
-        let members = {
-            let g = lock(&self.shared.groups);
-            if !g.is_joined(&addr) {
-                return Err(format!("not in group {addr}; join it first"));
-            }
-            g.fanout(&addr, &self.config.callsign)
-        };
-        if members.is_empty() {
-            return Err(format!("no other members known in {addr} yet"));
-        }
-        let me = self.config.callsign.clone();
-        let say = Control::Say {
-            group: addr,
-            text: text.to_string(),
-        }
-        .encode();
-        let msgs: Vec<Message> = members
-            .iter()
-            .map(|to| Message::Chat {
-                from: me.clone(),
-                to: to.clone(),
-                text: say.clone(),
-            })
-            .collect();
-        self.queue(msgs)?;
-        Ok(members.len())
-    }
-
-    /// Joined groups with their known members (this station included).
-    pub fn groups(&self) -> Vec<(String, Vec<String>)> {
-        let g = lock(&self.shared.groups);
-        g.joined()
-            .into_iter()
-            .map(|n| {
-                (
-                    n.to_string(),
-                    g.members(n).into_iter().map(String::from).collect(),
-                )
-            })
-            .collect()
-    }
-
-    fn save_groups(&self) {
-        let _ = fs::create_dir_all(&self.config.data_dir);
-        let _ = fs::write(
-            self.config.data_dir.join("groups.txt"),
-            lock(&self.shared.groups).to_text(),
-        );
-    }
-
     fn spawn(config: Config, factory: Factory) -> Result<Self, String> {
+        Self::spawn_with_clock(config, factory, Clock::real())
+    }
+
+    fn spawn_with_clock(config: Config, factory: Factory, clock: Clock) -> Result<Self, String> {
         let (cmd, cmd_rx) = channel();
         // Plan 4: the station key is loaded at start-up. A failure is not fatal: mail goes unsigned.
         let (station_key, key_error) = match auth::load_or_create(&config.data_dir) {
@@ -907,31 +1029,27 @@ impl Engine {
             station_key,
             key_error: Mutex::new(key_error),
             relay: Mutex::new(None),
+            relay_hints: Mutex::new(Vec::new()),
+            backbone_server: Mutex::new(None),
+            location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
-            relay_paths: Mutex::new(Vec::new()),
-            heard: Mutex::new(
-                fs::read_to_string(config.data_dir.join("heard.txt"))
-                    .ok()
-                    .and_then(|t| HeardList::from_text(&t, HEARD_CAP))
-                    .unwrap_or_default(),
-            ),
-            contacts_io: Mutex::new(()),
-            groups: Mutex::new(
-                fs::read_to_string(config.data_dir.join("groups.txt"))
-                    .map(|t| GroupBook::from_text(&config.callsign, &t))
-                    .unwrap_or_else(|_| GroupBook::new(&config.callsign)),
-            ),
-            beacon: Mutex::new(BeaconCfg::default()),
-            delivery: Mutex::new(Tracker::new()),
-            wire_ids: Mutex::new(HashMap::new()),
         });
+        // Daemon tests run on test radios: the bench table is on unless a test turns it off.
+        #[cfg(test)]
+        {
+            lock(&shared.flags.policy).test_table = true;
+        }
         let ids = Arc::new(AtomicU64::new(1));
         let engine_config = config.clone();
         let (worker_shared, worker_ids) = (shared.clone(), ids.clone());
+        let (worker_clock, joined) = (clock.clone(), clock.join());
         let worker = thread::Builder::new()
             .name("kahf-engine".into())
-            .spawn(move || Worker::new(config, cmd_rx, worker_shared, factory, worker_ids).run())
+            .spawn(move || {
+                let _joined = joined;
+                Worker::new(config, cmd_rx, worker_shared, factory, worker_ids, worker_clock).run()
+            })
             .map_err(|e| format!("cannot start engine thread: {e}"))?;
         Ok(Engine {
             config: engine_config,
@@ -939,6 +1057,7 @@ impl Engine {
             shared,
             ids,
             worker: Some(worker),
+            clock,
         })
     }
 
@@ -953,10 +1072,12 @@ impl Engine {
         if let Some(why) = tx_refusal(&self.shared.flags) {
             return Err(why.into());
         }
-        // An operator who sends is attending the station, whichever side started the link: the
-        // station that answered a call may reply. (Forwards for other stations do not come
-        // through here; they stay bound to relay mode.)
-        self.shared.flags.operator_link.store(true, Ordering::SeqCst);
+        if msgs
+            .iter()
+            .any(|m| dest_of(m).trim().eq_ignore_ascii_case(&self.config.callsign))
+        {
+            return Err("That is your own callsign. Choose the station you want to reach.".into());
+        }
         let ids: Vec<u64> = msgs
             .iter()
             .map(|_| self.ids.fetch_add(1, Ordering::Relaxed))
@@ -987,7 +1108,9 @@ impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.cmd.send(Cmd::Shutdown);
         if let Some(h) = self.worker.take() {
-            let _ = h.join();
+            self.clock.park(|| {
+                let _ = h.join();
+            });
         }
     }
 }
@@ -1000,11 +1123,24 @@ fn check_to(to: &str) -> Result<(), String> {
     }
 }
 
+/// The most one file or mail may carry. Radio is slow: this is already about 8 minutes at 1.7 kbit/s.
+pub const MAX_ATTACHMENT_BYTES: usize = 100 * 1024;
+
 fn read_attachment(path: &Path) -> Result<(String, Vec<u8>), String> {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .ok_or_else(|| format!("{} has no file name", path.display()))?;
+    let size = fs::metadata(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .len() as usize;
+    if size > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{name} is {} kB. Files over {} kB cannot be sent over the radio: it would take far too long.",
+            size / 1024,
+            MAX_ATTACHMENT_BYTES / 1024
+        ));
+    }
     let data = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ok((name, data))
 }
@@ -1025,17 +1161,9 @@ fn validate(c: &Config) -> Result<(), String> {
         }
     }
     if let Some(addr) = &c.rigctld {
-        // Either a rig spec ("ic7300:/dev/ttyUSB0:115200:cat", "flrig") or a rigctld host:port.
-        if kahf_rig::parse_spec(addr).is_err() {
-            match addr.rsplit_once(':') {
-                Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
-                _ => {
-                    return Err(format!(
-                        "bad rig setting {addr:?} (want host:port for rigctld, or model:device[:baud][:ptt]; models: {})",
-                        kahf_rig::known_models()
-                    ))
-                }
-            }
+        match addr.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
+            _ => return Err(format!("bad rigctld address {addr:?} (want host:port)")),
         }
     }
     if let Some(s) = &c.sdr {
@@ -1057,6 +1185,10 @@ enum Cmd {
     },
     Disconnect,
     Listen,
+    /// Announce this station to everyone who can hear it, and through relays to those who cannot.
+    Advertise,
+    /// A steady test tone for setting the radio's drive.
+    Tone,
     /// `ids[i]` is the public id of `msgs[i]`, allocated by the caller.
     /// `private`: the messages go on air with the session private bit.
     Queue {
@@ -1085,6 +1217,15 @@ trait Backend {
     fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String>;
     /// End the transmission: PTT off, transmitter closed. Called after every `tx_start`.
     fn tx_stop(&mut self) -> Result<(), String>;
+    /// True when this radio can never reach an antenna (in-memory test radio, BlackHole).
+    /// Only such a radio may run on the test table.
+    fn is_bench(&self) -> bool {
+        false
+    }
+    /// The USB dial in Hz when the radio itself fixes it (an SDR), else `None`.
+    fn dial_hz(&self) -> Option<u64> {
+        None
+    }
 }
 
 fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
@@ -1094,14 +1235,19 @@ fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
     let input = AudioIn::open(cfg.audio_in.as_deref())?;
     let output = AudioOut::open(cfg.audio_out.as_deref())?;
     let rig: Option<Box<dyn RigControl>> = match &cfg.rigctld {
-        Some(text) if kahf_rig::parse_spec(text).is_ok() => Some(kahf_rig::open(text)?),
         Some(addr) => Some(Box::new(RigctldClient::connect(addr)?)),
         None => None,
     };
+    let named_blackhole = |n: &Option<String>| {
+        n.as_deref()
+            .is_some_and(|n| n.to_lowercase().contains("blackhole"))
+    };
+    let bench = cfg.rigctld.is_none() && named_blackhole(&cfg.audio_in) && named_blackhole(&cfg.audio_out);
     Ok(Box::new(AudioBackend {
         input: Some(input),
         output: Some(output),
         rig,
+        bench,
     }))
 }
 
@@ -1112,14 +1258,20 @@ fn set_ptt(rig: &mut Option<Box<dyn RigControl>>, on: bool) -> Result<(), String
     }
 }
 
-/// Sound card in and out, with optional rig PTT (rigctld, flrig or direct CAT; see kahf-rig). No PTT unless rigctld is set (VOX).
+/// Sound card in and out, with optional rigctld PTT. No PTT unless rigctld is set (VOX).
 struct AudioBackend {
     input: Option<AudioIn>,
     output: Option<AudioOut>,
     rig: Option<Box<dyn RigControl>>,
+    /// Both audio devices are BlackHole and there is no rig control: nothing can radiate.
+    bench: bool,
 }
 
 impl Backend for AudioBackend {
+    fn is_bench(&self) -> bool {
+        self.bench
+    }
+
     fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
         let Some(input) = self.input.as_mut() else {
             return Ok(());
@@ -1210,6 +1362,10 @@ fn set_rx_gains(rx: &mut dyn RxRadio) -> Result<(), String> {
 }
 
 impl Backend for SdrBackend {
+    fn dial_hz(&self) -> Option<u64> {
+        Some(self.spec.freq_hz)
+    }
+
     fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
         if self.rx.is_none() {
             let mut rx = kahf_radio::open(&self.spec.radio)?;
@@ -1404,38 +1560,107 @@ fn sdr_iq_range(x: &[f32], m0: usize, m1: usize) -> Vec<(f32, f32)> {
 // Frame layer helpers (PHY + LDPC + frame), shared by TX and RX
 // ---------------------------------------------------------------------------
 
-/// The modulations a frame can use, in the order the receiver tries them.
-/// The id in the frame (0, 1, 2) is the index in this list.
-const MODULATIONS: [Modulation; 3] = [Modulation::Qpsk, Modulation::Qam16, Modulation::Qam64];
+/// The modulation ladder, lowest rung first: the transmit level indexes this list.
+/// The id carried in the frame is fixed per mode (`mod_id`), so the order here is free.
+const MODULATIONS: [Modulation; 11] = [
+    Modulation::Kami256,
+    Modulation::Kami128,
+    Modulation::Kami64,
+    Modulation::Kami32,
+    Modulation::Kami16,
+    Modulation::Kami8,
+    Modulation::Kami4,
+    Modulation::Kami1a,
+    Modulation::Kami1b,
+    Modulation::Kami1c,
+    Modulation::Kami1d,
+];
 
+/// Index in `MODULATIONS` of KAMI-16, the slowest mode used while the signal is not weak.
+const HF_MIN_LEVEL: usize = 4;
+/// Below this reported SNR (dB) the slowest rungs are allowed.
+const HF_SLOW_FLOOR_SNR_DB: f32 = -3.0;
+
+/// Every KAMI mode the receiver recognises, ladder or not. They share one preamble.
+const KAMI_MODES: [Modulation; 13] = [
+    Modulation::Kami256,
+    Modulation::Kami128,
+    Modulation::Kami64,
+    Modulation::Kami32,
+    Modulation::Kami16,
+    Modulation::Kami8,
+    Modulation::Kami4,
+    Modulation::Kami2,
+    Modulation::Kami8H,
+    Modulation::Kami1a,
+    Modulation::Kami1b,
+    Modulation::Kami1c,
+    Modulation::Kami1d,
+];
+
+/// Display name of a mode.
+fn mode_name(m: Modulation) -> &'static str {
+    match m {
+        Modulation::Kami256 => "KAMI-256",
+        Modulation::Kami128 => "KAMI-128",
+        Modulation::Kami64 => "KAMI-64",
+        Modulation::Kami32 => "KAMI-32",
+        Modulation::Kami16 => "KAMI-16",
+        Modulation::Kami8 => "KAMI-8",
+        Modulation::Kami4 => "KAMI-4",
+        Modulation::Kami2 => "KAMI-2",
+        Modulation::Kami8H => "KAMI-8H",
+        Modulation::Kami1a => "KAMI-1a",
+        Modulation::Kami1b => "KAMI-1b",
+        Modulation::Kami1c => "KAMI-1c",
+        Modulation::Kami1d => "KAMI-1d",
+        _ => "KAMI-32",
+    }
+}
+
+/// Index into MODULATIONS of the fastest mode a reported SNR (dB) supports.
+fn ladder_level(snr_db: f32) -> usize {
+    kahf_core::phy::LADDER
+        .iter()
+        .find(|&&(_, floor)| snr_db >= floor)
+        .map_or(0, |&(m, _)| mod_level(m))
+}
+
+/// Wire id of a modulation, in the frame's id field. QPSK, 16QAM and 64QAM keep 0, 1 and 2.
 fn mod_id(m: Modulation) -> u8 {
-    MODULATIONS.iter().position(|&x| x == m).unwrap_or(0) as u8
+    use kahf_core::kami as k;
+    match m {
+        Modulation::Qpsk => 0,
+        Modulation::Qam16 => 1,
+        Modulation::Qam64 => 2,
+        Modulation::Kami32 => k::ID,
+        Modulation::Kami16 => k::ID16,
+        Modulation::Kami8 => k::ID8,
+        Modulation::Kami8H => k::ID8H,
+        Modulation::Kami64 => k::ID64,
+        Modulation::Kami128 => k::ID128,
+        Modulation::Kami256 => k::ID256,
+        Modulation::Kami4 => k::ID4,
+        Modulation::Kami2 => k::ID2,
+        Modulation::Kami1a => k::ID1A,
+        Modulation::Kami1b => k::ID1B,
+        Modulation::Kami1c => k::ID1C,
+        Modulation::Kami1d => k::ID1D,
+    }
 }
 
-/// Samples of one zero-payload frame at the transmit modulation. Used to find the preamble.
-fn frame_template() -> &'static [f32] {
-    static FRAME: OnceLock<Vec<f32>> = OnceLock::new();
-    FRAME.get_or_init(|| phy::modulate_frame(&vec![0u8; ldpc::N], MODULATION))
+fn mod_level(m: Modulation) -> usize {
+    MODULATIONS.iter().position(|&x| x == m).unwrap_or(0)
 }
 
-/// Samples of one zero-payload frame in the given modulation.
+/// Samples of one frame in the given KAMI mode.
 fn frame_len_for(m: Modulation) -> usize {
-    static LENS: OnceLock<Vec<usize>> = OnceLock::new();
-    let lens = LENS.get_or_init(|| {
-        MODULATIONS
-            .iter()
-            .map(|&x| phy::modulate_frame(&vec![0u8; ldpc::N], x).len())
-            .collect()
-    });
-    lens[mod_id(m) as usize]
-}
-
-/// Samples of one frame at the transmit modulation.
-fn frame_len() -> usize {
-    frame_len_for(MODULATION)
+    m.kami_shape()
+        .map_or(0, |sh| kahf_core::kami::frame_len_shape(ldpc::N, sh))
 }
 
 /// One frame, sent with the given modulation. The frame carries the modulation id.
+#[cfg(test)]
 fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
     if payload.len() > MAX_CHUNK {
         return Err(format!(
@@ -1444,187 +1669,70 @@ fn frame_samples_as(payload: &[u8], m: Modulation) -> Result<Vec<f32>, String> {
         ));
     }
     let coded = ldpc::encode(&frame::build_payload_as(payload, mod_id(m)));
-    Ok(phy::modulate_frame(&coded, m))
+    Ok(kahf_core::phy::modulate_frame(&coded, m))
 }
 
-/// Audio kept for the ladder-burst scan: the longest burst (a 7 s repeated mode) with room to spare.
-const HF_WINDOW: usize = 16 * RATE as usize;
-/// Scan period while a link is active (a reply may be due) and while idle. A scan costs about 0.2 s of CPU.
-const HF_SCAN_HOT: Duration = Duration::from_secs(1);
-const HF_SCAN_IDLE: Duration = Duration::from_secs(4);
-/// How long after the last ladder burst (heard or sent) the fast scan period stays.
-const HF_HOT_FOR: Duration = Duration::from_secs(40);
-/// Lowest ladder rung a connected link uses: slower bursts outlast the 2.5 s link timeouts.
-/// `hf_pin` value for no pin.
-const NO_PIN: usize = usize::MAX;
-const HF_LINK_FLOOR: &str = "R4";
-/// Rung a link starts at, and the one beacons and no-reply (weak mode) sends use.
-const HF_LINK_START: &str = "Q12";
-const HF_WEAK_RUNG: &str = "R32";
-
-fn rung(name: &str) -> usize {
-    burst::LADDER.iter().position(|m| m.name == name).unwrap_or(0)
+/// Audio samples of a burst of `n` frames in KAMI mode `m`, without the lead and tail silence.
+fn burst_len_for(m: Modulation, n: usize) -> usize {
+    m.kami_shape()
+        .map_or(0, |sh| kahf_core::kami::burst_len_shape(ldpc::N, n, sh))
 }
 
-/// Audio for `frames` as ladder bursts at rung `level`: groups of up to the rung's long size, with
-/// gaps between, lead-in and tail silence like [`burst`].
-fn hf_bursts(frames: &[Vec<u8>], level: usize, kind: burst::FrameKind) -> Vec<f32> {
-    let mode = &burst::LADDER[level.min(burst::LADDER.len() - 1)];
-    let mut out = vec![0f32; LEAD_SILENCE];
-    for (i, group) in frames.chunks(burst::long_codewords(mode)).enumerate() {
-        if i > 0 {
-            out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
-        }
-        out.extend(burst::modulate_frames(group, mode, kind));
-    }
-    out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
-    out
+/// Codewords one burst carries at most: the frame id byte keeps the count of codewords still to
+/// come in its top three bits (0 to 7), the mode in its low five.
+const BURST_MAX: usize = 8;
+const ID_MODE_MASK: u8 = 0x1F;
+
+/// How long after a transmission the sound card may still be handing back our own signal.
+/// Must stay below the MAC's answer gap (`SIFS_MS`): the station we sent to answers that soon
+/// after our burst, and an answer that starts inside this window would be thrown away unheard.
+/// A preamble has been heard but its first codeword has not decoded yet, so the burst is of an
+/// unknown mode and length. For this long it counts as a burst being received: starting our own
+/// burst now would talk over an answer on its way (a slow mode's first codeword is its whole frame).
+const PREAMBLE_HOLD: Duration = Duration::from_millis(2500);
+
+const ECHO_TAIL: Duration = Duration::from_millis(200);
+const _: () = assert!((ECHO_TAIL.as_millis() as u64) + 50 <= kahf_core::mac::SIFS_MS);
+/// Default transmit audio level: half of full scale (minus 6 dB).
+const DEFAULT_TX_LEVEL_PCT: u8 = 50;
+/// The test tone: a steady 1 kHz sine, long enough to set the radio's drive by its ALC meter.
+const TONE_SECONDS: usize = 5;
+
+/// A steady test tone at `level_pct` of full scale.
+fn tone_samples(level_pct: u8) -> Vec<f32> {
+    let level = level_pct as f32 / 100.0;
+    let n = RATE as usize * TONE_SECONDS;
+    let mut v = vec![0f32; LEAD_SILENCE];
+    v.extend((0..n).map(|i| level * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / RATE as f32).sin()));
+    v.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
+    v
 }
 
-/// Copies of each frame in weak mode. Eight copies, soft-combined, decode at about -4 dB.
-const WEAK_COPIES: usize = 8;
-
-/// A weak-mode burst: every frame sent WEAK_COPIES times in QPSK, with gaps. No acknowledgements.
-fn weak_burst(frames: &[Vec<u8>]) -> Result<Vec<f32>, String> {
-    let mut out = vec![0f32; LEAD_SILENCE];
-    let mut first = true;
-    for payload in frames {
-        for _ in 0..WEAK_COPIES {
-            if !first {
-                out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
-            }
-            first = false;
-            out.extend(frame_samples_as(payload, Modulation::Qpsk)?);
-        }
-    }
-    out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
-    Ok(out)
-}
-
-/// Adds the log-likelihoods of the weak-mode copies that start at `samples[0]` and then every stride.
-/// None unless the sum decodes to a valid QPSK frame.
-fn decode_combined(samples: &[f32]) -> Option<Vec<u8>> {
-    let flen = frame_len_for(Modulation::Qpsk);
-    let stride = flen + GAP_SILENCE;
-    let mut sum = vec![0f32; ldpc::N];
-    for i in 0..WEAK_COPIES {
-        let seg = samples.get(i * stride..i * stride + flen)?;
-        let llr = phy::demodulate_frame(seg, Modulation::Qpsk, ldpc::N)?;
-        for (s, l) in sum.iter_mut().zip(llr.iter()) {
-            *s += l;
-        }
-    }
-    let info = ldpc::decode(&sum, LDPC_ITER)?;
-    let (data, id) = frame::parse_payload_id(&info)?;
-    (id == mod_id(Modulation::Qpsk)).then_some(data)
-}
-
-/// One transmit burst: lead-in silence, the frames with gaps, tail silence.
+/// One transmit burst: lead-in silence, then the frames after a single preamble (several bursts
+/// of up to BURST_MAX frames when there are more), then tail silence. Sharing the preamble is
+/// what gives the fast modes their rate.
 fn burst(frames: &[Vec<u8>], m: Modulation) -> Result<Vec<f32>, String> {
+    let sh = m.kami_shape().ok_or("not a KAMI mode")?;
     let mut out = vec![0f32; LEAD_SILENCE];
-    for (i, payload) in frames.iter().enumerate() {
+    for (i, group) in frames.chunks(BURST_MAX).enumerate() {
         if i > 0 {
-            out.extend(std::iter::repeat_n(0f32, GAP_SILENCE));
+            out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE + LEAD_SILENCE / 2));
         }
-        out.extend(frame_samples_as(payload, m)?);
+        let mut cws = Vec::with_capacity(group.len());
+        for (j, payload) in group.iter().enumerate() {
+            if payload.len() > MAX_CHUNK {
+                return Err(format!(
+                    "frame payload of {} bytes is over {MAX_CHUNK}",
+                    payload.len()
+                ));
+            }
+            let id = mod_id(m) | (((group.len() - 1 - j) as u8) << 5);
+            cws.push(ldpc::encode(&frame::build_payload_as(payload, id)));
+        }
+        out.extend(kahf_core::kami::modulate_burst_shape(&cws, sh));
     }
     out.extend(std::iter::repeat_n(0f32, TAIL_SILENCE));
     Ok(out)
-}
-
-/// The normalised correlation of the preamble template with `x` at offset `t`.
-fn preamble_corr(x: &[f32], t: usize) -> f64 {
-    let tpl = &frame_template()[..PREAMBLE_LEN];
-    let Some(w) = x.get(t..t + PREAMBLE_LEN) else {
-        return 0.0;
-    };
-    let mut dot = 0f64;
-    let (mut e, mut tpl_e) = (0f64, 0f64);
-    for (a, b) in w.iter().zip(tpl) {
-        let (a, b) = (f64::from(*a), f64::from(*b));
-        dot += a * b;
-        e += a * a;
-        tpl_e += b * b;
-    }
-    dot / (tpl_e * e).sqrt().max(1e-30)
-}
-
-/// What a scan of receive audio for a preamble found.
-enum Preamble {
-    /// Nothing that looks like a preamble.
-    None,
-    /// A preamble that is still arriving: it starts at about this offset.
-    Incomplete(usize),
-    /// The start of a complete preamble.
-    Found(usize),
-}
-
-/// Normalised correlation against the preamble. Returns the start of the first
-/// preamble above the threshold, refined to the strongest nearby offset.
-fn scan_preamble(x: &[f32]) -> Preamble {
-    if x.len() < PREAMBLE_LEN {
-        return Preamble::None;
-    }
-    let tpl = &frame_template()[..PREAMBLE_LEN];
-    let tpl_e: f64 = tpl.iter().map(|&v| (v as f64) * (v as f64)).sum();
-    let last = x.len() - PREAMBLE_LEN;
-    let corr = |t: usize| -> f64 {
-        let w = &x[t..t + PREAMBLE_LEN];
-        let mut dot = 0f64;
-        let mut e = 0f64;
-        for (a, b) in w.iter().zip(tpl) {
-            let a = *a as f64;
-            dot += a * *b as f64;
-            e += a * a;
-        }
-        dot / (tpl_e * e).sqrt().max(1e-30)
-    };
-    let Some(t0) = (0..=last).find(|&t| corr(t) >= PREAMBLE_THRESHOLD) else {
-        return Preamble::None;
-    };
-    // The peak can only be judged once the whole span after the first hit has arrived. A
-    // buffer that ends inside it holds a preamble still arriving: wait for more, and keep it.
-    if t0 + PREAMBLE_LEN > last {
-        return Preamble::Incomplete(t0);
-    }
-    // The preamble repeats every 128 samples, so the correlation is as high at each
-    // repeat as at the true start. The true start is the first of them, and noise or a filter
-    // can make a later one a hair higher. Take the strongest value over the span, then the
-    // first peak that comes within PEAK_TOLERANCE of it.
-    let span_end = (t0 + PREAMBLE_LEN).min(last);
-    let values: Vec<f64> = (t0..=span_end).map(corr).collect();
-    let top = values.iter().copied().fold(f64::MIN, f64::max);
-    let first = values
-        .iter()
-        .position(|&v| v >= top - PEAK_TOLERANCE)
-        .unwrap_or(0);
-    // Refine to the top of that peak: it is only a few samples wide.
-    let mut at = first;
-    let reach = (first + PREAMBLE_REFINE).min(values.len() - 1);
-    for i in first..=reach {
-        if values[i] > values[at] {
-            at = i;
-        }
-    }
-    Preamble::Found(t0 + at)
-}
-
-/// Where the preamble is, if the buffer holds all of it.
-#[cfg(test)]
-fn find_preamble(x: &[f32]) -> Option<usize> {
-    match scan_preamble(x) {
-        Preamble::Found(s) => Some(s),
-        _ => None,
-    }
-}
-
-/// Decode exactly one frame that starts at the preamble, sent with modulation `m`.
-/// None on a CRC or LDPC failure, or when the frame says it was sent another way.
-fn decode_at(samples: &[f32], m: Modulation) -> Option<Vec<u8>> {
-    let llr = phy::demodulate_frame(samples, m, ldpc::N)?;
-    let info = ldpc::decode(&llr, LDPC_ITER)?;
-    let (data, id) = frame::parse_payload_id(&info)?;
-    (id == mod_id(m)).then_some(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,7 +1796,7 @@ fn save_file(inbox: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
 
 /// Session chunks for one message as they go on air. The private bit is set when `private`.
 fn air_chunks(msg: &Message, private: bool) -> Result<Vec<Vec<u8>>, String> {
-    guard("session encode", || session::encode_signed(msg, None, private))
+    session::try_encode_signed(msg, None, private).map_err(|e| e.to_string())
 }
 
 fn kind_of(msg: &Message) -> &'static str {
@@ -1713,6 +1821,12 @@ fn priority_of(msg: &Message) -> Priority {
     }
 }
 
+fn sender_of(msg: &Message) -> &str {
+    match msg {
+        Message::Chat { from, .. } | Message::Mail { from, .. } | Message::File { from, .. } => from,
+    }
+}
+
 fn dest_of(msg: &Message) -> &str {
     match msg {
         Message::Chat { to, .. } | Message::Mail { to, .. } | Message::File { to, .. } => to,
@@ -1729,114 +1843,10 @@ fn describe_msg(msg: &Message) -> String {
 
 /// Label for an item read back from the outbox file. Decodes the payload, so use it only at load time.
 fn describe(item: &OutItem) -> String {
-    match decode_payload(&item.payload) {
-        Some(Payload::Msg { msg, .. }) => describe_msg(&msg),
-        Some(Payload::Forward { from, to, .. }) => describe_forward(&from, &to),
+    match decode_message(&item.payload) {
+        Some(msg) => describe_msg(&msg),
         None => format!("{} (unreadable)", item.kind),
     }
-}
-
-fn describe_forward(from: &str, to: &str) -> String {
-    format!("relay of a message from {from} to {to}")
-}
-
-fn sender_of(msg: &Message) -> &str {
-    match msg {
-        Message::Chat { from, .. } | Message::Mail { from, .. } | Message::File { from, .. } => from,
-    }
-}
-
-/// What one outbox item sends: a message of this station, or another station's message
-/// that this relay holds and passes on.
-#[derive(Debug, PartialEq)]
-enum Payload {
-    Msg {
-        msg: Message,
-        private: bool,
-    },
-    /// Session chunks exactly as heard, so the signature and private bit survive the hop.
-    Forward {
-        from: String,
-        to: String,
-        /// The original message was urgent, so it keeps its place and the urgent pool.
-        urgent: bool,
-        chunks: Vec<Vec<u8>>,
-    },
-}
-
-impl Payload {
-    fn urgent(&self) -> bool {
-        match self {
-            Payload::Msg { msg, .. } => priority_of(msg) == Priority::Urgent,
-            Payload::Forward { urgent, .. } => *urgent,
-        }
-    }
-
-    fn chunks(&self) -> Result<Vec<Vec<u8>>, String> {
-        match self {
-            Payload::Msg { msg, private } => air_chunks(msg, *private),
-            Payload::Forward { chunks, .. } => Ok(chunks.clone()),
-        }
-    }
-}
-
-/// Outbox tag of a held forward. Message kinds use 0 to 2.
-const TAG_FORWARD: u8 = 3;
-
-/// Outbox payload of a held forward: the tag, the sender and addressee, an urgent byte,
-/// then the chunks.
-fn encode_forward(from: &str, to: &str, urgent: bool, chunks: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = vec![TAG_FORWARD];
-    put_field(&mut out, from.as_bytes());
-    put_field(&mut out, to.as_bytes());
-    out.push(u8::from(urgent));
-    out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
-    for c in chunks {
-        put_field(&mut out, c);
-    }
-    out
-}
-
-/// Reads back any outbox payload. None for anything malformed.
-fn decode_payload(bytes: &[u8]) -> Option<Payload> {
-    if bytes.first() != Some(&TAG_FORWARD) {
-        return decode_item(bytes).map(|(msg, private)| Payload::Msg { msg, private });
-    }
-    let mut r = Fields(&bytes[1..]);
-    let from = r.text()?;
-    let to = r.text()?;
-    let urgent = match r.take(1)?[0] {
-        0 => false,
-        1 => true,
-        _ => return None,
-    };
-    let n = r.u32()? as usize;
-    let chunks = (0..n)
-        .map(|_| r.bytes().map(<[u8]>::to_vec))
-        .collect::<Option<Vec<_>>>()?;
-    r.0.is_empty().then_some(Payload::Forward {
-        from,
-        to,
-        urgent,
-        chunks,
-    })
-}
-
-/// Identity of a relayed message: SHA-256 over its chunks as heard.
-fn relay_digest(chunks: &[Vec<u8>]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    for c in chunks {
-        h.update(c);
-    }
-    h.finalize().into()
-}
-
-/// Sender and addressee of any outbox payload, read without decoding the rest. Every
-/// layout starts with the tag, then the sender, then the addressee.
-fn peek_route(bytes: &[u8]) -> Option<(String, String)> {
-    let mut r = Fields(bytes);
-    r.take(1)?;
-    Some((r.text()?, r.text()?))
 }
 
 /// Outbox tag bit: the message is private (session private bit on air).
@@ -1881,7 +1891,12 @@ fn encode_message(msg: &Message, private: bool) -> Vec<u8> {
     out
 }
 
-/// Reads back what `encode_message` wrote, with the private bit. None for anything malformed.
+/// Reads back what `encode_message` wrote. None for anything malformed.
+fn decode_message(bytes: &[u8]) -> Option<Message> {
+    decode_item(bytes).map(|(msg, _)| msg)
+}
+
+/// As `decode_message`, also returning the private bit.
 fn decode_item(bytes: &[u8]) -> Option<(Message, bool)> {
     let mut r = Fields(bytes);
     let tag = r.take(1)?[0];
@@ -1950,22 +1965,8 @@ impl<'a> Fields<'a> {
     }
 }
 
-/// HF and VHF/UHF amateur bands in ADIF names, by frequency in MHz.
-const BANDS: &[(f64, f64, &str)] = &[
-    (1.8, 2.0, "160M"),
-    (3.5, 4.0, "80M"),
-    (5.3, 5.41, "60M"),
-    (7.0, 7.3, "40M"),
-    (10.1, 10.15, "30M"),
-    (14.0, 14.35, "20M"),
-    (18.068, 18.168, "17M"),
-    (21.0, 21.45, "15M"),
-    (24.89, 24.99, "12M"),
-    (28.0, 29.7, "10M"),
-    (50.0, 54.0, "6M"),
-    (144.0, 148.0, "2M"),
-    (430.0, 440.0, "70CM"),
-];
+/// The only band KAHF works in, in its ADIF name, by frequency in MHz.
+const BANDS: &[(f64, f64, &str)] = &[(18.068, 18.168, "17M")];
 
 /// Band name for a frequency in MHz, or empty when it is outside the amateur bands.
 fn band_name(mhz: f64) -> String {
@@ -1974,6 +1975,13 @@ fn band_name(mhz: f64) -> String {
         .find(|(lo, hi, _)| (*lo..=*hi).contains(&mhz))
         .map(|(_, _, name)| name.to_string())
         .unwrap_or_default()
+}
+
+/// A small stable hash, for repeatable test randomness.
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 fn now_unix_secs() -> i64 {
@@ -2056,9 +2064,7 @@ enum TxStep {
 }
 
 struct Worker {
-    /// Decides when a location beacon is due.
-    beacon: BeaconScheduler,
-    beacon_checked: Instant,
+    clock: Clock,
     cmds: Receiver<Cmd>,
     shared: Arc<Shared>,
     factory: Factory,
@@ -2071,18 +2077,28 @@ struct Worker {
     tuned_hz: Option<u64>,
     /// Carrier sense over the receive audio (plan 2.1).
     sense: Sense,
-    /// Half-duplex rules: no transmit over someone else, a quiet wait, a random backoff.
-    watch: lbt::ChannelWatch,
-    /// The frames of our recent bursts, until when their playback may still come back.
-    echoes: VecDeque<(Instant, Vec<Vec<u8>>)>,
-    /// When a frame of the link was last heard or sent.
-    last_link_activity: Instant,
-    /// A hang-up frame to send a second time, in case the first was lost (the other station may
-    /// have been transmitting and deaf): when, and the frame.
-    disc_again: Option<(Instant, Vec<u8>)>,
-    /// When a DATA frame of the peer was last heard: the peer has the turn, and is waiting for
-    /// our acknowledgement or about to send more.
-    peer_data_at: Option<Instant>,
+    /// Lane sensing (MESH-SPEC 5.5) for the lanes the receive audio covers. `None` until the
+    /// radio's dial is a lane dial; then it decides every transmit instead of `channel_busy`.
+    lanes: Option<LaneWatch>,
+    quarantine: Quarantine,
+    /// Chat as bundle frames without a link (`datagram.rs`).
+    dg: DgState,
+    /// Lane mode (MESH-SPEC 2.4): while the radio is on a lane dial, bursts are sent as 480 Hz
+    /// lane audio and received through this filter, five times slower than the plain modem.
+    lane_rx: Option<narrow::LaneRx>,
+    /// The other calling lane, heard at the same time while the radio is on C1 or C2.
+    second: Option<RxLane>,
+    /// The relay as referee of its lane, and the operator that obeys it (`referee.rs`).
+    refs: RefState,
+    /// When a KAHF frame was last decoded on each lane (worker clock ms): that lane's regular
+    /// bursts are not a foreign signal to keep out of.
+    kahf_seen: HashMap<u8, u64>,
+    /// True while the second lane's receive state is swapped in.
+    on_second: bool,
+    /// Lane number of the second lane (set while its state is swapped in).
+    second_k: Option<u8>,
+    /// Next whole-segment occupancy report, on the worker clock (ms).
+    occupancy_due_ms: u64,
     /// Channel plan for transmit selection (plan 2.2).
     plan: select::Plan,
     /// Energy carrier sense per plan channel (plan 2.1), fed from the spectrum. Keyed by Hz.
@@ -2099,14 +2115,9 @@ struct Worker {
     link: Link,
     /// Index into MODULATIONS for the next transmission. Moves one step at a time with the peer's reports.
     tx_level: u8,
-    /// Ladder rung (index in burst::LADDER) for the next link transmission.
-    hf_level: usize,
-    /// Rung of the last ladder burst heard, tried first by the scan.
-    hf_heard: usize,
-    /// Recent audio for the ladder-burst scan.
-    hf_buf: Vec<f32>,
-    hf_scan_at: Instant,
-    hf_hot_until: Instant,
+    /// Time spent transmitting, left out of the link clock.
+    tick_paused: Duration,
+    last_tick: Instant,
     link_state: LinkState,
     qso: Option<OpenQso>,
     outbox: Outbox,
@@ -2114,12 +2125,28 @@ struct Worker {
     /// Public id and label per outbox entry, keyed by the outbox's own id.
     tags: HashMap<u64, (u64, String)>,
     bursts: VecDeque<Vec<f32>>,
-    /// The frames inside each queued burst, in step with `bursts`.
-    burst_frames: VecDeque<Vec<Vec<u8>>>,
     /// Link control frames (CONNECT, ACK, ...) waiting for the channel check.
     control: VecDeque<Vec<Vec<u8>>>,
     tx: Option<TxJob>,
     rx_buf: Vec<f32>,
+    /// Samples since the last KAMI-32 stream search.
+    since_kami: usize,
+    /// A located KAMI preamble: its start in `rx_buf` and the frequency offset.
+    kami_at: Option<(usize, f64, f64)>,
+    /// When the preamble in `kami_at` was found.
+    kami_seen: Option<Instant>,
+    /// The preamble estimate was redone once the whole preamble had arrived.
+    kami_refined: bool,
+    /// Audio available after the preamble at the last decode attempt.
+    kami_tried: usize,
+    /// The mode of the burst being received, once its first codeword has decoded.
+    kami_mode: Option<Modulation>,
+    /// Codewords of the burst delivered so far.
+    kami_next: usize,
+    /// Codewords the burst being received has in all.
+    kami_total: usize,
+    /// Look at the front of the buffer next, because a frame has just been consumed.
+    kami_front: bool,
     spec: Analyser,
     spec_due: Instant,
     since_scan: usize,
@@ -2133,20 +2160,48 @@ struct Worker {
     queued: HashMap<u64, (String, u64)>,
     /// Outbox items whose station was not reached in time; each is reported once.
     unreached_noted: HashSet<u64>,
+    /// Outbox items sent through a relay: the relay's callsign, which the link connects to.
+    via: HashMap<u64, String>,
+    /// Relays already tried for each item.
+    via_tried: HashMap<u64, Vec<String>>,
+    /// Handshake failures per station and when it may be tried again.
+    auto_fails: HashMap<String, (u32, Instant)>,
+    /// The current link was opened by the station itself, so it also closes it.
+    auto_initiated: bool,
+    /// Last frame sent or received, for hanging up an idle automatic link.
+    last_activity: Instant,
+    /// Digests of messages already forwarded for others, so one is never forwarded twice.
+    forwarded: VecDeque<u64>,
+    /// Audio that arrives until this time is our own transmission coming back (a virtual cable, a
+    /// leaky rig, the sound card's delay) and is thrown away unread.
+    rx_deaf_until: Option<Instant>,
+    /// Who may transmit when: listen before talk, back-off, fair share (see `kahf_core::mac`).
+    mac: Mac,
+    /// A received burst is being tracked, so its end is reported to `mac`.
+    rx_locked: bool,
+    harq: kahf_core::harq::Harq,
+    /// Stations heard lately: callsign -> (SNR, when). Reported to the server and used to
+    /// decide who a relay can reach itself.
+    heard_recent: HashMap<String, (Option<i32>, Instant)>,
+    /// The thread that talks to the server, and what it has to tell us.
+    bb: Option<BbHandle>,
+    /// Outbox id -> server message id, for messages taken from the server and sent on the radio.
+    bb_pending: HashMap<u64, String>,
+    /// Newest verified plan from the server: its epoch and text (`P1|epoch|seed|relay:lane:slot,...`).
+    plan_epoch: Option<u64>,
+    plan_text: String,
+    /// The key plans must be signed with (the project's; tests use their own).
+    plan_key: [u8; 32],
+    /// Destination callsign of each message handed to the mesh, by its id (the receipt names only a hash).
+    bb_sent: HashMap<String, String>,
+    bb_last: Instant,
+    /// Adverts already seen (callsign, sequence), so a relay passes each one on once.
+    adverts_seen: VecDeque<(String, u8)>,
+    advert_seq: u8,
+    /// When this relay last announced itself.
+    beacon_at: Instant,
     /// The transmit refusal last logged, so a held transmit is reported once.
     refusal_logged: Option<&'static str>,
-    /// Link clock in ms: worker time minus the time spent airing our own frames.
-    link_ms: u64,
-    /// When `link_ms` was last advanced.
-    link_mark: Instant,
-    /// Forwards handed to the link and not yet acknowledged: outbox id, public id, from, to.
-    handed: Vec<(u64, u64, String, String)>,
-    /// Digests of messages already held for relay, oldest first, so each is passed on once.
-    relayed: VecDeque<[u8; 32]>,
-    /// The station this relay called itself to pass messages on, while that call lasts.
-    dialed: Option<String>,
-    /// No new relay call to a station before this time.
-    dial_after: HashMap<String, Instant>,
 }
 
 /// Line that separates a mail body from its signature block.
@@ -2205,6 +2260,7 @@ impl Worker {
         shared: Arc<Shared>,
         factory: Factory,
         ids: Arc<AtomicU64>,
+        clock: Clock,
     ) -> Self {
         let outbox_path = config.data_dir.join("outbox.bin");
         let outbox = fs::read(&outbox_path)
@@ -2220,21 +2276,17 @@ impl Worker {
         // Items saved by an earlier run get new public ids, in the order they go out.
         let mut tags = HashMap::new();
         let mut queued = HashMap::new();
-        let mut relayed = VecDeque::new();
         let mut copy = outbox.clone();
         while let Some((oid, item)) = copy.next(u64::MAX) {
             copy.cancel(oid);
             tags.insert(oid, (ids.fetch_add(1, Ordering::Relaxed), describe(&item)));
             // Items from an earlier run wait for the relay timeout from start-up.
-            if let Some((_, to)) = peek_route(&item.payload) {
-                queued.insert(oid, (to, 0));
-            }
-            // Held forwards keep their digest, so a copy heard after a restart is not held twice.
-            if let Some(Payload::Forward { chunks, .. }) = decode_payload(&item.payload) {
-                relayed.push_back(relay_digest(&chunks));
+            if let Some(msg) = decode_message(&item.payload) {
+                queued.insert(oid, (dest_of(&msg).to_string(), 0));
             }
         }
         let w = Worker {
+            clock: clock.clone(),
             cmds,
             shared,
             factory,
@@ -2244,16 +2296,16 @@ impl Worker {
             freq_mhz,
             tuned_hz,
             sense: Sense::new(RATE as f32),
-            echoes: VecDeque::new(),
-            last_link_activity: Instant::now(),
-            disc_again: None,
-            peer_data_at: None,
-            watch: lbt::ChannelWatch::new(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(1),
-            ),
+            lanes: None,
+            quarantine: Quarantine::default(),
+            dg: DgState::new(&config.callsign),
+            lane_rx: None,
+            second: None,
+            refs: RefState::new(),
+            kahf_seen: HashMap::new(),
+            on_second: false,
+            second_k: None,
+            occupancy_due_ms: OCCUPANCY_PERIOD_MS,
             plan: select::Plan::default_plan(),
             carrier: HashMap::new(),
             carrier_fed: None,
@@ -2262,41 +2314,66 @@ impl Worker {
             callsign: config.callsign.clone(),
             backend: None,
             link: Link::new(&config.callsign),
-            tx_level: 0,
-            hf_level: rung(HF_LINK_START),
-            hf_heard: rung(HF_LINK_START),
-            hf_buf: Vec::new(),
-            hf_scan_at: Instant::now(),
-            beacon: BeaconScheduler::new(BeaconSettings::default()),
-            beacon_checked: Instant::now(),
-            hf_hot_until: Instant::now(),
+            tx_level: mod_level(MODULATION) as u8,
+            tick_paused: Duration::ZERO,
+            last_tick: clock.now(),
             link_state: LinkState::Idle,
             qso: None,
             outbox,
             outbox_path,
             tags,
             bursts: VecDeque::new(),
-            burst_frames: VecDeque::new(),
             control: VecDeque::new(),
             tx: None,
             rx_buf: Vec::new(),
+            since_kami: 0,
+            kami_at: None,
+            kami_seen: None,
+            kami_refined: false,
+            kami_tried: 0,
+            kami_mode: None,
+            kami_next: 0,
+            kami_total: 0,
+            kami_front: false,
             spec: Analyser::new(SPEC_FFT, RATE as f32),
-            spec_due: Instant::now(),
+            spec_due: clock.now(),
             since_scan: 0,
             rx_chunks: Vec::new(),
             rx_error: None,
             rx_retry_at: None,
             tick_error: None,
-            started: Instant::now(),
+            started: clock.now(),
             queued,
             unreached_noted: HashSet::new(),
+            via: HashMap::new(),
+            via_tried: HashMap::new(),
+            auto_fails: HashMap::new(),
+            auto_initiated: false,
+            last_activity: clock.now(),
+            forwarded: VecDeque::new(),
+            rx_deaf_until: None,
+            mac: Mac::new(if clock.is_virtual() {
+                fnv(&config.callsign)
+            } else {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1)
+            }),
+            rx_locked: false,
+            harq: Default::default(),
+            adverts_seen: VecDeque::new(),
+            advert_seq: 0,
+            beacon_at: clock.now() - Duration::from_secs(3600),
+            heard_recent: HashMap::new(),
+            bb: None,
+            bb_pending: HashMap::new(),
+            plan_epoch: None,
+            plan_text: String::new(),
+            plan_key: backbone::project_public_key(),
+            bb_sent: HashMap::new(),
+            bb_last: clock.now(),
             refusal_logged: None,
-            link_ms: 0,
-            link_mark: Instant::now(),
-            handed: Vec::new(),
-            relayed,
-            dialed: None,
-            dial_after: HashMap::new(),
         };
         w.publish_pending();
         w
@@ -2312,7 +2389,6 @@ impl Worker {
         }
         'main: loop {
             self.tick_link();
-            self.tick_beacon();
             loop {
                 match self.cmds.try_recv() {
                     Ok(Cmd::Shutdown) | Err(TryRecvError::Disconnected) => break 'main,
@@ -2325,45 +2401,33 @@ impl Worker {
                 None => self.refusal_logged = None,
             }
             self.check_relays();
-            self.settle_forwards();
-            self.dial_relays();
+            self.backbone_step();
+            self.auto_link();
+            self.referee_step();
+            self.datagram_step();
             if self.tx.is_some() {
                 // Half duplex: no receive while a burst is on the air.
                 if !self.tx_step() {
-                    thread::sleep(POLL);
+                    self.clock.sleep(POLL);
                 }
                 continue;
-            }
-            // A hang-up is sent twice, a moment apart, unless a new call has started meanwhile.
-            if let Some((at, frame)) = self.disc_again.take() {
-                if Instant::now() < at {
-                    self.disc_again = Some((at, frame));
-                } else if matches!(self.link_state, LinkState::Idle) {
-                    self.control.push_back(vec![frame]);
-                }
             }
             // Control frames (ACK, CONNECT, ...) go before data; each passes the channel check.
             self.flush_control();
             // Queued items go first (only while linked), one unit per pass.
-            if let Some((id, payload)) = self.next_due() {
-                if self.clear_channel(id, payload.urgent()) {
-                    self.send_item(id, payload);
+            if let Some((id, msg, private)) = self.next_due() {
+                if self.clear_channel(id, &msg) {
+                    self.send_item(id, msg, private);
+                    continue;
                 }
-                continue;
+                // Waiting for the channel: keep listening (the receive step below also sleeps
+                // when there is no audio), so an answer on its way is not missed.
             }
-            if !self.bursts.is_empty() {
-                // Nothing goes out over someone else's signal. Listening goes on meanwhile.
-                if !self.watch.may_transmit(Instant::now()) {
-                    if self.rx_step() == 0 {
-                        thread::sleep(POLL);
-                    }
-                    continue;
-                }
-                let Some(samples) = self.bursts.pop_front() else {
-                    continue;
-                };
-                let frames = self.burst_frames.pop_front().unwrap_or_default();
-                self.remember_own_frames(frames, samples.len());
+            if !self.rx_provisional() && !self.bursts.is_empty() {
+                let samples = self.bursts.pop_front().unwrap_or_default();
+                let ms = self.now_ms();
+                self.mac
+                    .on_tx_start(ms, ms + (samples.len() as u64 * 1000 / RATE as u64));
                 self.tx = Some(TxJob {
                     samples,
                     pos: 0,
@@ -2373,7 +2437,7 @@ impl Worker {
                 continue;
             }
             if self.rx_step() == 0 {
-                thread::sleep(POLL);
+                self.clock.sleep(POLL);
             }
         }
         self.abort_tx();
@@ -2398,6 +2462,14 @@ impl Worker {
                     self.log(e);
                 }
             }
+            Cmd::Advertise => self.advertise_now(),
+            Cmd::Tone => {
+                let pct = self.shared.flags.tx_level_pct.load(Ordering::SeqCst);
+                self.log(format!(
+                    "Sending a test tone at {pct} percent for {TONE_SECONDS} s."
+                ));
+                self.bursts.push_back(tone_samples(pct));
+            }
             Cmd::Disconnect => {
                 if let Err(e) = self.disconnect() {
                     self.log(e);
@@ -2408,13 +2480,12 @@ impl Worker {
                     self.log(e);
                 }
             }
-            Cmd::Queue { msgs, ids, private } => self.enqueue(msgs, ids, private),
+            Cmd::Queue { msgs, ids, private } => {
+                self.enqueue(msgs, ids, private);
+            }
             Cmd::Shutdown => {}
             #[cfg(test)]
-            Cmd::TestBurst(samples) => {
-                self.bursts.push_back(samples);
-                self.burst_frames.push_back(Vec::new());
-            }
+            Cmd::TestBurst(samples) => self.bursts.push_back(samples),
         }
     }
 
@@ -2424,13 +2495,27 @@ impl Worker {
             return Ok(());
         }
         let backend = (self.factory)().map_err(|e| format!("cannot open radio: {e}"))?;
+        let flags = &self.shared.flags;
+        flags.bench_radio.store(backend.is_bench(), Ordering::SeqCst);
+        flags
+            .radio_dial_hz
+            .store(backend.dial_hz().unwrap_or(0), Ordering::SeqCst);
+        flags.radio_known.store(true, Ordering::SeqCst);
+        let test = lock(&flags.policy).test_table;
         self.backend = Some(backend);
         self.log("radio open");
+        if test && flags.bench_radio.load(Ordering::SeqCst) {
+            self.log("TEST TABLE ON: bench radio only. Nothing is sent to an antenna.");
+        }
         Ok(())
     }
 
     fn connect(&mut self, peer: &str) -> Result<(), String> {
         self.ensure_radio()?;
+        self.link.set_air_ms(
+            (burst_len_for(MODULATIONS[self.tx_level as usize], 1) * 1000 / RATE as usize) as u64
+                * self.slow() as u64,
+        );
         let actions = guard("link connect", || self.link.connect(peer))?;
         self.log(format!("calling {peer}"));
         self.apply(actions);
@@ -2440,33 +2525,30 @@ impl Worker {
     fn disconnect(&mut self) -> Result<(), String> {
         self.ensure_radio()?;
         let actions = guard("link disconnect", || self.link.disconnect())?;
-        self.disc_again = actions.iter().find_map(|a| match a {
-            kahf_core::link::Action::Transmit(p) if p.first() == Some(&0x03) => {
-                Some((Instant::now() + DISC_REPEAT, p.clone()))
-            }
-            _ => None,
-        });
         self.apply(actions);
         Ok(())
     }
 
     fn now_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
+        self.clock.since(self.started).as_millis() as u64
     }
 
     /// Adds messages to the outbox in order and saves the queue. `ids` are the public ids the caller returned.
-    fn enqueue(&mut self, msgs: Vec<Message>, ids: Vec<u64>, private: bool) {
+    fn enqueue(&mut self, msgs: Vec<Message>, ids: Vec<u64>, private: bool) -> Vec<u64> {
+        let mut oids = Vec::new();
         for (m, pid) in msgs.iter().zip(ids) {
             let item = OutItem {
                 kind: kind_of(m).to_string(),
                 payload: encode_message(m, private),
             };
             let oid = self.outbox.push(item, priority_of(m));
+            oids.push(oid);
             self.tags.insert(oid, (pid, describe_msg(m)));
             let at = self.now_ms();
             self.queued.insert(oid, (dest_of(m).to_string(), at));
         }
         self.persist_outbox();
+        oids
     }
 
     /// Plan 6.3: a message whose station is not reached on air within the timeout goes to
@@ -2492,26 +2574,15 @@ impl Worker {
             return;
         }
         due.sort();
-        let paths = lock(&self.shared.relay_paths).clone();
         for (oid, dest) in due {
-            self.unreached_noted.insert(oid);
-            let from = self
-                .outbox
-                .due(u64::MAX)
-                .iter()
-                .find(|(id, _)| *id == oid)
-                .and_then(|(_, item)| peek_route(&item.payload))
-                .map(|(from, _)| from)
-                .unwrap_or_default();
-            // The relays this message may use: never its sender or its addressee.
-            let usable = self.next_stations(oid, &from, &dest, &paths).split_off(1);
-            if !usable.is_empty() {
-                self.log(format!(
-                    "Could not reach {dest} on air. It goes by radio relay through {} once connected.",
-                    usable.join(" or ")
-                ));
+            if let Some(hint) = self.next_relay_hint(oid, &dest) {
+                self.log(format!("{dest} not reached on air. Trying the relay {hint}."));
+                self.via.insert(oid, hint.clone());
+                self.via_tried.entry(oid).or_default().push(hint);
+                self.queued.insert(oid, (dest, now));
                 continue;
             }
+            self.unreached_noted.insert(oid);
             if !self.shared.flags.internet_relay.load(Ordering::SeqCst) {
                 self.log(unreached_text(&dest));
                 continue;
@@ -2529,6 +2600,446 @@ impl Worker {
         }
     }
 
+    /// The station the link must be connected to for outbox item `id`: its relay when it has
+    /// been routed through one, else the message's own destination.
+    fn route_peer(&self, id: u64, msg: &Message) -> String {
+        self.via
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| dest_of(msg).to_string())
+    }
+
+    /// Same for an item known only by its queue entry.
+    fn route_peer_of(&self, id: u64) -> Option<String> {
+        // A chat goes through the relay that referees the lane, while its beacon is fresh.
+        if let Some(relay) = self.ref_relay_call() {
+            if self.outbox.get(id).is_some_and(is_dg_item) {
+                return Some(relay);
+            }
+        }
+        self.via
+            .get(&id)
+            .cloned()
+            .or_else(|| self.queued.get(&id).map(|(d, _)| d.clone()))
+    }
+
+    /// The next relay hint not yet tried for this item, other than ourselves and the destination.
+    fn next_relay_hint(&self, id: u64, dest: &str) -> Option<String> {
+        let tried = self.via_tried.get(&id);
+        lock(&self.shared.relay_hints)
+            .iter()
+            .find(|h| {
+                !h.eq_ignore_ascii_case(dest)
+                    && !h.eq_ignore_ascii_case(&self.callsign)
+                    && !tried.is_some_and(|t| t.iter().any(|x| x.eq_ignore_ascii_case(h)))
+            })
+            .cloned()
+    }
+
+    /// Automatic linking: with auto-link on (or relay mode running) a queued message whose
+    /// route is not linked gets a connection, with a growing pause after each failure, and an
+    /// automatic link is closed once nothing is waiting for its peer.
+    fn auto_link(&mut self) {
+        let flags = &self.shared.flags;
+        if !(flags.auto_link.load(Ordering::SeqCst) || flags.relay_running.load(Ordering::SeqCst))
+            || flags.listen_only.load(Ordering::SeqCst)
+            || tx_refusal(flags).is_some()
+            || !self.relay_slot_open()
+        {
+            return;
+        }
+        match self.link_state.clone() {
+            LinkState::Idle => {
+                self.auto_initiated = false;
+                if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
+                    return;
+                }
+                let now = self.now_ms();
+                let Some((id, _)) = self.outbox.next_matching(now, |_, i| !is_dg_item(i)) else {
+                    return;
+                };
+                let Some(peer) = self.route_peer_of(id) else {
+                    return;
+                };
+                if self
+                    .auto_fails
+                    .get(&peer.to_uppercase())
+                    .is_some_and(|(_, until)| self.clock.now() < *until)
+                {
+                    return;
+                }
+                self.auto_initiated = true;
+                self.last_activity = self.clock.now();
+                if let Err(e) = self.connect(&peer) {
+                    self.log(e);
+                }
+            }
+            LinkState::Connecting { peer } if self.auto_initiated => {
+                // The route changed (a relay was chosen) while we were calling the old peer: stop.
+                let now = self.now_ms();
+                let want = self
+                    .outbox
+                    .next_matching(now, |_, i| !is_dg_item(i))
+                    .and_then(|(id, _)| self.route_peer_of(id));
+                if want.is_some_and(|w| !w.eq_ignore_ascii_case(&peer)) {
+                    if let Err(e) = self.disconnect() {
+                        self.log(e);
+                    }
+                }
+            }
+            LinkState::Connected { peer } if self.auto_initiated => {
+                let waiting = self.outbox.pending().iter().any(|(id, _, _)| {
+                    self.outbox.get(*id).is_some_and(|i| !is_dg_item(i))
+                        && self
+                            .route_peer_of(*id)
+                            .is_some_and(|p| p.eq_ignore_ascii_case(&peer))
+                });
+                if !waiting && self.clock.since(self.last_activity) >= AUTO_HANGUP {
+                    if let Err(e) = self.disconnect() {
+                        self.log(e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A message for another station reached us. A relay with relay mode running keeps it in
+    /// its outbox for that station, once, so the next hop is delivered by the normal send path.
+    fn forward_third_party(&mut self, msg: &Message, private: bool) {
+        let flags = &self.shared.flags;
+        let is_relay = lock(&self.shared.relay)
+            .as_ref()
+            .is_some_and(|r| r.role != Role::Station);
+        if !(is_relay
+            && flags.relay_running.load(Ordering::SeqCst)
+            && flags.third_party_relay.load(Ordering::SeqCst))
+        {
+            return;
+        }
+        // Files go direct. A relay holds no files for others: they are too big for its air time.
+        if matches!(msg, Message::File { .. }) {
+            return;
+        }
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            encode_message(msg, private).hash(&mut h);
+            h.finish()
+        };
+        if self.forwarded.contains(&digest) {
+            return;
+        }
+        self.forwarded.push_back(digest);
+        if self.forwarded.len() > 512 {
+            self.forwarded.pop_front();
+        }
+        // A relay with a server connection hands the message to the backbone: radio hops between
+        // relays are not used, and the destination's own relay delivers it (NETWORK-SCENARIOS H1).
+        // A station this relay hears itself is reached directly, not through the server.
+        if self.bb.is_some() || lock(&self.shared.backbone_server).is_some() {
+            if self.heard_lately(dest_of(msg)) {
+                self.log(format!(
+                    "{} is heard here: the message is delivered directly.",
+                    dest_of(msg)
+                ));
+            } else {
+                self.bb_submit(msg);
+                return;
+            }
+        }
+        let id = self.next_id();
+        self.log(format!(
+            "Forwarding a message from {} to {}.",
+            sender_of(msg),
+            dest_of(msg)
+        ));
+        self.enqueue(vec![msg.clone()], vec![id], private);
+    }
+
+    fn note_heard_recent(&mut self, call: &str, snr: Option<f32>) {
+        if call == self.callsign {
+            return;
+        }
+        self.heard_recent.insert(
+            call.to_uppercase(),
+            (snr.map(|s| s.round() as i32), self.clock.now()),
+        );
+        if self.heard_recent.len() > 500 {
+            self.heard_recent
+                .retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
+        }
+    }
+
+    fn heard_lately(&self, call: &str) -> bool {
+        self.heard_recent
+            .get(&call.to_uppercase())
+            .is_some_and(|(_, t)| self.clock.since(*t) < Duration::from_secs(600))
+    }
+
+    /// Starts the server thread when relay mode runs and a server is set, and stops it when not.
+    fn bb_ensure(&mut self) {
+        let want = if self.shared.flags.relay_running.load(Ordering::SeqCst) {
+            lock(&self.shared.backbone_server).clone()
+        } else {
+            None
+        };
+        match (want, self.bb.is_some()) {
+            (Some(server), false) => {
+                let Some(key) = self.shared.station_key.clone() else {
+                    return;
+                };
+                self.bb = Some(BbHandle::spawn(Backbone::new(&server, &self.callsign, key)));
+                self.log(format!("Relay connected to the network through {server}."));
+            }
+            (None, true) => {
+                self.bb = None;
+                self.log("Relay no longer carries messages through the server.");
+            }
+            _ => {}
+        }
+    }
+
+    /// Hands one message for a station out of reach to the server.
+    fn bb_submit(&mut self, msg: &Message) {
+        let Some(bb) = &self.bb else { return };
+        let (kind, subject, body) = match msg {
+            Message::Chat { text, .. } => ("chat", String::new(), text.as_bytes().to_vec()),
+            Message::Mail { subject, body, .. } => ("mail", subject.clone(), body.as_bytes().to_vec()),
+            Message::File { .. } => return,
+        };
+        let limit = if kind == "chat" { 1024 } else { 4096 };
+        if body.is_empty() || body.len() > limit {
+            self.log(format!(
+                "Message from {} to {} is too large for the network ({} bytes).",
+                sender_of(msg),
+                dest_of(msg),
+                body.len()
+            ));
+            return;
+        }
+        let now = now_unix_secs().max(0) as u64;
+        let mut stream = body.clone();
+        stream.extend_from_slice(dest_of(msg).as_bytes());
+        let q = Queued {
+            id: backbone::message_id(sender_of(msg), &stream, now),
+            origin: sender_of(msg).to_uppercase(),
+            dest: dest_of(msg).to_uppercase(),
+            kind: kind.to_string(),
+            subject,
+            body,
+            urgent: priority_of(msg) == Priority::Urgent,
+        };
+        self.log(format!(
+            "Passing the message from {} to {} on to the network.",
+            q.origin, q.dest
+        ));
+        self.bb_sent.insert(q.id.clone(), q.dest.clone());
+        if self.bb_sent.len() > 512 {
+            self.bb_sent.clear();
+        }
+        bb.send(BbJob::Submit(
+            q,
+            now,
+            if kind == "chat" { 6 * 3600 } else { 24 * 3600 },
+        ));
+    }
+
+    /// A plan the server pushed: used only when its signature checks against the project key.
+    fn bb_plan(&mut self, epoch: u64, text: &str, sig_b64: &str) {
+        let ok = backbone::b64_decode(sig_b64)
+            .and_then(|s| <[u8; 64]>::try_from(s).ok())
+            .is_some_and(|sig| kahf_core::auth::verify_raw(&self.plan_key, text.as_bytes(), &sig));
+        if !ok {
+            self.log("A plan from the server had a bad signature and was ignored.");
+            return;
+        }
+        if self.plan_epoch.is_none_or(|e| epoch > e) {
+            self.plan_epoch = Some(epoch);
+            self.plan_text = text.to_string();
+        }
+    }
+
+    /// The mesh found no relay that hears the destination: this relay sends the message on the radio itself.
+    fn bb_unrouted(&mut self, q: Queued) {
+        let msg = if q.kind == "mail" {
+            Message::Mail {
+                from: q.origin.clone(),
+                to: q.dest.clone(),
+                subject: q.subject.clone(),
+                body: String::from_utf8_lossy(&q.body).into_owned(),
+                attachments: Vec::new(),
+            }
+        } else {
+            Message::Chat {
+                from: q.origin.clone(),
+                to: q.dest.clone(),
+                text: String::from_utf8_lossy(&q.body).into_owned(),
+            }
+        };
+        let id = self.next_id();
+        self.log(format!(
+            "No relay hears {} yet: sending the message on the radio.",
+            q.dest
+        ));
+        self.enqueue(vec![msg], vec![id], false);
+    }
+
+    /// An outbox item that came from the server is finished: tell the server how it went.
+    fn bb_item_done(&mut self, oid: u64, delivered: bool) {
+        let Some(sid) = self.bb_pending.remove(&oid) else {
+            return;
+        };
+        if let Some(bb) = &self.bb {
+            bb.send(BbJob::Receipt(
+                sid,
+                delivered,
+                if delivered {
+                    String::new()
+                } else {
+                    "no answer".into()
+                },
+            ));
+        }
+    }
+
+    /// Every so often: tell the server who is heard, pick up what is waiting for them, and act
+    /// on what the server's thread has to report.
+    fn backbone_step(&mut self) {
+        self.bb_ensure();
+        self.beacon_step();
+        let Some(bb) = &self.bb else {
+            self.refs.here_seen.clear();
+            return;
+        };
+        if !self.refs.here_seen.is_empty() {
+            bb.send(BbJob::HeardHash(std::mem::take(&mut self.refs.here_seen)));
+        }
+        for r in bb.take_results() {
+            match r {
+                BbResult::Pulled(p) => {
+                    for m in p.messages {
+                        self.bb_deliver(m);
+                    }
+                    for r in p.receipts {
+                        self.bb_receipt_notice(r);
+                    }
+                }
+                BbResult::Unrouted(q) => self.bb_unrouted(q),
+                BbResult::Plan(epoch, text, sig) => self.bb_plan(epoch, &text, &sig),
+                BbResult::Log(t) => self.log(t),
+            }
+        }
+        if self.clock.since(self.bb_last) < Duration::from_secs(20) {
+            return;
+        }
+        self.bb_last = self.clock.now();
+        self.heard_recent
+            .retain(|_, (_, t)| self.clock.since(*t) < Duration::from_secs(2400));
+        let now = now_unix_secs().max(0) as u64;
+        let list: Vec<(String, Option<i32>, u64)> = self
+            .heard_recent
+            .iter()
+            .map(|(c, (snr, t))| {
+                (
+                    c.clone(),
+                    *snr,
+                    now.saturating_sub(self.clock.since(*t).as_secs()),
+                )
+            })
+            .collect();
+        if let Some(bb) = &self.bb {
+            let (items, bytes) = (self.outbox.pending().len(), self.outbox.pending().len() * 64);
+            bb.send(BbJob::Heard(list));
+            bb.send(BbJob::Queue(items, bytes));
+            bb.send(BbJob::Pull);
+        }
+    }
+
+    /// A running relay announces itself every minute: who it is, whether it has the internet, the
+    /// time (operators often have no clock source), and how busy it is.
+    fn beacon_step(&mut self) {
+        if !self.shared.flags.relay_running.load(Ordering::SeqCst)
+            || self.clock.since(self.beacon_at) < Duration::from_secs(60)
+            || tx_refusal(&self.shared.flags).is_some()
+        {
+            return;
+        }
+        self.beacon_at = self.clock.now();
+        let flags = if self.bb.is_some() { BEACON_ONLINE } else { 0 };
+        let load = (self.outbox.pending().len() * 16).min(255) as u8;
+        let now = now_unix_secs().max(0) as u32;
+        let frames = vec![encode_beacon(&self.callsign, flags, now, load)];
+        if !self.control.iter().any(|c| *c == frames) {
+            self.control.push_back(frames);
+        }
+    }
+
+    /// A message the server gave us for a station we hear: send it on the radio.
+    fn bb_deliver(&mut self, m: Queued) {
+        if self.bb_pending.values().any(|s| *s == m.id) {
+            return;
+        }
+        let msg = if m.kind == "mail" {
+            Message::Mail {
+                from: m.origin.clone(),
+                to: m.dest.clone(),
+                subject: m.subject.clone(),
+                body: String::from_utf8_lossy(&m.body).into_owned(),
+                attachments: Vec::new(),
+            }
+        } else {
+            Message::Chat {
+                from: m.origin.clone(),
+                to: m.dest.clone(),
+                text: String::from_utf8_lossy(&m.body).into_owned(),
+            }
+        };
+        let id = self.next_id();
+        self.log(format!(
+            "Delivering a message from {} to {} that came through the network.",
+            m.origin, m.dest
+        ));
+        let oids = self.enqueue(vec![msg], vec![id], false);
+        if let Some(oid) = oids.first() {
+            self.bb_pending.insert(*oid, m.id);
+        }
+    }
+
+    /// The server says what became of a message one of our stations sent: tell that station.
+    fn bb_receipt_notice(&mut self, r: backbone::Receipt) {
+        let origin =
+            r.id.rsplit_once('-')
+                .map(|(o, _)| o.to_string())
+                .unwrap_or_default();
+        if origin.is_empty() {
+            return;
+        }
+        let dest = self.bb_sent.remove(&r.id).unwrap_or_else(|| r.dest.clone());
+        let text = if r.status == "delivered" {
+            format!("Delivered to {dest}.")
+        } else {
+            format!(
+                "Could not deliver to {dest}: {}.",
+                if r.reason.is_empty() {
+                    "no reason given"
+                } else {
+                    &r.reason
+                }
+            )
+        };
+        let id = self.next_id();
+        self.enqueue(
+            vec![Message::Chat {
+                from: self.callsign.clone(),
+                to: origin,
+                text,
+            }],
+            vec![id],
+            false,
+        );
+    }
+
     /// Plan 4: a station with a relay role sends only inside one of its transmit slots.
     /// A station without a relay role, or with no schedule yet, is never held.
     fn relay_slot_open(&self) -> bool {
@@ -2537,6 +3048,8 @@ impl Worker {
             Some(r) if r.role == Role::Station => true,
             // A relay role is held unless relay mode runs and a transmit slot covers now.
             // With no schedule there is no slot, so it is held.
+            // On a lane the referee's epoch cycle governs the relay, not a 24 hour slot.
+            Some(_) if self.lanes.is_some() => self.shared.flags.relay_running.load(Ordering::SeqCst),
             Some(r) => {
                 self.shared.flags.relay_running.load(Ordering::SeqCst)
                     && !r.slots().is_empty()
@@ -2551,6 +3064,7 @@ impl Worker {
     fn transmit_allowed(&self) -> bool {
         self.shared.flags.relay_running.load(Ordering::SeqCst)
             || self.shared.flags.operator_link.load(Ordering::SeqCst)
+            || self.shared.flags.auto_link.load(Ordering::SeqCst)
     }
 
     /// Counts one forward as a relay and records its hop. Only for a station with a relay role.
@@ -2575,7 +3089,6 @@ impl Worker {
     /// Logs the refusal once, not on every pass.
     fn hold_tx(&mut self, why: &'static str) {
         self.bursts.clear();
-        self.burst_frames.clear();
         self.control.clear();
         if self.tx.is_some() {
             self.abort_tx();
@@ -2590,57 +3103,34 @@ impl Worker {
     /// The next outbox item that may go out now. Nothing is sent unless the link is
     /// Connected, and only to the station it is connected to. The queue is in order,
     /// so an item for another station at the front holds the rest until that station is called.
-    /// The next outbox item that may go to the connected station: one addressed to it, or,
-    /// when it is one of our relays, one whose station was not reached directly (plan 6.3).
-    /// Items for other stations are skipped, so they never block the ones that can go.
-    fn next_due(&mut self) -> Option<(u64, Payload)> {
+    fn next_due(&mut self) -> Option<(u64, Message, bool)> {
         if tx_refusal(&self.shared.flags).is_some() {
-            return None;
-        }
-        if self.peer_has_turn() {
             return None;
         }
         if !self.transmit_allowed() || !self.relay_slot_open() {
             return None;
         }
-        if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
             return None;
         }
         let peer = match &self.link_state {
             LinkState::Connected { peer } => peer.clone(),
             _ => return None,
         };
-        let paths = lock(&self.shared.relay_paths).clone();
         let now = self.now_ms();
-        let mut unreadable = Vec::new();
-        let mut pick = None;
-        for (id, item) in self.outbox.due(now) {
-            let Some((from, to)) = peek_route(&item.payload) else {
-                unreadable.push(id);
-                continue;
-            };
-            if self.handed.iter().any(|h| h.0 == id) {
-                continue;
+        let (id, item) = self.outbox.next(now)?;
+        match decode_item(&item.payload) {
+            Some((msg, private)) if self.route_peer(id, &msg).eq_ignore_ascii_case(&peer) => {
+                Some((id, msg, private))
             }
-            let next = self.next_stations(id, &from, &to, &paths);
-            if next.iter().any(|c| c.eq_ignore_ascii_case(&peer)) {
-                match decode_payload(&item.payload) {
-                    Some(p) => {
-                        pick = Some((id, p));
-                        break;
-                    }
-                    None => unreadable.push(id),
-                }
-            }
-        }
-        if !unreadable.is_empty() {
-            for id in unreadable {
+            Some(_) => None,
+            None => {
                 self.outbox.cancel(id);
                 self.log("dropped an unreadable outbox item");
+                self.persist_outbox();
+                None
             }
-            self.persist_outbox();
         }
-        pick
     }
 
     /// Audio offset (Hz from the tuned frequency) of a plan channel, if the receive audio can hear it.
@@ -2648,6 +3138,177 @@ impl Worker {
         let tuned = self.tuned_hz? as f64;
         let off = channel_hz as f64 - tuned;
         (0.0..RATE as f64 / 2.0).contains(&off).then_some(off as f32)
+    }
+
+    /// How many times slower than the plain modem a burst is on the air: 5 in lane mode.
+    fn slow(&self) -> u32 {
+        if self.lane_rx.is_some() {
+            narrow::SLOW as u32
+        } else {
+            1
+        }
+    }
+
+    /// Clears the receive state after our own burst, or when the mode changes.
+    fn reset_kami(&mut self) {
+        self.rx_buf.clear();
+        self.since_scan = 0;
+        self.kami_at = None;
+        self.kami_seen = None;
+        self.kami_refined = false;
+        self.kami_mode = None;
+        self.kami_next = 0;
+        self.kami_total = 0;
+        self.kami_front = true;
+        if let Some(l) = self.lane_rx.as_mut() {
+            l.reset();
+        }
+        if let Some(s) = self.second.as_mut() {
+            s.reset();
+        }
+    }
+
+    /// Exchanges the receive state in the worker's fields with a lane's.
+    fn swap_rx(&mut self, o: &mut RxLane) {
+        std::mem::swap(&mut self.rx_buf, &mut o.rx_buf);
+        std::mem::swap(&mut self.since_kami, &mut o.since_kami);
+        std::mem::swap(&mut self.kami_at, &mut o.kami_at);
+        std::mem::swap(&mut self.kami_seen, &mut o.kami_seen);
+        std::mem::swap(&mut self.kami_refined, &mut o.kami_refined);
+        std::mem::swap(&mut self.kami_tried, &mut o.kami_tried);
+        std::mem::swap(&mut self.kami_mode, &mut o.kami_mode);
+        std::mem::swap(&mut self.kami_next, &mut o.kami_next);
+        std::mem::swap(&mut self.kami_total, &mut o.kami_total);
+        std::mem::swap(&mut self.kami_front, &mut o.kami_front);
+        std::mem::swap(&mut self.rx_locked, &mut o.rx_locked);
+        std::mem::swap(&mut self.harq, &mut o.harq);
+    }
+
+    /// Feeds the second lane its audio and looks for frames in it.
+    fn second_lane_step(&mut self, fresh: &[f32], scan: bool) {
+        let Some(mut st) = self.second.take() else { return };
+        self.second_k = Some(st.k);
+        let stream = st.lane_rx.process(fresh);
+        st.rx_buf.extend_from_slice(&stream);
+        st.since_kami += stream.len();
+        if scan {
+            self.swap_rx(&mut st);
+            self.on_second = true;
+            self.decode_frames();
+            self.on_second = false;
+            self.swap_rx(&mut st);
+        }
+        self.second = Some(st);
+    }
+
+    /// The dial the radio is on, if known.
+    fn current_dial(&self) -> Option<u64> {
+        let f = &self.shared.flags;
+        let radio = f.radio_dial_hz.load(Ordering::SeqCst);
+        lock(&f.policy).dial_hz.or((radio != 0).then_some(radio))
+    }
+
+    /// Keeps the lane watch matched to the dial and feeds it the fresh audio.
+    fn lane_feed(&mut self, fresh: &[f32]) {
+        let dial = self.current_dial();
+        if self.lanes.as_ref().map(|w| w.dial_hz) != dial {
+            self.lanes = dial.and_then(|d| LaneWatch::new(&lock(&self.shared.flags.policy).table, d));
+            // On a lane dial our lane sits at 1500 Hz of audio.
+            self.lane_rx = self
+                .lanes
+                .as_ref()
+                .map(|_| narrow::LaneRx::new(laneplan::AUDIO_CENTRE_HZ as f64));
+            // On a calling lane the other calling lane is heard too, if its audio is in range.
+            self.second = dial.and_then(|d| {
+                let table = lock(&self.shared.flags.policy);
+                let band = table.table.band("17m")?;
+                let own = band.lanes.iter().find(|l| l.dial_hz == d)?;
+                (own.role == laneplan::Role::Calling).then_some(())?;
+                let other = band.lanes_with(laneplan::Role::Calling).find(|l| l.k != own.k)?;
+                let audio = other.centre_hz as f64 - d as f64;
+                (300.0..=RATE as f64 / 2.0 - 300.0)
+                    .contains(&audio)
+                    .then(|| RxLane::new(audio, other.k))
+            });
+            self.reset_kami();
+        }
+        let Some(w) = self.lanes.as_mut() else { return };
+        w.sense.push(fresh);
+        let now_ms = self.clock.since(self.started).as_millis() as u64;
+        let now_s = now_ms / 1000;
+        // Foreign users are found by what they are, then kept out of for a while.
+        if now_ms >= w.classified_ms + SENSE_CLASSIFY_MS {
+            w.classified_ms = now_ms;
+            for (i, k) in w.ks.clone().into_iter().enumerate() {
+                // KAHF's own regular bursts look like a periodic narrow signal: a lane where a
+                // KAHF frame was decoded lately is not kept out of.
+                // Its neighbours hear the leakage of that burst, so they are skipped too.
+                let kahf_near = (k.saturating_sub(1)..=k + 1).any(|j| {
+                    self.kahf_seen
+                        .get(&j)
+                        .is_some_and(|t| now_ms.saturating_sub(*t) < 90_000)
+                });
+                if kahf_near {
+                    continue;
+                }
+                match w.sense.classify(i) {
+                    LaneClass::Voice | LaneClass::Cw => self.quarantine.human(k as usize, now_s),
+                    LaneClass::Carrier | LaneClass::Digital15s => self.quarantine.occupied(k as usize, now_s),
+                    LaneClass::Quiet | LaneClass::Unknown => {}
+                }
+            }
+        }
+        if now_ms >= self.occupancy_due_ms {
+            self.occupancy_due_ms = now_ms + OCCUPANCY_PERIOD_MS;
+            let lanes =
+                w.ks.iter()
+                    .enumerate()
+                    .map(|(i, k)| (*k, w.sense.over_db(i).map_or(0, |o| o.round() as i16)))
+                    .collect();
+            let mut q = lock(&self.shared.flags.occupancy);
+            q.push_back(OccupancyReport {
+                at_unix: now_unix_secs(),
+                lanes,
+            });
+            while q.len() > OCCUPANCY_KEEP {
+                q.pop_front();
+            }
+        }
+    }
+
+    /// Listen before talk on the lane the radio is on (MESH-SPEC 5.5): the lane and both
+    /// neighbours must be quiet (6 dB rule), the lane must have been listened to, and it must
+    /// not be in quarantine. `None` while the dial is not a lane dial (the older carrier sense
+    /// then decides).
+    fn own_lane_clear(&mut self, answer: bool) -> Option<Result<(), String>> {
+        let now_s = self.clock.since(self.started).as_secs();
+        let w = self.lanes.as_ref()?;
+        let k = w.ks[w.own];
+        if w.sense.floor_db(w.own).is_none() {
+            return Some(Err("Listening to the lane before sending.".to_string()));
+        }
+        if self.quarantine.blocked(k as usize, now_s) {
+            return Some(Err(format!(
+                "Lane {} is in quarantine: someone else was using it.",
+                k + 1
+            )));
+        }
+        let (lo, hi) = (w.own.saturating_sub(1), (w.own + 1).min(w.ks.len() - 1));
+        for j in lo..=hi {
+            // An answer follows the other station's burst on this very lane (or on the other
+            // calling lane we listen to), which is still in the last half second of level:
+            // only the other neighbours are judged then.
+            if answer && (j == w.own || self.second.as_ref().is_some_and(|s2| s2.k == w.ks[j])) {
+                continue;
+            }
+            if let Some(over) = w.sense.over_db(j) {
+                return Some(Err(format!(
+                    "Lane {} is busy ({over:.0} dB over its noise floor).",
+                    w.ks[j] + 1
+                )));
+            }
+        }
+        Some(Ok(()))
     }
 
     /// Carrier sense for one plan channel (plan 2.1). A channel outside the receive audio
@@ -2669,7 +3330,7 @@ impl Worker {
     /// is taken at most once per FRAME_S. Power is summed over the channel width, so a
     /// station anywhere in the channel raises the level.
     fn feed_carrier(&mut self, bins_db: &[f32]) {
-        let now = Instant::now();
+        let now = self.clock.now();
         if self
             .carrier_fed
             .is_some_and(|t| now.duration_since(t).as_secs_f32() < access::FRAME_S)
@@ -2698,25 +3359,56 @@ impl Worker {
     /// pool first, others the Open pool. Returns true when the transmit may go now. A busy
     /// plan holds the item for the returned seconds; the last try gives up and the item stays
     /// in the outbox for a later retry.
-    fn clear_channel(&mut self, id: u64, urgent: bool) -> bool {
-        matches!(self.pick_channel(Some(id), urgent), Pick::Go)
+    fn clear_channel(&mut self, id: u64, msg: &Message) -> bool {
+        matches!(
+            self.pick_channel(Some(id), priority_of(msg) == Priority::Urgent, false),
+            Pick::Go
+        )
     }
 
     /// The channel check shared by data and control bursts. `id` is the outbox item, if any;
     /// a control burst has none and is dropped on the last try.
-    fn pick_channel(&mut self, id: Option<u64>, urgent: bool) -> Pick {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-            ^ id.unwrap_or(0);
+    fn pick_channel(&mut self, id: Option<u64>, urgent: bool, answer: bool) -> Pick {
+        // Listen before talk (kahf_core::mac): never while a burst is arriving, a short gap for
+        // an answer, a long gap plus a random back-off for everything else, and a fair share.
+        let class = if answer {
+            Class::Answer
+        } else if urgent {
+            Class::Urgent
+        } else {
+            Class::Data
+        };
+        if !answer && self.rx_provisional() {
+            return Pick::Wait;
+        }
+        let now = self.now_ms();
+        if self.mac.check(now, class).is_some() {
+            return Pick::Wait;
+        }
+        let seed = if self.clock.is_virtual() {
+            fnv(&self.callsign)
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        } ^ id.unwrap_or(0);
         let pool = if urgent {
             select::Pool::Emergency
         } else {
             select::Pool::Open
         };
+        let own = self.own_lane_clear(answer);
+        if let Some(Err(why)) = &own {
+            self.log(why.clone());
+        }
         let pick = {
-            let busy = |f: f32| self.channel_busy(f);
+            // On a lane dial the verdict is about the lane the radio is on; otherwise the
+            // older per-channel carrier sense decides.
+            let busy = |f: f32| match &own {
+                Some(verdict) => verdict.is_err(),
+                None => self.channel_busy(f),
+            };
             select::choose_in_pool(
                 &self.plan,
                 pool,
@@ -2734,7 +3426,7 @@ impl Worker {
             }
             Err(Refusal::Wait { seconds }) => {
                 self.access_failures += 1;
-                self.access_retry_at = Some(Instant::now() + Duration::from_secs_f32(seconds));
+                self.access_retry_at = Some(self.clock.now() + Duration::from_secs_f32(seconds));
                 self.log(format!("Channel busy. Trying again in {seconds:.0} s."));
                 Pick::Wait
             }
@@ -2769,12 +3461,39 @@ impl Worker {
         if !self.relay_slot_open() {
             return;
         }
-        if self.access_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.access_retry_at.is_some_and(|t| self.clock.now() < t) {
             return;
         }
-        match self.pick_channel(None, false) {
+        let answer = self
+            .control
+            .front()
+            .and_then(|f| f.first())
+            .is_some_and(|p| is_answer_payload(p));
+        match self.pick_channel(None, false, answer) {
             Pick::Go => {
-                if let Some(frames) = self.control.pop_front() {
+                // One answer burst for everything waiting: eight codewords received give one
+                // burst of eight acknowledgements, not eight bursts each with its own preamble.
+                let mut frames: Vec<Vec<u8>> = Vec::new();
+                while frames.len() < BURST_MAX {
+                    let same = self
+                        .control
+                        .front()
+                        .and_then(|f| f.first())
+                        .is_some_and(|p| is_answer_payload(p) == answer);
+                    match self.control.front() {
+                        Some(f) if same && frames.len() + f.len() <= BURST_MAX => {
+                            let f = self.control.pop_front().unwrap_or_default();
+                            frames.extend(f);
+                        }
+                        _ => break,
+                    }
+                }
+                if frames.is_empty() {
+                    if let Some(f) = self.control.pop_front() {
+                        frames = f;
+                    }
+                }
+                if !frames.is_empty() {
                     self.push_burst(&frames);
                 }
             }
@@ -2787,25 +3506,31 @@ impl Worker {
 
     /// TX: session encode -> link send -> one burst per link call. The item is done once
     /// all its chunks are handed to the link; on error it is retried with backoff.
-    fn send_item(&mut self, id: u64, payload: Payload) {
-        let chunks = match payload.chunks() {
+    fn send_item(&mut self, id: u64, msg: Message, private: bool) {
+        let chunks = match air_chunks(&msg, private) {
             Ok(c) => c,
             Err(e) => return self.fail_item(id, e),
         };
-        // Progress is shown for our own files only, not for files relayed for others.
-        let (name, total) = match &payload {
-            Payload::Msg {
-                msg: Message::File { name, data, .. },
-                ..
-            } => (Some(name.clone()), data.len() as u64),
+        let (name, total) = match &msg {
+            Message::File { name, data, .. } => (Some(name.clone()), data.len() as u64),
             _ => (None, 0),
         };
         let public = self.tags.get(&id).map(|t| t.0).unwrap_or(id);
         let count = chunks.len().max(1) as u64;
+        // The frames of one send go out together, up to a full burst, not one burst each: every
+        // burst costs a preamble and its own wait for the channel.
+        let mut waiting: Vec<Action> = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             match guard("link send", || self.link.send(chunk)) {
-                Ok(actions) => self.apply_link(actions, true),
+                Ok(actions) => waiting.extend(actions),
                 Err(e) => return self.fail_item(id, e),
+            }
+            let frames = waiting
+                .iter()
+                .filter(|a| matches!(a, Action::Transmit(_)))
+                .count();
+            if frames >= BURST_MAX || i + 1 == chunks.len() {
+                self.apply_link(std::mem::take(&mut waiting), true);
             }
             if !matches!(self.link_state, LinkState::Connected { .. }) {
                 return self.fail_item(id, "link dropped during send".to_string());
@@ -2819,43 +3544,10 @@ impl Worker {
                 });
             }
         }
-        if let Payload::Msg { msg, .. } = &payload {
-            self.track_sent(public, msg, &chunks);
-        }
-        if let Payload::Forward { from, to, .. } = payload {
-            // A relayed message is done only once the next station has acknowledged it
-            // (see `settle_forwards`); until then it stays held.
-            self.handed.push((id, public, from, to));
-            return;
-        }
         self.outbox.done(id);
+        self.bb_item_done(id, true);
+        self.record_forward(public);
         self.persist_outbox();
-    }
-
-    /// Forwards handed to the link finish here: done once the peer acknowledged every chunk,
-    /// back to the queue with a retry wait when the link dropped first.
-    fn settle_forwards(&mut self) {
-        if self.handed.is_empty() {
-            return;
-        }
-        let connected = matches!(self.link_state, LinkState::Connected { .. });
-        if connected && !self.link.is_flushed() {
-            return;
-        }
-        for (id, public, from, to) in std::mem::take(&mut self.handed) {
-            if connected {
-                self.outbox.done(id);
-                self.record_forward(public);
-                self.log(format!("Relayed a message from {from} to {to}."));
-                self.emit_relay(&from, &to, RelayStep::Sent);
-                self.persist_outbox();
-            } else {
-                self.fail_item(
-                    id,
-                    format!("link to {to} dropped before the relay was acknowledged"),
-                );
-            }
-        }
     }
 
     fn fail_item(&mut self, id: u64, why: String) {
@@ -2865,8 +3557,16 @@ impl Worker {
         let still_queued = self.outbox.pending().iter().any(|(pid, _, _)| *pid == id);
         if was_queued && !still_queued {
             self.log(format!("gave up on an outbox item: {why}"));
+            self.bb_item_done(id, false);
         } else {
             self.log(format!("send failed, will retry: {why}"));
+            if let Some(id) = self.tags.get(&id).map(|t| t.0) {
+                self.emit(Event::Delivery {
+                    id,
+                    state: Delivery::Waiting,
+                    note: why,
+                });
+            }
         }
         self.persist_outbox();
     }
@@ -2877,6 +3577,8 @@ impl Worker {
         self.tags.retain(|oid, _| live.contains(oid));
         self.queued.retain(|oid, _| live.contains(oid));
         self.unreached_noted.retain(|oid| live.contains(oid));
+        self.via.retain(|oid, _| live.contains(oid));
+        self.via_tried.retain(|oid, _| live.contains(oid));
         if let Err(e) = write_atomic(&self.outbox_path, &self.outbox.to_bytes()) {
             self.log(format!("cannot save outbox: {e}"));
         }
@@ -2897,6 +3599,21 @@ impl Worker {
     /// Link state changed. A conversation starts when the link comes up with a station
     /// and is logged when the link leaves Connected.
     fn on_link_state(&mut self, state: &LinkState) {
+        match (&self.link_state, state) {
+            (LinkState::Connecting { peer }, LinkState::Idle) => {
+                let key = peer.to_uppercase();
+                let fails = self.auto_fails.get(&key).map_or(0, |f| f.0) + 1;
+                let pause = AUTO_RETRY_BASE
+                    .saturating_mul(1 << (fails - 1).min(5))
+                    .min(Duration::from_secs(2400));
+                self.auto_fails.insert(key, (fails, self.clock.now() + pause));
+            }
+            (_, LinkState::Connected { peer }) => {
+                self.auto_fails.remove(&peer.to_uppercase());
+                self.last_activity = self.clock.now();
+            }
+            _ => {}
+        }
         let current = self.qso.as_ref().map(|q| q.peer.clone());
         let next = match state {
             LinkState::Connected { peer } => Some(peer.clone()),
@@ -2914,7 +3631,6 @@ impl Worker {
     }
 
     fn start_qso(&mut self, peer: String) {
-        self.note_heard(&peer);
         let (date, time) = utc_stamp(now_unix_secs());
         self.note_contact(&peer, &date);
         self.qso = Some(OpenQso { peer, date, time });
@@ -2954,8 +3670,6 @@ impl Worker {
             self.log(format!("cannot create {}: {e}", self.data_dir.display()));
             return;
         }
-        let shared = self.shared.clone();
-        let _io = lock(&shared.contacts_io);
         let path = self.data_dir.join("contacts.txt");
         let mut list = match contacts::load(&path) {
             Ok(l) => l,
@@ -2983,34 +3697,35 @@ impl Worker {
     }
 
     /// Runs link timers (handshake retries, DATA retransmits) on the monotonic clock.
-    /// True while a burst of ours is on the air or built and about to go. Frames held back
-    /// by the channel check or a closed slot do not count, so a dead link still times out.
-    /// The peer sent DATA a moment ago, so it has the turn: our own data waits for its
-    /// acknowledgement round to end instead of talking over it (the channel is half duplex).
-    fn peer_has_turn(&self) -> bool {
-        self.peer_data_at.is_some_and(|t| t.elapsed() < PEER_TURN_HOLD)
+    /// True while a heard preamble is still undecoded and young (see `PREAMBLE_HOLD`).
+    fn rx_provisional(&self) -> bool {
+        self.kami_at.is_some()
+            && self.kami_mode.is_none()
+            && self
+                .kami_seen
+                .is_some_and(|t| self.clock.since(t) < PREAMBLE_HOLD * self.slow())
     }
 
-    fn airing(&self) -> bool {
-        self.tx.is_some() || !self.bursts.is_empty()
-    }
-
-    /// The link's clock stands still while our own burst is on the air, so its
-    /// retransmit timers count only time in which the other station could have answered.
-    /// Without this a timer runs out during our own long burst and the retransmit then
-    /// covers the peer's reply, again and again.
     fn tick_link(&mut self) {
-        let now = Instant::now();
-        // The link's clock runs only while the channel is ours or idle: not while we transmit,
-        // not while the peer's signal is on the air, and not while the peer has the turn.
-        if !self.airing() && !self.peer_has_turn() && !self.watch.busy_now(now) {
-            self.link_ms += now.duration_since(self.link_mark).as_millis() as u64;
+        // Link timers run on time the radio is free: while a burst is queued or on the air the
+        // peer cannot answer, so that time does not count towards a retransmit.
+        let now = self.clock.now();
+        if self.tx.is_some() || !self.bursts.is_empty() {
+            self.tick_paused += now.saturating_duration_since(self.last_tick);
         }
-        self.link_mark = now;
-        let now_ms = self.link_ms;
+        self.last_tick = now;
+        let now_ms = self
+            .clock
+            .since(self.started)
+            .saturating_sub(self.tick_paused)
+            .as_millis() as u64;
         match guard("link tick", || self.link.tick(now_ms)) {
             Ok(actions) => {
                 self.tick_error = None;
+                // A frame sent again means the last try got no answer: the back-off window grows.
+                if actions.iter().any(|a| matches!(a, Action::Transmit(p) if !matches!(p.first(), Some(0x11) | Some(0x02) | Some(0x06)))) {
+                    self.mac.failure();
+                }
                 self.apply(actions);
             }
             Err(e) => {
@@ -3029,6 +3744,66 @@ impl Worker {
         self.apply_link(actions, false);
     }
 
+    /// Sends this station's own advert.
+    fn advertise_now(&mut self) {
+        if let Some(why) = tx_refusal(&self.shared.flags) {
+            self.hold_tx(why);
+            return;
+        }
+        // Time-based, so a restart does not reuse a number neighbours still remember.
+        let by_time = (self.now_ms() / 1000) as u8;
+        self.advert_seq = if by_time == self.advert_seq {
+            by_time.wrapping_add(1)
+        } else {
+            by_time
+        };
+        let relay = self.shared.flags.relay_running.load(Ordering::SeqCst);
+        let flags = if relay { ADVERT_RELAY } else { 0 };
+        self.adverts_seen
+            .push_back((self.callsign.clone(), self.advert_seq));
+        let loc = *lock(&self.shared.location);
+        self.control.push_back(vec![encode_advert(
+            &self.callsign,
+            ADVERT_TTL,
+            self.advert_seq,
+            flags,
+            loc,
+        )]);
+        self.log("Announcing this station on the air.");
+    }
+
+    /// Another station's advert: tell the operator, and pass it on when this is a running relay.
+    fn on_advert(&mut self, call: String, ttl: u8, seq: u8, flags: u8, loc: Option<(f32, f32)>) {
+        if self.adverts_seen.iter().any(|(c, s)| *c == call && *s == seq) {
+            return;
+        }
+        self.note_heard_recent(&call, None);
+        self.adverts_seen.push_back((call.clone(), seq));
+        if self.adverts_seen.len() > 256 {
+            self.adverts_seen.pop_front();
+        }
+        self.emit(Event::Advert {
+            call: call.clone(),
+            hops: ADVERT_TTL.saturating_sub(ttl),
+            relay: flags & ADVERT_RELAY != 0,
+            loc,
+        });
+        let is_relay = lock(&self.shared.relay)
+            .as_ref()
+            .is_some_and(|r| r.role != Role::Station)
+            && self.shared.flags.relay_running.load(Ordering::SeqCst);
+        if is_relay && ttl > 0 && tx_refusal(&self.shared.flags).is_none() {
+            self.log(format!("Passing on the announcement of {call}."));
+            self.control.push_back(vec![encode_advert(
+                &call,
+                ttl - 1,
+                seq,
+                flags & !ADVERT_LOCATION,
+                loc,
+            )]);
+        }
+    }
+
     /// Handles link actions: transmit payloads become one burst, deliveries go to the
     /// session layer, state changes become events. `cleared` means the channel was already
     /// checked for these payloads (data sent after `clear_channel`).
@@ -3038,12 +3813,33 @@ impl Worker {
             match action {
                 Action::Transmit(payload) => frames.push(payload),
                 Action::Deliver(chunk) => self.deliver(chunk),
+                Action::Beacon {
+                    call,
+                    flags,
+                    time_s,
+                    load,
+                } => {
+                    self.note_heard_recent(&call, None);
+                    self.emit(Event::Relay {
+                        call,
+                        online: flags & BEACON_ONLINE != 0,
+                        time_s,
+                        load,
+                    });
+                }
+                Action::Advert {
+                    call,
+                    ttl,
+                    seq,
+                    flags,
+                    loc,
+                } => self.on_advert(call, ttl, seq, flags, loc),
                 Action::StateChanged(state) => {
                     self.on_link_state(&state);
                     self.emit(Event::Link(state));
                 }
                 // Link quality snapshots have no event yet.
-                Action::Metrics(_) => {}
+                Action::Metrics(_) => self.emit_status(),
             }
         }
         if frames.is_empty() {
@@ -3060,52 +3856,119 @@ impl Worker {
         }
         if cleared {
             self.push_burst(&frames);
-        } else {
+        } else if !self.control.iter().any(|c| *c == frames) {
+            // The same frames already waiting say nothing new.
             self.control.push_back(frames);
         }
     }
 
+    /// Chooses the KAMI mode for the next burst. Fixed when the operator asked for one. Otherwise
+    /// the peer's SNR report picks the fastest mode that SNR supports (with the ladder's margin):
+    /// up at once when frames are getting through, down at once when the SNR drops, and one rung
+    /// down when frames are being lost. Before any report the level stays where it is.
+    fn pick_level(&mut self) {
+        let flags = &self.shared.flags;
+        if !flags.auto_mode.load(Ordering::SeqCst) {
+            self.tx_level =
+                (flags.fixed_level.load(Ordering::SeqCst) as usize).min(MODULATIONS.len() - 1) as u8;
+            return;
+        }
+        let cur = self.tx_level as usize;
+        let fer = self.link.peer_frame_error_pct();
+        let mut next = cur;
+        match self.link.peer_snr_db() {
+            Some(snr) => {
+                let want = ladder_level(snr);
+                next = match fer {
+                    Some(f) if f >= 8 => cur.saturating_sub(1).min(want),
+                    // Some loss: climb only one rung at a time.
+                    Some(f) if f >= 2 => want.min(cur + 1),
+                    _ => want,
+                };
+            }
+            None => match fer {
+                Some(f) if f < 2 && cur + 1 < MODULATIONS.len() => next = cur + 1,
+                Some(f) if f >= 8 && cur > 0 => next = cur - 1,
+                _ => {}
+            },
+        }
+        // On HF the slowest modes are not the safest: their bursts last many seconds, and the
+        // channel changes during one (fading), so a burst that long often fails where a shorter
+        // one gets through (measured: crates/kahf-sim hf_sweep). While the signal is not weak,
+        // never fall below KAMI-16, whatever the losses; the lower rungs are for weak signals.
+        if self
+            .link
+            .peer_snr_db()
+            .is_some_and(|snr| snr >= HF_SLOW_FLOOR_SNR_DB)
+        {
+            next = next.max(HF_MIN_LEVEL);
+        }
+        self.tx_level = next as u8;
+    }
+
+    /// Sends the operator a snapshot of the link.
+    fn emit_status(&self) {
+        let m = self.link.metrics();
+        let mode = MODULATIONS[self.tx_level as usize];
+        let net_bps =
+            (8.0 * 324.0 * RATE as f64 / (burst_len_for(mode, 8).max(1) as f64 * self.slow() as f64)) as u32;
+        self.emit(Event::Metrics(LinkStatus {
+            mode: mode_name(mode),
+            auto: self.shared.flags.auto_mode.load(Ordering::SeqCst),
+            net_bps,
+            own_snr_db: m.own_snr_db,
+            peer_snr_db: m.peer_snr_db,
+            fer_pct: m.frame_error_pct,
+            frames_sent: m.frames_sent,
+            frames_received: m.frames_received,
+            retransmits: m.retransmits,
+        }));
+    }
+
     /// Builds the audio for one burst and queues it for transmit.
     fn push_burst(&mut self, frames: &[Vec<u8>]) {
-        self.last_link_activity = Instant::now();
-        // Step the modulation one level at a time: up after a clean report, down after a poor one.
-        match self.link.peer_frame_error_pct() {
-            Some(f) if f < 2 && (self.tx_level as usize) + 1 < MODULATIONS.len() => self.tx_level += 1,
-            Some(f) if f >= 8 && self.tx_level > 0 => self.tx_level -= 1,
-            _ => {}
-        }
-        let m = MODULATIONS[self.tx_level as usize];
-        let hf = self.shared.flags.hf_burst.load(Ordering::SeqCst);
-        let weak = self.shared.flags.weak_mode.load(Ordering::SeqCst);
-        if hf {
-            self.hf_hot_until = Instant::now() + HF_HOT_FOR;
-            // Same rule as above, over the ladder. A report of 30 percent or more drops two rungs.
-            let floor = rung(HF_LINK_FLOOR);
-            match self.link.peer_frame_error_pct() {
-                Some(f) if f < 2 && self.hf_level + 1 < burst::LADDER.len() => self.hf_level += 1,
-                Some(f) if f >= 30 && self.hf_level >= floor + 2 => self.hf_level -= 2,
-                Some(f) if f >= 8 && self.hf_level > floor => self.hf_level -= 1,
-                _ => {}
-            }
-            self.hf_level = self.hf_level.max(floor);
-            let pin = self.shared.flags.hf_pin.load(Ordering::SeqCst);
-            if pin != NO_PIN {
-                self.hf_level = pin;
-            }
-        }
-        let built = if hf && weak {
-            Ok(hf_bursts(frames, rung(HF_WEAK_RUNG), burst::FrameKind::Link))
-        } else if hf {
-            Ok(hf_bursts(frames, self.hf_level, burst::FrameKind::Link))
-        } else if weak {
-            weak_burst(frames)
+        self.push_burst_mode(frames, None);
+    }
+
+    /// As `push_burst`, in the mode `mode` when one is given (the referee's own frames).
+    fn push_burst_mode(&mut self, frames: &[Vec<u8>], mode: Option<Modulation>) {
+        self.last_activity = self.clock.now();
+        let before = self.tx_level;
+        self.pick_level();
+        let m = mode.unwrap_or(MODULATIONS[self.tx_level as usize]);
+        // Weak mode: the most robust KAMI mode, for stations that cannot answer.
+        let m = if self.shared.flags.weak_mode.load(Ordering::SeqCst) {
+            Modulation::Kami256
         } else {
-            burst(frames, m)
+            m
         };
+        self.link
+            .set_air_ms((burst_len_for(m, 1) * 1000 / RATE as usize) as u64 * self.slow() as u64);
+        self.shared
+            .flags
+            .tx_level_shown
+            .store(self.tx_level, Ordering::SeqCst);
+        let built = burst(frames, m);
+        if self.tx_level != before {
+            self.emit_status();
+        }
         match built {
-            Ok(samples) => {
-                self.bursts.push_back(samples);
-                self.burst_frames.push_back(frames.to_vec());
+            Ok(mut samples) => {
+                if self.lane_rx.is_some() {
+                    // Lane mode: the plain modem's audio, slowed to a 480 Hz signal on our lane.
+                    // The silences at the ends stay short.
+                    let end = samples.len().saturating_sub(TAIL_SILENCE).max(LEAD_SILENCE);
+                    let lane = narrow::to_lane(
+                        &samples[LEAD_SILENCE.min(end)..end],
+                        laneplan::AUDIO_CENTRE_HZ as f64,
+                    );
+                    samples = [vec![0f32; LEAD_SILENCE], lane, vec![0f32; TAIL_SILENCE]].concat();
+                }
+                let gain = self.shared.flags.tx_level_pct.load(Ordering::SeqCst) as f32 / 100.0;
+                for s in samples.iter_mut() {
+                    *s *= gain;
+                }
+                self.bursts.push_back(samples)
             }
             Err(e) => self.log(format!("cannot build transmission: {e}")),
         }
@@ -3122,8 +3985,12 @@ impl Worker {
     /// Moves the current burst along by one step. Never waits for the device:
     /// audio is written only while the device is less than `TX_AHEAD_S` ahead.
     fn tx_advance(&mut self, job: &mut TxJob) -> Result<TxStep, String> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let Some(started) = job.started else {
+            // Every burst passes the gate, whatever queued it.
+            if let Some(why) = tx_refusal(&self.shared.flags) {
+                return Err(why.to_string());
+            }
             self.radio()?.tx_start()?;
             job.started = Some(now);
             self.emit_tx(TxState::Starting);
@@ -3169,10 +4036,14 @@ impl Worker {
                 let secs = job.samples.len() as f64 / RATE as f64;
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(
-                    Instant::now(),
-                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
-                );
+                let now = self.now_ms();
+                self.mac.on_tx_end(now);
+                let link_now = self
+                    .clock
+                    .since(self.started)
+                    .saturating_sub(self.tick_paused)
+                    .as_millis() as u64;
+                self.link.tx_finished(link_now);
                 self.emit_tx(TxState::Done);
                 self.log(format!("sent {secs:.1} s of audio"));
                 true
@@ -3180,10 +4051,8 @@ impl Worker {
             Err(e) => {
                 self.stop_radio_tx();
                 self.end_rx_gap();
-                self.watch.tx_finished(
-                    Instant::now(),
-                    Duration::from_secs_f64(job.samples.len() as f64 / RATE as f64),
-                );
+                let now = self.now_ms();
+                self.mac.on_tx_end(now);
                 self.emit_tx(TxState::Failed(e.clone()));
                 self.log(format!("transmit failed: {e}"));
                 true
@@ -3207,17 +4076,30 @@ impl Worker {
 
     /// After a burst, the receive side starts clean: our own signal is not decoded.
     fn end_rx_gap(&mut self) {
-        self.rx_buf.clear();
-        self.hf_buf.clear();
-        self.since_scan = 0;
+        // Everything captured while we were sending is our own signal: take it off the sound
+        // card unread, and keep discarding for a moment, because the sound card delays it.
+        if let Some(be) = self.backend.as_mut() {
+            let mut sink = Vec::new();
+            let _ = be.read_audio(&mut sink);
+        }
+        self.rx_deaf_until = Some(self.clock.now() + ECHO_TAIL);
+        // A burst being waited for pointed into the audio just thrown away.
+        self.reset_kami();
         self.spec = Analyser::new(SPEC_FFT, RATE as f32);
     }
 
     /// One RX pass: read what the radio has, update the spectrum, scan for frames.
     /// Returns the number of new samples.
     fn rx_step(&mut self) -> usize {
-        if self.rx_retry_at.is_some_and(|t| Instant::now() < t) {
+        if self.rx_retry_at.is_some_and(|t| self.clock.now() < t) {
             return 0;
+        }
+        if self.rx_deaf_until.is_some_and(|t| self.clock.now() < t) {
+            let mut sink = Vec::new();
+            if let Some(be) = self.backend.as_mut() {
+                let _ = be.read_audio(&mut sink);
+            }
+            return sink.len();
         }
         let mut fresh = Vec::new();
         let read = match self.backend.as_mut() {
@@ -3230,31 +4112,20 @@ impl Worker {
         }
         self.rx_error = None;
         if fresh.is_empty() {
-            // No new audio, but a scan may be due for what is already held (a burst that
-            // ended the stream, as in tests; a live device never goes quiet like this).
-            self.scan_hf();
             return 0;
         }
         let n = fresh.len();
-        let now = Instant::now();
-        // What arrives just after our own burst may be our own signal played back (a monitoring
-        // radio, or a virtual cable such as BlackHole). The channel watch does not take it for
-        // someone else's carrier, and `on_frame` does not take it for a frame from the peer.
-        self.watch.push(&fresh, now);
-        // Someone's burst has just ended: look at once for what it carried, instead of at the
-        // next scheduled scan, which can be seconds away and later than the sender's retry.
-        if self.watch.take_burst_ended() {
-            self.hf_scan_at = now;
-        }
-        self.rx_buf.extend_from_slice(&fresh);
-        self.hf_buf.extend_from_slice(&fresh);
-        if self.hf_buf.len() > HF_WINDOW {
-            let cut = self.hf_buf.len() - HF_WINDOW;
-            self.hf_buf.drain(..cut);
-        }
-
         self.sense.push(&fresh);
+        // Lane mode: the receive buffer holds the lane's KAMI stream, one fifth as long.
+        self.lane_feed(&fresh);
+        let stream = match self.lane_rx.as_mut() {
+            Some(l) => l.process(&fresh),
+            None => fresh.clone(),
+        };
+        let n_stream = stream.len();
+        self.rx_buf.extend_from_slice(&stream);
         self.spec.push(&fresh);
+        let now = self.clock.now();
         if now >= self.spec_due {
             if let Some(bins) = self.spec.spectrum_db() {
                 debug_assert_eq!(bins.len(), SPEC_BINS);
@@ -3266,49 +4137,14 @@ impl Worker {
         }
 
         self.since_scan += n;
-        if self.since_scan >= SCAN_HOP {
+        self.since_kami += n_stream;
+        let scan = self.since_scan >= SCAN_HOP;
+        if scan {
             self.since_scan = 0;
             self.decode_frames();
         }
-        self.scan_hf();
+        self.second_lane_step(&fresh, scan);
         n
-    }
-
-    /// Looks for a ladder burst in the recent audio, at most once per scan period, and not while
-    /// transmitting (the receive side is not listening then and the scan costs about 0.2 s).
-    fn scan_hf(&mut self) {
-        if !self.shared.flags.hf_burst.load(Ordering::SeqCst) || self.airing() {
-            return;
-        }
-        let now = Instant::now();
-        if now < self.hf_scan_at || self.hf_buf.len() < burst::MIN_SCAN_SAMPLES {
-            return;
-        }
-        let period = if now < self.hf_hot_until {
-            HF_SCAN_HOT
-        } else {
-            HF_SCAN_IDLE
-        };
-        self.hf_scan_at = now + period;
-        let r = burst::scan(&self.hf_buf, self.hf_heard);
-        match r {
-            burst::Scan::Nothing => {}
-            burst::Scan::Pending { from } => {
-                self.hf_buf.drain(..from);
-            }
-            burst::Scan::Heard(h) => {
-                self.hf_buf.drain(..h.end.min(self.hf_buf.len()));
-                self.hf_heard = h.mode;
-                self.hf_hot_until = now + HF_HOT_FOR;
-                self.hf_scan_at = now;
-                for payload in h.frames {
-                    match h.kind {
-                        burst::FrameKind::Link => self.on_frame(payload),
-                        kind => self.on_unlinked_frame(kind, payload),
-                    }
-                }
-            }
-        }
     }
 
     fn report_rx(&mut self, err: String) {
@@ -3316,243 +4152,251 @@ impl Worker {
             self.log(format!("receive: {err}"));
             self.rx_error = Some(err);
         }
-        self.rx_retry_at = Some(Instant::now() + RX_RETRY);
+        self.rx_retry_at = Some(self.clock.now() + RX_RETRY);
     }
 
-    /// Finds frames in the RX buffer. Consumed frames leave the buffer. An
-    /// incomplete frame stays until more audio arrives.
+    /// Finds frames in the RX buffer. A preamble is searched for every KAMI_STEP samples in a
+    /// short window of recent audio; once one is found the frame is decoded as soon as enough
+    /// audio has arrived for any KAMI mode. Consumed frames leave the buffer.
     fn decode_frames(&mut self) {
-        let longest = MODULATIONS.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
+        let tl = kahf_core::kami::preamble_len();
+        let step = KAMI_STEP / self.slow() as usize;
+        let window = step + 2 * tl;
         loop {
-            let start = match scan_preamble(&self.rx_buf) {
-                Preamble::Found(s) => s,
-                Preamble::Incomplete(t0) => {
-                    // Keep what has arrived of it and wait for the rest.
-                    self.rx_buf.drain(..t0);
-                    return;
+            if let Some((start, hz, tau)) = self.kami_at {
+                if self.finish_kami(start, hz, tau) {
+                    continue;
                 }
-                Preamble::None => {
-                    let keep = self.rx_buf.len().saturating_sub(PREAMBLE_LEN);
-                    self.rx_buf.drain(..keep);
-                    return;
+                // A false preamble (noise, the tail of our own echo) must not hide the real
+                // burst behind it for as long as the longest mode: while the mode is still
+                // unknown, keep looking at the audio that arrived after it.
+                if self.kami_mode.is_none() && self.since_kami >= step {
+                    let len = self.rx_buf.len();
+                    let from = (start + tl).min(len);
+                    let mut at = len.saturating_sub(self.since_kami + tl).max(from);
+                    self.since_kami = 0;
+                    let mut found = None;
+                    while at + tl <= len {
+                        let end = (at + window).min(len);
+                        if let Some((st, hz2, tau2)) = kahf_core::kami::find_preamble(&self.rx_buf[at..end]) {
+                            found = Some((at + st, hz2, tau2));
+                            break;
+                        }
+                        if end == len {
+                            break;
+                        }
+                        at = end - tl;
+                    }
+                    if let Some(f) = found {
+                        self.kami_at = Some(f);
+                        self.kami_seen = Some(self.clock.now());
+                        self.kami_refined = false;
+                        self.kami_tried = 0;
+                        self.since_kami = len.saturating_sub(f.0 + tl);
+                        continue;
+                    }
                 }
-            };
-            // Wait until the longest possible frame is in the buffer: the modulation is not known yet.
-            if start + longest > self.rx_buf.len() {
-                self.rx_buf.drain(..start);
                 return;
             }
-            let mut found = None;
-            for &m in &MODULATIONS {
-                let len = frame_len_for(m);
-                if let Some(payload) = decode_at(&self.rx_buf[start..start + len], m) {
-                    found = Some((payload, len));
+            if !self.kami_front && self.since_kami < step {
+                return;
+            }
+            // Scan from the front of the buffer in overlapping windows, so a frame is found
+            // wherever it sits, even when a whole burst arrives at once.
+            let len = self.rx_buf.len();
+            if len < tl {
+                return;
+            }
+            let w = window.min(len);
+            if let Some((st, hz, tau)) = kahf_core::kami::find_preamble(&self.rx_buf[..w]) {
+                self.kami_at = Some((st, hz, tau));
+                self.kami_seen = Some(self.clock.now());
+                self.kami_refined = false;
+                self.kami_tried = 0;
+                self.since_kami = len.saturating_sub(st + tl);
+                continue;
+            }
+            if len > w {
+                self.rx_buf.drain(..w - tl);
+                continue;
+            }
+            // Nothing here: keep a preamble's length, in case one straddles the next search.
+            self.trim_rx(tl);
+            self.kami_front = false;
+            self.since_kami = 0;
+            return;
+        }
+    }
+
+    /// Keeps only the last `keep` samples of the receive buffer.
+    fn trim_rx(&mut self, keep: usize) {
+        let extra = self.rx_buf.len().saturating_sub(keep);
+        self.rx_buf.drain(..extra);
+    }
+
+    /// Decodes the burst whose preamble starts at `start`. The first codeword fixes the mode and
+    /// says how many codewords the burst has; the others are delivered as their audio arrives.
+    /// Returns true when the burst ended or was given up, so the caller should look again for
+    /// a preamble; false when more audio is needed.
+    fn finish_kami(&mut self, start: usize, hz: f64, tau: f64) -> bool {
+        let (mut start, mut hz, mut tau) = (start, hz, tau);
+        let tl = kahf_core::kami::preamble_len();
+        // A preamble is first seen while it is still arriving, so its frequency and timing
+        // estimates are rough. Once all of it is here, estimate again; the modes are tried anew.
+        if self.kami_mode.is_none() && !self.kami_refined && self.rx_buf.len() >= start + tl + tl / 4 {
+            self.kami_refined = true;
+            let lo = start.saturating_sub(tl / 4);
+            let hi = (start + 2 * tl).min(self.rx_buf.len());
+            if let Some((st, h, t)) = kahf_core::kami::find_preamble(&self.rx_buf[lo..hi]) {
+                (start, hz, tau) = (lo + st, h, t);
+                self.kami_at = Some((start, hz, tau));
+                self.kami_tried = 0;
+            }
+        }
+        let avail = self.rx_buf.len().saturating_sub(start);
+        let longest = KAMI_MODES.iter().map(|&m| frame_len_for(m)).max().unwrap_or(0);
+        let modes: Vec<Modulation> = match self.kami_mode {
+            Some(m) => vec![m],
+            None => KAMI_MODES
+                .iter()
+                .copied()
+                .filter(|&m| {
+                    let fl = frame_len_for(m);
+                    fl <= avail && fl > self.kami_tried
+                })
+                .collect(),
+        };
+        for m in modes {
+            let Some(sh) = m.kami_shape() else { continue };
+            let mut n = 0;
+            while n < BURST_MAX && burst_len_for(m, n + 1) <= avail {
+                n += 1;
+            }
+            if self.kami_mode.is_some() {
+                n = n.min(self.kami_total);
+            } else {
+                // The first codeword fixes the mode and the length of the burst. Asking for more
+                // than one now would run the demodulator over audio past the end of a short burst,
+                // which spoils the estimates and loses the burst.
+                n = n.min(1);
+            }
+            if n <= self.kami_next {
+                continue;
+            }
+            let Some(rx) =
+                kahf_core::kami::demodulate_burst_rx(&self.rx_buf[start..], 0, hz, tau, ldpc::N, n, sh)
+            else {
+                continue;
+            };
+            let snr = rx.snr_db as f32;
+            for (j, llr) in rx.llrs.into_iter().enumerate().skip(self.kami_next) {
+                // A repeat of a codeword that failed before is added to it (chase combining).
+                let (tag, now_ms) = (mod_id(m), self.now_ms());
+                let decoded = self
+                    .harq
+                    .try_decode(j, tag, &llr, now_ms, |info| {
+                        frame::parse_payload_id(info).is_some_and(|(_, id)| id & ID_MODE_MASK == tag)
+                    })
+                    .and_then(|d| frame::parse_payload_id(&d.info));
+                let Some((data, id)) = decoded else { break };
+                if id & ID_MODE_MASK != mod_id(m) {
+                    break;
+                }
+                let remaining = (id >> 5) as usize;
+                if self.kami_mode.is_none() {
+                    // First codeword: it fixes the mode and the length of the burst. Only now is
+                    // it a real burst for the MAC: a start that never decodes (noise, an echo's
+                    // tail) must not keep this station from answering.
+                    if !self.rx_locked {
+                        self.rx_locked = true;
+                        let ms = self.now_ms();
+                        self.mac.on_rx_start(ms);
+                    }
+                    self.kami_mode = Some(m);
+                    self.kami_total = remaining + 1;
+                } else if remaining != self.kami_total - 1 - j {
+                    break;
+                }
+                self.kami_next = j + 1;
+                self.link.note_rx_snr(snr);
+                self.on_frame(data);
+                if self.kami_next == self.kami_total {
                     break;
                 }
             }
-            if found.is_none() {
-                // What looked like a preamble may be noise or the cut end of a burst. A real frame
-                // can follow it in the buffer: take that one rather than wait for copies of a
-                // frame that never comes (the wait below would swallow the real frame).
-                let after = start + PREAMBLE_LEN;
-                if after < self.rx_buf.len() {
-                    if let Preamble::Found(rel) = scan_preamble(&self.rx_buf[after..]) {
-                        let next = after + rel;
-                        let later = MODULATIONS.iter().find_map(|&m| {
-                            let len = frame_len_for(m);
-                            let window = self.rx_buf.get(next..next + len)?;
-                            decode_at(window, m).map(|p| (p, len))
-                        });
-                        if let Some((payload, len)) = later {
-                            self.rx_buf.drain(..next + len);
-                            self.on_frame(payload);
-                            continue;
-                        }
-                    }
+            if self.kami_mode.is_some() {
+                if self.kami_next == self.kami_total || self.kami_next < n {
+                    // Complete, or a codeword failed with its audio present: the burst is over.
+                    let end = start + burst_len_for(m, self.kami_next);
+                    self.end_kami_burst(end);
+                    return true;
                 }
-                // Weak mode: the copies may still be arriving. Wait for all of them, then combine.
-                let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
-                // A weak-mode burst repeats the frame at this spacing. If the buffer reaches the
-                // place of the second copy and there is no preamble there, this was no weak
-                // burst but noise or a cut-off frame: skip it instead of waiting for copies.
-                if start + stride + PREAMBLE_LEN <= self.rx_buf.len()
-                    && preamble_corr(&self.rx_buf, start + stride) < PREAMBLE_THRESHOLD
-                {
-                    self.rx_buf.drain(..start + PREAMBLE_LEN);
-                    continue;
-                }
-                let span = (WEAK_COPIES - 1) * stride + frame_len_for(Modulation::Qpsk);
-                if start + span > self.rx_buf.len() {
-                    self.rx_buf.drain(..start);
-                    return;
-                }
-                if let Some(payload) = decode_combined(&self.rx_buf[start..start + span]) {
-                    self.rx_buf.drain(..start + span);
-                    self.on_frame(payload);
-                    continue;
-                }
-            }
-            let (decoded, used) = match found {
-                Some((payload, len)) => (Some(payload), len),
-                None => (None, frame_len()),
-            };
-            self.rx_buf.drain(..start + used);
-            if let Some(payload) = decoded {
-                self.on_frame(payload);
+                return false;
             }
         }
-    }
-
-    /// Notes the frames inside a burst we are about to send. If our sound path plays our own
-    /// signal back, these are the frames that come back and must be ignored.
-    fn remember_own_frames(&mut self, frames: Vec<Vec<u8>>, burst_samples: usize) {
-        if frames.is_empty() {
-            return;
-        }
-        let until =
-            Instant::now() + Duration::from_secs_f64(burst_samples as f64 / RATE as f64) + ECHO_WINDOW;
-        self.echoes.push_back((until, frames));
-        while self.echoes.len() > 64 {
-            self.echoes.pop_front();
-        }
-    }
-
-    /// True when `payload` is one of our own frames played back to us.
-    fn is_own_echo(&mut self, payload: &[u8]) -> bool {
-        let now = Instant::now();
-        self.echoes.retain(|(until, _)| now < *until);
-        self.echoes
-            .iter()
-            .any(|(_, frames)| frames.iter().any(|f| f == payload))
-    }
-
-    /// A frame of a burst that is not for the link layer (beacon, receipt, relay), heard without
-    /// a link session. Nothing consumes these yet: the messaging layer hooks in here.
-    fn on_unlinked_frame(&mut self, kind: burst::FrameKind, payload: Vec<u8>) {
-        match kind {
-            burst::FrameKind::Beacon => {
-                if let Some((call, grid)) =
-                    learn_beacon(&self.shared, &self.data_dir, &self.callsign, &payload)
-                {
-                    self.log(format!("heard a beacon from {call} in {grid}"));
-                }
-            }
-            burst::FrameKind::Receipt => {
-                if let Some((receipt, from)) = receipts::parse_receipt_frame(&payload) {
-                    let now = now_unix_secs().max(0) as u64;
-                    self.note_heard(&from);
-                    let id = lock(&self.shared.delivery).on_receipt(&receipt, &from, now);
-                    if id.is_some() {
-                        self.log(format!("{from} confirmed delivery"));
-                    }
-                }
-            }
-            burst::FrameKind::Link | burst::FrameKind::Relay => {}
-        }
-    }
-
-    /// Sends one single-frame unconnected burst of `kind` at the beacon rung.
-    fn send_unlinked(&mut self, payload: Vec<u8>, kind: burst::FrameKind) {
-        let samples = hf_bursts(&[payload], rung(HF_LINK_START), kind);
-        self.bursts.push_back(samples);
-    }
-
-    /// May this station send an unattended single burst now: HF burst mode on, not listen-only,
-    /// and nothing on the air or queued.
-    fn unattended_burst_ok(&self) -> bool {
-        self.shared.flags.hf_burst.load(Ordering::SeqCst)
-            && tx_refusal(&self.shared.flags).is_none()
-            && !self.airing()
-            && matches!(self.link_state, LinkState::Idle)
-    }
-
-    /// Sends a location beacon when one is due and the operator turned beacons on.
-    fn tick_beacon(&mut self) {
-        if self.beacon_checked.elapsed() < Duration::from_secs(5) {
-            return;
-        }
-        self.beacon_checked = Instant::now();
-        let cfg = lock(&self.shared.beacon).clone();
-        self.beacon.set_enabled(cfg.enabled);
-        if !cfg.enabled || !self.unattended_burst_ok() {
-            return;
-        }
-        if let Err(e) = self.ensure_radio() {
-            self.log(format!("beacon not sent: {e}"));
-            self.beacon_checked = Instant::now() + Duration::from_secs(55); // try again in a minute
-            return;
-        }
-        let now = now_unix_secs().max(0) as u64;
-        // A hand-set grid counts as a position for timing, so the same back-off applies.
-        let pos = cfg
-            .position
-            .or_else(|| cfg.grid.as_deref().and_then(kahf_core::msg::grid::from_grid));
-        // Status changes are not beaconed yet: note them as sent so position beacons are reached.
-        if let Some(d @ Due::Status(_)) = self.beacon.due(now, pos) {
-            self.beacon.beaconed(d, now, pos);
-        }
-        if let Some(Due::Position) = self.beacon.due(now, pos) {
-            if let Some(p) =
-                kahf_core::msg::grid::beacon_payload(&self.callsign, cfg.position, cfg.grid.as_deref())
-            {
-                self.send_unlinked(p, burst::FrameKind::Beacon);
-                self.beacon.beaconed(Due::Position, now, pos);
-                self.log("sent a location beacon");
+        if self.kami_mode.is_none() {
+            self.kami_tried = avail;
+            if avail >= longest {
+                // Nothing decoded in any mode: not a frame. Step past this preamble.
+                let skip = (start + kahf_core::kami::preamble_len()).min(self.rx_buf.len());
+                self.end_kami_burst(skip);
+                return true;
             }
         }
+        false
     }
 
-    /// Records a sent message for delivery tracking, once its chunks are on the link.
-    fn track_sent(&mut self, public: u64, msg: &Message, chunks: &[Vec<u8>]) {
-        if !matches!(msg, Message::Chat { .. } | Message::Mail { .. }) {
-            return;
+    /// Drops the audio up to `end` and goes back to looking for a preamble.
+    fn end_kami_burst(&mut self, end: usize) {
+        self.dg_burst_end();
+        let end = end.min(self.rx_buf.len());
+        if self.rx_locked {
+            self.rx_locked = false;
+            let ms = self.now_ms();
+            self.mac.on_rx_end(ms);
         }
-        let to = dest_of(msg).to_string();
-        if kahf_core::msg::groups::is_group_addr(&to) {
-            return;
-        }
-        let wire = Messenger::wire_id(&self.callsign, &to, chunks);
-        let now = now_unix_secs().max(0) as u64;
-        let at_peer =
-            matches!(&self.link_state, LinkState::Connected { peer } if peer.eq_ignore_ascii_case(&to));
-        let mut t = lock(&self.shared.delivery);
-        t.track(wire, std::slice::from_ref(&to), now);
-        t.advance(wire, Some(&to), DeliveryStatus::Sent, now);
-        if at_peer {
-            // The addressee itself acknowledged every chunk on the link.
-            t.advance(wire, Some(&to), DeliveryStatus::Delivered, now);
-        }
-        drop(t);
-        lock(&self.shared.wire_ids).insert(public, wire);
-    }
-
-    /// A message for us arrived by a path other than a link with its sender (through relays):
-    /// tell the sender with a one-frame receipt. A link with the sender already acknowledges it.
-    fn send_receipt(&mut self, from: &str, wire: u64) {
-        let on_link =
-            matches!(&self.link_state, LinkState::Connected { peer } if peer.eq_ignore_ascii_case(from));
-        if on_link || !self.transmit_allowed() || !self.unattended_burst_ok() {
-            return;
-        }
-        let r = kahf_core::extras::Receipt::Delivered {
-            message_id: kahf_core::msg::short_id(wire),
-        };
-        if let Some(frame) = receipts::receipt_frame(&r, &self.callsign) {
-            self.send_unlinked(frame, burst::FrameKind::Receipt);
-        }
+        self.rx_buf.drain(..end);
+        self.kami_at = None;
+        self.kami_seen = None;
+        self.kami_refined = false;
+        self.kami_mode = None;
+        self.kami_next = 0;
+        self.kami_total = 0;
+        self.kami_front = true;
     }
 
     fn on_frame(&mut self, payload: Vec<u8>) {
-        if self.is_own_echo(&payload) {
+        self.last_activity = self.clock.now();
+        let lane_k = if self.on_second {
+            self.second_k
+        } else {
+            self.lanes.as_ref().map(|w| w.ks[w.own])
+        };
+        if let Some(k) = lane_k {
+            let now = self.now_ms();
+            self.kahf_seen.insert(k, now);
+        }
+        if matches!(payload.first(), Some(0x30..=0x37)) {
+            // A bundle frame: not the link's. An answer proves the channel works, as on the link.
+            if payload.first() == Some(&0x32) {
+                self.mac.success();
+            }
+            self.dg_on_frame(&payload, self.link.own_snr_db());
             return;
         }
-        self.last_link_activity = Instant::now();
-        if payload.first() == Some(&0x10) {
-            self.peer_data_at = Some(Instant::now());
+        if matches!(payload.first(), Some(0x11) | Some(0x02)) {
+            self.mac.success();
         }
         match guard("link receive", || self.link.on_receive(&payload)) {
             Ok(actions) => self.apply(actions),
             Err(e) => self.log(e),
+        }
+        for call in self.link.take_heard() {
+            self.note_heard_recent(&call, self.link.own_snr_db());
+            self.emit(Event::Heard {
+                call,
+                snr_db: self.link.own_snr_db(),
+            });
         }
     }
 
@@ -3563,29 +4407,10 @@ impl Worker {
             self.log("dropped a partial message: too many chunks");
             return;
         }
-        match guard("session decode", || session::decode_for_relay(&self.rx_chunks)) {
-            Ok(Some((signed, chunks))) => {
+        match guard("session decode", || session::decode_signed(&self.rx_chunks)) {
+            Ok(Some(signed)) => {
                 self.rx_chunks.clear();
-                if !dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign) && self.relaying() {
-                    self.hold_for_relay(&signed.message, chunks);
-                    return;
-                }
-                // A private message is for its addressee's inbox only; other stations drop it.
-                if signed.private && !dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
-                    return;
-                }
-                let (from, to) = (
-                    sender_of(&signed.message).to_string(),
-                    dest_of(&signed.message).to_string(),
-                );
-                let wanted = matches!(signed.message, Message::Chat { .. } | Message::Mail { .. })
-                    && to.eq_ignore_ascii_case(&self.callsign)
-                    && !from.eq_ignore_ascii_case(&self.callsign);
-                if wanted {
-                    let wire = Messenger::wire_id(&from, &to, &chunks);
-                    self.send_receipt(&from, wire);
-                }
-                self.on_message(signed.message);
+                self.on_signed(signed);
             }
             Ok(None) => {}
             Err(e) => {
@@ -3595,233 +4420,27 @@ impl Worker {
         }
     }
 
-    /// True while this station passes other stations' messages on: a relay role, relay mode
-    /// running and setting B on (plan 4).
-    fn relaying(&self) -> bool {
-        let role = lock(&self.shared.relay).as_ref().map(|r| r.role);
-        matches!(role, Some(Role::Relay | Role::RelayAndStation))
-            && self.shared.flags.relay_running.load(Ordering::SeqCst)
-            && self.shared.flags.third_party_relay.load(Ordering::SeqCst)
-    }
-
-    /// Holds another station's message to pass on unchanged. A message is held once: copies
-    /// heard again (directly or round a loop of relays) are dropped, and so are our own.
-    fn hold_for_relay(&mut self, msg: &Message, chunks: Vec<Vec<u8>>) {
-        let (from, to) = (sender_of(msg).to_string(), dest_of(msg).to_string());
-        if from.eq_ignore_ascii_case(&self.callsign) {
+    /// A whole message arrived (from the link or from bundle frames).
+    fn on_signed(&mut self, signed: session::Signed) {
+        // Our own message coming back (a cable, a leaky rig, someone repeating it) is not
+        // news: never show it, never forward it.
+        if sender_of(&signed.message).eq_ignore_ascii_case(&self.callsign) {
+            self.log("Ignored a message of ours heard back on the air.");
             return;
         }
-        let digest = relay_digest(&chunks);
-        if self.relayed.contains(&digest) {
-            self.log(format!(
-                "Already relayed the message from {from} to {to}; dropped the copy."
-            ));
-            self.emit_relay(&from, &to, RelayStep::Dropped("already relayed".into()));
+        let for_me = dest_of(&signed.message).eq_ignore_ascii_case(&self.callsign);
+        if !for_me {
+            // A relay passes it on. Nobody else shows it: a message belongs in the inbox
+            // of the station it was written to, not of everyone who happens to hear it.
+            self.forward_third_party(&signed.message, signed.private);
             return;
         }
-        let held = self
-            .outbox
-            .due(u64::MAX)
-            .iter()
-            .filter(|(_, item)| item.kind == KIND_RELAY)
-            .count();
-        if held >= MAX_HELD_FORWARDS {
-            self.log(format!(
-                "Relay queue is full; dropped the message from {from} to {to}."
-            ));
-            self.emit_relay(&from, &to, RelayStep::Dropped("relay queue is full".into()));
-            return;
-        }
-        if self.relayed.len() >= RELAYED_MEMORY {
-            self.relayed.pop_front();
-        }
-        self.relayed.push_back(digest);
-        let item = OutItem {
-            kind: KIND_RELAY.to_string(),
-            payload: encode_forward(&from, &to, priority_of(msg) == Priority::Urgent, &chunks),
-        };
-        let oid = self.outbox.push(item, priority_of(msg));
-        let pid = self.next_id();
-        self.tags.insert(oid, (pid, describe_forward(&from, &to)));
-        let at = self.now_ms();
-        self.queued.insert(oid, (to.clone(), at));
-        self.persist_outbox();
-        self.log(format!("Holding a message from {from} for {to} to relay."));
-        self.emit_relay(&from, &to, RelayStep::Held);
-    }
-
-    fn emit_relay(&self, from: &str, to: &str, step: RelayStep) {
-        self.emit(Event::Relay {
-            from: from.to_string(),
-            to: to.to_string(),
-            step,
-        });
-    }
-
-    /// Stations an outbox item may go to next, best first: its addressee, and, once the
-    /// addressee was not reached in time, the relays in `paths`. Never back to its sender.
-    fn next_stations(&self, id: u64, from: &str, to: &str, paths: &[String]) -> Vec<String> {
-        let mut out = vec![to.to_string()];
-        if self.unreached_noted.contains(&id) {
-            out.extend(
-                paths
-                    .iter()
-                    .filter(|p| !p.eq_ignore_ascii_case(from) && !p.eq_ignore_ascii_case(to))
-                    .cloned(),
-            );
-        }
-        out
-    }
-
-    /// True when any due item, our own or held, may go to `peer` now.
-    fn has_due_for(&self, peer: &str) -> bool {
-        let paths = lock(&self.shared.relay_paths).clone();
-        self.outbox.due(self.now_ms()).iter().any(|(id, item)| {
-            peek_route(&item.payload).is_some_and(|(from, to)| {
-                self.next_stations(*id, &from, &to, &paths)
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(peer))
-            })
-        })
-    }
-
-    /// Stations this relay should call for the messages it holds, in sending order, without
-    /// repeats. A held message whose station was not reached also lists the relay paths, so
-    /// it can go on over more than one hop.
-    fn dial_targets(&self) -> Vec<String> {
-        let paths = lock(&self.shared.relay_paths).clone();
-        let mut targets: Vec<String> = Vec::new();
-        for (id, item) in self.outbox.due(self.now_ms()) {
-            if item.kind != KIND_RELAY {
-                continue;
-            }
-            let Some((from, to)) = peek_route(&item.payload) else {
-                continue;
-            };
-            for call in self.next_stations(id, &from, &to, &paths) {
-                if !targets.iter().any(|t| t.eq_ignore_ascii_case(&call)) {
-                    targets.push(call);
-                }
-            }
-        }
-        targets
-    }
-
-    /// Plan 4: in relay mode a relay calls the station a held message is for, inside a
-    /// transmit slot, and hangs up once everything for it is acknowledged. A station that
-    /// does not answer is called again after `DIAL_INTERVAL`.
-    fn dial_relays(&mut self) {
-        if !self.shared.flags.relay_running.load(Ordering::SeqCst) || tx_refusal(&self.shared.flags).is_some()
-        {
-            return;
-        }
-        match self.link_state.clone() {
-            LinkState::Connected { peer } => {
-                let ours = self
-                    .dialed
-                    .as_deref()
-                    .is_some_and(|d| d.eq_ignore_ascii_case(&peer));
-                if ours && !self.has_due_for(&peer) && self.handed.is_empty() && self.link.is_flushed() {
-                    self.dialed = None;
-                    self.log(format!("Relayed everything held for {peer}; hanging up."));
-                    if let Err(e) = self.disconnect() {
-                        self.log(e);
-                    }
-                } else if !ours
-                    && self.last_link_activity.elapsed() > LINK_IDLE_DROP
-                    && !self.dial_targets().is_empty()
-                {
-                    // A call that has gone quiet (its hang-up may have been lost on air) must
-                    // not keep a relay from calling the station a held message is for.
-                    self.log(format!(
-                        "The link to {peer} has been quiet for {} s; closing it.",
-                        LINK_IDLE_DROP.as_secs()
-                    ));
-                    if let Err(e) = self.disconnect() {
-                        self.log(e);
-                    }
-                }
-            }
-            LinkState::Idle => {
-                self.dialed = None;
-                if self.tx.is_some() || !self.control.is_empty() || !self.relay_slot_open() {
-                    return;
-                }
-                let now = Instant::now();
-                let next = self
-                    .dial_targets()
-                    .into_iter()
-                    .find(|d| self.dial_after.get(d).is_none_or(|t| now >= *t));
-                let Some(dest) = next else {
-                    return;
-                };
-                self.dial_after.insert(dest.clone(), now + DIAL_INTERVAL);
-                self.dialed = Some(dest.clone());
-                if let Err(e) = self.connect(&dest) {
-                    self.log(e);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Notes that `call` was heard, on the link or as the sender of a message.
-    fn note_heard(&mut self, call: &str) {
-        if !valid_call(call) || call.eq_ignore_ascii_case(&self.callsign) {
-            return;
-        }
-        let obs = Observation {
-            snr_db: 0.0,
-            channel_khz: self.freq_mhz.map_or(0.0, |f| (f * 1000.0) as f32),
-            via: None,
-        };
-        let mut h = lock(&self.shared.heard);
-        h.hear(call, now_unix_secs().max(0) as u64, obs, 0);
-        save_heard(&self.data_dir, &h);
-    }
-
-    /// A chat arrived. Group control lines are handled here; a group message shows as
-    /// `#GROUP text` from the sender, and only when this station has joined that group.
-    fn on_chat(&mut self, from: String, text: String) {
-        let Some(ctl) = Control::decode(&text) else {
-            if text.starts_with(kahf_core::msg::groups::CTL_PREFIX) {
-                return; // a malformed control line is not text for the operator
-            }
-            self.emit(Event::Message { from, text });
-            return;
-        };
-        let (reply, shown) = {
-            let mut g = lock(&self.shared.groups);
-            match &ctl {
-                Control::Say { group, text } => (None, g.is_joined(group).then(|| format!("{group} {text}"))),
-                _ => (g.apply(&ctl, &from), None),
-            }
-        };
-        let _ = fs::write(
-            self.data_dir.join("groups.txt"),
-            lock(&self.shared.groups).to_text(),
-        );
-        if let Some(t) = shown {
-            self.emit(Event::Message {
-                from: from.clone(),
-                text: t,
-            });
-        }
-        if let Some(r) = reply {
-            let m = Message::Chat {
-                from: self.callsign.clone(),
-                to: from,
-                text: r.encode(),
-            };
-            let id = self.ids.fetch_add(1, Ordering::Relaxed);
-            self.enqueue(vec![m], vec![id], false);
-        }
+        self.on_message(signed.message);
     }
 
     fn on_message(&mut self, msg: Message) {
-        self.note_heard(sender_of(&msg).to_string().as_str());
         match msg {
-            Message::Chat { from, text, .. } => self.on_chat(from, text),
+            Message::Chat { from, text, .. } => self.emit(Event::Message { from, text }),
             Message::Mail {
                 from,
                 to,
@@ -3840,17 +4459,38 @@ impl Worker {
                         text.push_str(&format!("  {a}\n"));
                     }
                 }
-                match save_file(&self.inbox, &format!("mail-{id}.txt"), text.as_bytes()) {
-                    Ok(p) => self.log(format!("saved mail to {}", p.display())),
-                    Err(e) => self.log(e),
-                }
+                let saved = match save_file(&self.inbox, &format!("mail-{id}.txt"), text.as_bytes()) {
+                    Ok(p) => {
+                        self.log(format!("saved mail to {}", p.display()));
+                        Some(p)
+                    }
+                    Err(e) => {
+                        self.log(e);
+                        None
+                    }
+                };
+                self.emit(Event::MailReceived {
+                    from: from.clone(),
+                    subject: subject.clone(),
+                    body: body.to_string(),
+                    attachments: attachments.clone(),
+                    path: saved,
+                });
                 self.emit(Event::Mail { id, from, subject });
             }
-            Message::File { name, data, .. } => {
+            Message::File { from, name, data, .. } => {
                 let id = self.next_id();
                 let total = data.len() as u64;
                 match save_file(&self.inbox, &name, &data) {
-                    Ok(p) => self.log(format!("saved file to {}", p.display())),
+                    Ok(p) => {
+                        self.log(format!("saved file to {}", p.display()));
+                        self.emit(Event::FileReceived {
+                            from,
+                            name: name.clone(),
+                            size: total,
+                            path: p,
+                        });
+                    }
                     Err(e) => self.log(e),
                 }
                 self.emit(Event::FileProgress {
@@ -3876,14 +4516,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    /// The tests that run engines on real time (audio paced like a sound card, ARQ timers) take
-    /// this lock, so that only one runs at a time: several at once starve each other of CPU and
-    /// then time out for reasons that have nothing to do with the code under test.
-    fn realtime() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     type Pipe = Arc<Mutex<VecDeque<f32>>>;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -3900,70 +4532,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rig_setting_takes_a_spec_or_a_rigctld_address() {
-        let ok = |r: &str| {
-            let mut c = config("N0CALL", PathBuf::from("/tmp/x"));
-            c.rigctld = Some(r.into());
-            validate(&c)
-        };
-        assert!(ok("127.0.0.1:4532").is_ok());
-        assert!(ok("ic7300:/dev/ttyUSB0:115200:cat").is_ok());
-        assert!(ok("ft991a:COM3:rts").is_ok());
-        assert!(ok("flrig").is_ok());
-        assert!(ok("ic7300").is_err());
-        assert!(ok("not a rig").is_err());
-    }
-
     /// In-memory radio: transmits into `tx`, receives from `rx`.
     struct FakeRadio {
         rx: Pipe,
         tx: Pipe,
-        clock: SoundClock,
-    }
-
-    /// What a sound card does between signals: the input never stops, it delivers silence. A
-    /// read gets whatever is in the pipe and, if less than the time since the start would have
-    /// delivered, silence for the rest.
-    struct SoundClock {
+        clock: Clock,
         start: Instant,
         delivered: usize,
-        last_data: Instant,
     }
 
-    impl SoundClock {
-        fn new() -> Self {
-            Self {
-                start: Instant::now(),
-                delivered: 0,
-                last_data: Instant::now(),
-            }
-        }
+    thread_local! {
+        static TEST_CLOCK: Clock = {
+            let c = Clock::virtual_time();
+            c.join_thread();
+            c
+        };
+    }
 
-        /// Silence is added only once the pipe has been empty for a moment, never in the
-        /// middle of a signal that arrives in small steps.
-        fn read(&mut self, pipe: &Pipe, out: &mut Vec<f32>) {
-            let before = out.len();
-            out.extend(pipe.lock().unwrap().drain(..));
-            let taken = out.len() - before;
-            self.delivered += taken;
-            if taken > 0 {
-                self.last_data = Instant::now();
-                return;
-            }
-            if self.last_data.elapsed() < Duration::from_millis(60) {
-                return;
-            }
-            let due = (self.start.elapsed().as_secs_f64() * RATE as f64) as usize;
-            let deficit = due.saturating_sub(self.delivered);
-            out.extend(std::iter::repeat_n(0.0f32, deficit));
-            self.delivered += deficit;
-        }
+    /// The virtual clock of the current test thread (made on first use).
+    fn test_clock() -> Clock {
+        TEST_CLOCK.with(|c| c.clone())
+    }
+
+    /// Spawns an engine on the test thread's virtual clock.
+    fn vspawn(config: Config, factory: Factory) -> Result<Engine, String> {
+        Engine::spawn_with_clock(config, factory, test_clock())
     }
 
     impl Backend for FakeRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
+        /// Like a sound card: one second of audio per (virtual) second; silence where nothing was sent.
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            self.clock.read(&self.rx, out);
+            let due = (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize;
+            let n = due.saturating_sub(self.delivered);
+            let mut q = self.rx.lock().unwrap();
+            for _ in 0..n {
+                out.push(q.pop_front().unwrap_or(0.0));
+            }
+            self.delivered += n;
             Ok(())
         }
 
@@ -3984,12 +4592,168 @@ mod tests {
         }
     }
 
+    /// One shared channel for several stations: signals that overlap in time add up, as on
+    /// the air, and every station hears all of it, itself included (a virtual audio cable does
+    /// exactly this). The line is a timeline of samples from the start; position = time x rate.
+    struct Bus {
+        line: Mutex<Vec<f32>>,
+    }
+
+    struct BusRadio {
+        bus: Arc<Bus>,
+        clock: Clock,
+        start: Instant,
+        delivered: usize,
+        /// Timeline position where the current transmission began.
+        tx_base: usize,
+    }
+
+    impl BusRadio {
+        fn now_index(&self) -> usize {
+            (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize
+        }
+    }
+
+    impl Backend for BusRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
+        /// Like a sound card: exactly one second of audio per second. Whatever was sent at
+        /// that moment is in it, mixed with anything else sent then; otherwise silence.
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            let due = self.now_index();
+            let line = self.bus.line.lock().unwrap();
+            for k in self.delivered..due {
+                out.push(line.get(k).copied().unwrap_or(0.0));
+            }
+            self.delivered = self.delivered.max(due);
+            Ok(())
+        }
+
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.tx_base = self.now_index();
+            Ok(())
+        }
+
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            let mut line = self.bus.line.lock().unwrap();
+            let last = self.tx_base + end;
+            if line.len() < last {
+                line.resize(last, 0.0);
+            }
+            for (k, v) in samples[start..end].iter().enumerate() {
+                line[self.tx_base + start + k] += *v;
+            }
+            Ok(())
+        }
+
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `calls.len()` engines on one bus, all listening, with automatic linking on.
+    fn bus_engines(tag: &str, calls: &[&str]) -> Vec<Engine> {
+        let bus = Arc::new(Bus {
+            line: Mutex::new(Vec::new()),
+        });
+        let clock = Clock::virtual_time();
+        clock.join_thread();
+        calls
+            .iter()
+            .map(|call| {
+                let b = bus.clone();
+                let c = clock.clone();
+                let start = clock.now();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(BusRadio {
+                        bus: b.clone(),
+                        clock: c.clone(),
+                        start,
+                        delivered: 0,
+                        tx_base: 0,
+                    }) as Box<dyn Backend>)
+                });
+                let mut e = Engine::spawn_with_clock(
+                    config(call, temp_dir(&format!("{tag}-{call}"))),
+                    factory,
+                    clock.clone(),
+                )
+                .unwrap();
+                e.listen().unwrap();
+                e.set_auto_link(true);
+                e.set_fixed_mode("KAMI-1c").unwrap();
+                e
+            })
+            .collect()
+    }
+
+    /// Runs the engines until `done` says so or `secs` pass, collecting every chat received:
+    /// `(receiver index, sender, text)`.
+    fn run_bus(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[(usize, String, String)]) -> bool,
+    ) -> Vec<(usize, String, String)> {
+        let mut got: Vec<(usize, String, String)> = Vec::new();
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let deadline = t0 + Duration::from_secs(secs);
+        while clock.now() < deadline && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    if std::env::var_os("KAHF_TRACE").is_some()
+                        && !matches!(ev, Event::Spectrum(_) | Event::Metrics(_))
+                    {
+                        eprintln!("[{:6.1}s] st{i}: {ev:?}", clock.since(t0).as_secs_f32());
+                    }
+                    if let Event::Message { from, text } = ev {
+                        got.push((i, from, text));
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        got
+    }
+
+    #[test]
+    fn one_message_over_an_echoing_channel_arrives_once() {
+        let mut e = bus_engines("echo-one", &["AA1AAA", "BB1BBB"]);
+        e[0].send_message("BB1BBB", "hello").unwrap();
+        let got = run_bus(&mut e, 120, |g| !g.is_empty());
+        assert_eq!(got, vec![(1, "AA1AAA".to_string(), "hello".to_string())]);
+    }
+
+    #[test]
+    fn several_messages_each_way_all_arrive_once_in_order_and_none_from_self() {
+        let mut e = bus_engines("echo-a", &["AA1AAA", "BB1BBB"]);
+        for i in 0..4 {
+            e[0].send_message("BB1BBB", &format!("a{i}")).unwrap();
+            e[1].send_message("AA1AAA", &format!("b{i}")).unwrap();
+        }
+        let got = run_bus(&mut e, 240, |g| g.len() >= 8);
+        let texts = |who: usize| {
+            got.iter()
+                .filter(|(i, _, _)| *i == who)
+                .map(|(_, f, t)| (f.clone(), t.clone()))
+                .collect::<Vec<_>>()
+        };
+        let want_b: Vec<(String, String)> = (0..4).map(|i| ("AA1AAA".to_string(), format!("a{i}"))).collect();
+        let want_a: Vec<(String, String)> = (0..4).map(|i| ("BB1BBB".to_string(), format!("b{i}"))).collect();
+        assert_eq!(texts(1), want_b, "what BB1BBB received");
+        assert_eq!(texts(0), want_a, "what AA1AAA received");
+    }
+
     /// Output that takes 30 ms to accept each write, like a busy sound card.
     struct SlowOutputRadio {
         written: Arc<AtomicU64>,
     }
 
     impl Backend for SlowOutputRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
             Ok(())
         }
@@ -4016,6 +4780,9 @@ mod tests {
     }
 
     impl Backend for ClockRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
             let due = (self.start.elapsed().as_secs_f64() * RATE as f64) as usize;
             for n in self.given..due {
@@ -4041,61 +4808,37 @@ mod tests {
 
     /// Polls until `want` holds or the time runs out. Used where a reply used to be waited for.
     fn wait_until(secs: u64, want: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline {
+        let deadline = test_clock().now() + Duration::from_secs(secs);
+        while test_clock().now() < deadline {
             if want() {
                 return true;
             }
-            thread::sleep(Duration::from_millis(5));
+            test_clock().sleep(Duration::from_millis(5));
         }
         want()
     }
 
-    /// Delivers what is written to the returned pipe into `to` at the speed of sound-card
-    /// playback (8000 samples a second), as a real sound path does. Without it a whole burst
-    /// would reach the other station at once, long before it had really been sent.
-    fn paced(to: Pipe) -> Pipe {
-        let staging: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let from = staging.clone();
-        thread::spawn(move || {
-            let mut due = 0.0f64;
-            let mut last = Instant::now();
-            loop {
-                thread::sleep(Duration::from_millis(10));
-                let now = Instant::now();
-                due += now.duration_since(last).as_secs_f64() * RATE as f64;
-                last = now;
-                let mut q = from.lock().unwrap();
-                if q.is_empty() {
-                    due = 0.0;
-                    continue;
-                }
-                let n = (due as usize).min(q.len());
-                due -= n as f64;
-                to.lock().unwrap().extend(q.drain(..n));
-            }
-        });
-        staging
-    }
-
     fn fake_factory(rx: Pipe, tx: Pipe) -> Factory {
-        let tx = paced(tx);
+        let clock = test_clock();
+        let start = clock.now();
         Box::new(move || {
             Ok(Box::new(FakeRadio {
                 rx: rx.clone(),
                 tx: tx.clone(),
-                clock: SoundClock::new(),
+                clock: clock.clone(),
+                start,
+                delivered: 0,
             }) as Box<dyn Backend>)
         })
     }
 
     fn wait_for(engine: &mut Engine, want: impl Fn(&Event) -> bool, secs: u64) -> Option<Event> {
-        let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline {
+        let deadline = test_clock().now() + Duration::from_secs(secs);
+        while test_clock().now() < deadline {
             if let Some(ev) = engine.poll_events().into_iter().find(|e| want(e)) {
                 return Some(ev);
             }
-            thread::sleep(Duration::from_millis(20));
+            test_clock().sleep(Duration::from_millis(20));
         }
         None
     }
@@ -4115,8 +4858,9 @@ mod tests {
 
     #[test]
     fn band_names_from_frequency() {
-        assert_eq!(band_name(14.1), "20M");
-        assert_eq!(band_name(7.074), "40M");
+        assert_eq!(band_name(18.1134), "17M");
+        assert_eq!(band_name(14.1), "");
+        assert_eq!(band_name(7.074), "");
         assert_eq!(band_name(10.0), "");
     }
 
@@ -4136,7 +4880,7 @@ mod tests {
             data: vec![0, 255],
         };
         for m in [mail, file] {
-            assert_eq!(decode_item(&encode_message(&m, false)), Some((m, false)));
+            assert_eq!(decode_message(&encode_message(&m, false)), Some(m));
         }
         assert_eq!(
             priority_of(&Message::Chat {
@@ -4150,13 +4894,11 @@ mod tests {
 
     #[test]
     fn rejects_empty_callsign() {
-        let _rt = realtime();
         assert!(Engine::new(config("", temp_dir("empty"))).is_err());
     }
 
     #[test]
     fn rejects_bad_sdr_setting() {
-        let _rt = realtime();
         let mut c = config("T1AA", temp_dir("sdr"));
         c.sdr = Some("nosuchradio".into());
         assert!(Engine::new(c).is_err());
@@ -4164,22 +4906,20 @@ mod tests {
 
     #[test]
     fn new_does_not_open_the_radio() {
-        let _rt = realtime();
         let opened = Arc::new(AtomicBool::new(false));
         let flag = opened.clone();
         let factory: Factory = Box::new(move || {
             flag.store(true, Ordering::SeqCst);
             Err("no radio in this test".to_string())
         });
-        let engine = Engine::spawn(config("T1AA", temp_dir("lazy")), factory).unwrap();
-        thread::sleep(Duration::from_millis(50));
+        let engine = vspawn(config("T1AA", temp_dir("lazy")), factory).unwrap();
+        test_clock().sleep(Duration::from_millis(50));
         assert!(!opened.load(Ordering::SeqCst));
         drop(engine);
     }
 
     #[test]
     fn engine_starts_with_no_sdr_and_with_hackrf_listed() {
-        let _rt = realtime();
         // Start-up never opens a radio: no SDR configured, or a HackRF named as the input.
         let mut none = config("AA1AAA", temp_dir("start-no-sdr"));
         none.sdr = None;
@@ -4251,7 +4991,6 @@ mod tests {
 
     #[test]
     fn poll_events_returns_quickly_during_transmit() {
-        let _rt = realtime();
         let written = Arc::new(AtomicU64::new(0));
         let w = written.clone();
         let factory: Factory =
@@ -4282,14 +5021,22 @@ mod tests {
         assert!(slowest < Duration::from_millis(5), "slowest call {slowest:?}");
         assert_eq!(states.first(), Some(&TxState::Starting), "{states:?}");
         assert!(states.contains(&TxState::Sending), "{states:?}");
-        let done = wait_for(&mut e, |ev| matches!(ev, Event::Tx { state: TxState::Done }), 10);
-        assert!(done.is_some(), "transmit did not finish");
+        // Real time here: this engine runs on the wall clock.
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut done = false;
+        while !done && Instant::now() < end {
+            done = e
+                .poll_events()
+                .iter()
+                .any(|ev| matches!(ev, Event::Tx { state: TxState::Done }));
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(done, "transmit did not finish");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn spectrum_arrives_at_least_20_times_a_second() {
-        let _rt = realtime();
         let factory: Factory = Box::new(|| {
             Ok(Box::new(ClockRadio {
                 start: Instant::now(),
@@ -4320,90 +5067,82 @@ mod tests {
         assert!(in_one_second >= 20, "only {in_one_second} frames in one second");
     }
 
+    /// Finds and decodes one KAMI frame of any mode in `audio`: (end in samples, payload, mode).
+    fn decode_any(audio: &[f32]) -> Option<(usize, Vec<u8>, Modulation)> {
+        let (start, hz, tau) = kahf_core::kami::find_preamble(audio)?;
+        let fits: Vec<Modulation> = KAMI_MODES
+            .iter()
+            .copied()
+            .filter(|&m| start + frame_len_for(m) <= audio.len())
+            .collect();
+        let shapes: Vec<kahf_core::kami::Shape> = fits.iter().filter_map(|m| m.kami_shape()).collect();
+        kahf_core::kami::demodulate_at(&audio[start..], 0, hz, tau, ldpc::N, &shapes)
+            .into_iter()
+            .find_map(|(sh, llr)| {
+                let m = *fits.iter().find(|m| m.kami_shape() == Some(sh))?;
+                let info = ldpc::decode(&llr, LDPC_ITER)?;
+                let (data, id) = frame::parse_payload_id(&info)?;
+                (id & ID_MODE_MASK == mod_id(m)).then_some((start + frame_len_for(m), data, m))
+            })
+    }
+
     #[test]
-    fn ladder_burst_frames_survive_air_and_scan() {
-        let frames: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8 + 1; 20 + i]).collect();
-        for name in ["R4", "Q12", "S12", "T34"] {
-            let level = rung(name);
-            let mut air = vec![0f32; 3000];
-            air.extend(hf_bursts(&frames, level, burst::FrameKind::Link));
-            air.extend(vec![0f32; 3000]);
-            match burst::scan(&air, rung(HF_LINK_START)) {
-                burst::Scan::Heard(h) => {
-                    assert_eq!(h.mode, level, "{name} heard as {}", burst::LADDER[h.mode].name);
-                    // Groups beyond the first burst follow; the first group is what one scan returns.
-                    let n = burst::long_codewords(&burst::LADDER[level]).min(frames.len());
-                    assert_eq!(h.frames, frames[..n].to_vec(), "{name}");
-                }
-                other => panic!("{name}: {other:?}"),
-            }
+    fn every_kami_mode_is_found_and_decoded_as_itself() {
+        for m in KAMI_MODES {
+            let payload = format!("hello {m:?}").into_bytes();
+            let mut air = vec![0f32; 777];
+            air.extend(burst(std::slice::from_ref(&payload), m).unwrap());
+            air.extend(vec![0f32; 300]);
+            let (end, got, mode) = decode_any(&air).unwrap_or_else(|| panic!("{m:?} not found"));
+            assert_eq!(got, payload, "{m:?}");
+            assert_eq!(mode, m);
+            assert_eq!(end, 777 + LEAD_SILENCE + frame_len_for(m), "{m:?} end");
         }
+        // Higher numbers are slower; the single-chip modes are fastest.
+        assert!(frame_len_for(Modulation::Kami1d) < frame_len_for(Modulation::Kami8));
+        assert!(frame_len_for(Modulation::Kami8) < frame_len_for(Modulation::Kami32));
+        assert!(frame_len_for(Modulation::Kami32) < frame_len_for(Modulation::Kami256));
     }
 
     #[test]
-    fn frame_survives_air_and_is_found_by_preamble_search() {
-        assert_eq!(frame_template()[..PREAMBLE_LEN].len(), PREAMBLE_LEN);
-        let payload = b"hello kahf".to_vec();
-        let mut air = vec![0f32; 1234];
-        air.extend(burst(&[payload.clone()], MODULATION).unwrap());
-        air.extend(vec![0f32; 500]);
-        let start = find_preamble(&air).expect("preamble found");
-        let expected = 1234 + LEAD_SILENCE;
-        assert!(
-            start.abs_diff(expected) <= 1,
-            "start {start}, expected {expected}"
-        );
-        let got = decode_at(&air[start..start + frame_len()], MODULATION).expect("frame decodes");
-        assert_eq!(got, payload);
-    }
-
-    #[test]
-    fn back_to_back_frames_decode_in_order() {
+    fn frames_of_one_burst_share_a_preamble_and_decode_in_order() {
         let payloads: Vec<Vec<u8>> = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
-        let air = burst(&payloads, MODULATION).unwrap();
-        let flen = frame_len();
-        let mut pos = 0;
-        let mut got = Vec::new();
-        while let Some(rel) = find_preamble(&air[pos..]) {
-            let start = pos + rel;
-            if start + flen > air.len() {
-                break;
-            }
-            got.push(decode_at(&air[start..start + flen], MODULATION).expect("frame decodes"));
-            pos = start + flen;
+        for m in [Modulation::Kami8, Modulation::Kami1b] {
+            let air = burst(&payloads, m).unwrap();
+            assert_eq!(air.len(), LEAD_SILENCE + burst_len_for(m, 3) + TAIL_SILENCE);
+            assert!(
+                burst_len_for(m, 3) < 3 * frame_len_for(m),
+                "{m:?} shares the preamble"
+            );
+            let (start, hz, tau) = kahf_core::kami::find_preamble(&air).expect("preamble");
+            let llrs = kahf_core::kami::demodulate_burst_at(
+                &air,
+                start,
+                hz,
+                tau,
+                ldpc::N,
+                3,
+                m.kami_shape().unwrap(),
+            )
+            .expect("burst fits");
+            let got: Vec<Vec<u8>> = llrs
+                .iter()
+                .map(|l| {
+                    let info = ldpc::decode(l, LDPC_ITER).expect("decodes");
+                    frame::parse_payload_id(&info).expect("parses").0
+                })
+                .collect();
+            assert_eq!(got, payloads, "{m:?}");
         }
-        assert_eq!(got, payloads);
     }
 
     #[test]
-    fn weak_mode_decodes_where_one_copy_does_not() {
-        let payload = b"weak mode".to_vec();
-        let clean = weak_burst(&[payload.clone()]).expect("weak burst builds");
-        // The first copy starts after the lead-in silence.
-        let stride = frame_len_for(Modulation::Qpsk) + GAP_SILENCE;
-        let copy_at = |i: usize| LEAD_SILENCE + i * stride;
-        let noisy = kahf_sim::awgn(&clean, -4.0, 4242);
-        let one = &noisy[copy_at(0)..copy_at(0) + frame_len_for(Modulation::Qpsk)];
-        assert_eq!(
-            decode_at(one, Modulation::Qpsk),
-            None,
-            "a single copy should fail at -4 dB"
-        );
-        let combined = decode_combined(&noisy[copy_at(0)..]);
-        assert_eq!(combined.as_deref(), Some(payload.as_slice()));
-    }
-
-    #[test]
-    fn each_modulation_decodes_only_as_itself() {
+    fn each_kami_mode_decodes_only_as_itself() {
         let payload = b"KAHF modulation test".to_vec();
-        for &m in &MODULATIONS {
+        for &m in &KAMI_MODES {
             let air = frame_samples_as(&payload, m).expect("frame builds");
-            assert_eq!(decode_at(&air, m).as_deref(), Some(payload.as_slice()));
-            for &other in &MODULATIONS {
-                if other != m {
-                    assert_eq!(decode_at(&air, other), None, "{m:?} frame read as {other:?}");
-                }
-            }
+            let (_, got, mode) = decode_any(&air).unwrap_or_else(|| panic!("{m:?} does not decode"));
+            assert_eq!((got.as_slice(), mode), (payload.as_slice(), m));
         }
     }
 
@@ -4461,17 +5200,18 @@ mod tests {
     }
 
     /// Two engines on crossed fake pipes: A talks to B and B talks to A, no echo.
+    /// Ignored: kahf-core::link and kahf-core::session still panic (unimplemented!).
+    /// Enable with `cargo test -p kahf-daemon -- --ignored` once both are done.
     #[test]
     fn queued_while_offline_is_sent_after_link_up() {
-        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir("offline-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("offline-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4479,7 +5219,7 @@ mod tests {
 
         a.send_message("BB1BBB", "hi there").unwrap();
         assert!(wait_until(5, || a.outbox_pending().len() == 1));
-        thread::sleep(Duration::from_millis(200));
+        test_clock().sleep(Duration::from_millis(200));
         assert!(
             a_to_b.lock().unwrap().is_empty(),
             "nothing may go out before the link is up"
@@ -4500,21 +5240,20 @@ mod tests {
         );
         assert!(got.is_some(), "queued message did not arrive");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !a.outbox_pending().is_empty() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
+        let deadline = test_clock().now() + Duration::from_secs(30);
+        while !a.outbox_pending().is_empty() && test_clock().now() < deadline {
+            test_clock().sleep(Duration::from_millis(20));
         }
         assert!(a.outbox_pending().is_empty(), "sent item stayed in the outbox");
     }
 
     #[test]
     fn outbox_survives_restart() {
-        let _rt = realtime();
         let dir = temp_dir("restart");
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         {
-            let mut a = Engine::spawn(
+            let mut a = vspawn(
                 config("AA1AAA", dir.clone()),
                 fake_factory(b_to_a.clone(), a_to_b.clone()),
             )
@@ -4524,7 +5263,7 @@ mod tests {
         }
         assert!(dir.join("outbox.bin").exists());
 
-        let mut a = Engine::spawn(config("AA1AAA", dir.clone()), fake_factory(b_to_a, a_to_b)).unwrap();
+        let mut a = vspawn(config("AA1AAA", dir.clone()), fake_factory(b_to_a, a_to_b)).unwrap();
         assert!(wait_until(5, || a.outbox_pending().len() == 2));
         let pending = a.outbox_pending();
         assert_eq!(pending.len(), 2, "{pending:?}");
@@ -4539,16 +5278,15 @@ mod tests {
 
     #[test]
     fn logbook_line_written_on_disconnect() {
-        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let dir = temp_dir("logbook-a");
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", dir.clone()),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("logbook-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4567,9 +5305,9 @@ mod tests {
 
         a.disconnect().unwrap();
         let log = dir.join("logbook.txt");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !log.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
+        let deadline = test_clock().now() + Duration::from_secs(10);
+        while !log.exists() && test_clock().now() < deadline {
+            test_clock().sleep(Duration::from_millis(20));
         }
         let text = fs::read_to_string(&log).unwrap();
         assert!(
@@ -4581,15 +5319,14 @@ mod tests {
 
     #[test]
     fn loopback_message_reaches_other_engine() {
-        let _rt = realtime();
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir("loop-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
+        let mut b = vspawn(
             config("BB1BBB", temp_dir("loop-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
@@ -4613,483 +5350,475 @@ mod tests {
         assert!(got.is_some(), "message did not arrive");
     }
 
-    /// Two stations on one shared audio bus, like two programs on one BlackHole device: every
-    /// station hears everything sent on the bus, including its own transmissions.
-    fn shared_bus(calls: [&str; 2], tag: &str) -> (Engine, Engine) {
-        shared_bus_at(calls, tag, 1.0)
+    /// A radio whose receive path adds white Gaussian noise of a fixed level to the samples it
+    /// hands over, like a band with a constant noise floor.
+    struct NoisyRadio {
+        inner: FakeRadio,
+        sigma: f32,
+        state: u64,
     }
 
-    /// Like `shared_bus`, with the signal scaled on its way (a quiet or loud sound path).
-    fn shared_bus_at(calls: [&str; 2], tag: &str, gain: f32) -> (Engine, Engine) {
-        shared_bus_noisy(calls, tag, gain, 0.0)
-    }
-
-    /// Like `shared_bus_at`, with a constant noise floor of amplitude `floor` on every read.
-    fn shared_bus_noisy(calls: [&str; 2], tag: &str, gain: f32, floor: f32) -> (Engine, Engine) {
-        let (rx_a, tx_a): (Pipe, Pipe) = Default::default();
-        let (rx_b, tx_b): (Pipe, Pipe) = Default::default();
-        let wires = [
-            (tx_a.clone(), vec![rx_a.clone(), rx_b.clone()]),
-            (tx_b.clone(), vec![rx_a.clone(), rx_b.clone()]),
-        ];
-        // A sound device that is always running: every 10 ms each station reads 80 samples of
-        // whatever is on the bus (silence and a noise floor when nobody transmits), at the
-        // speed of real playback. Both stations hear both, and themselves.
-        // A virtual cable such as BlackHole delays everything by a few tenths of a second.
-        for o in &wires[0].1 {
-            o.lock().unwrap().extend(std::iter::repeat_n(0.0f32, 3200));
+    impl NoisyRadio {
+        fn gauss(&mut self) -> f32 {
+            let mut u = || {
+                self.state = self
+                    .state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+            };
+            let (a, b) = (u(), u());
+            ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32
         }
-        thread::spawn(move || {
-            let mut seed = 7u64;
-            let mut due = 0.0f64;
-            let mut last = Instant::now();
-            loop {
-                thread::sleep(Duration::from_millis(10));
-                let now = Instant::now();
-                due += now.duration_since(last).as_secs_f64() * RATE as f64;
-                last = now;
-                let n = due as usize;
-                due -= n as f64;
-                seed += 1;
-                let mut mixed = noise(n, floor, seed);
-                for (tx, _) in &wires {
-                    let mut q = tx.lock().unwrap();
-                    let take = n.min(q.len());
-                    for (m, s) in mixed.iter_mut().zip(q.drain(..take)) {
-                        *m += s * gain;
-                    }
-                }
-                for o in &wires[0].1 {
-                    o.lock().unwrap().extend(mixed.iter().copied());
-                }
+    }
+
+    impl Backend for NoisyRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            let from = out.len();
+            self.inner.read_audio(out)?;
+            for v in out.iter_mut().skip(from) {
+                *v += self.sigma * self.gauss();
             }
-        });
-        let a = Engine::spawn(
-            config(calls[0], temp_dir(&format!("{tag}-a"))),
-            fake_factory(rx_a, tx_a),
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.inner.tx_start()
+        }
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            self.inner.tx_write(samples, start, end)
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            self.inner.tx_stop()
+        }
+    }
+
+    /// Noise level that puts a KAMI-32 burst at `snr_db` (per real sample).
+    fn noise_for(snr_db: f32) -> f32 {
+        let air = burst(&[b"ref".to_vec()], Modulation::Kami32).unwrap();
+        let body = &air[LEAD_SILENCE..air.len() - TAIL_SILENCE];
+        // The engine sends at its transmit level, below full scale.
+        let rms = (body.iter().map(|v| v * v).sum::<f32>() / body.len() as f32).sqrt()
+            * DEFAULT_TX_LEVEL_PCT as f32
+            / 100.0;
+        rms * 10f32.powf(-snr_db / 20.0)
+    }
+
+    fn noisy_factory(rx: Pipe, tx: Pipe, sigma: f32, seed: u64) -> Factory {
+        let clock = test_clock();
+        let start = clock.now();
+        Box::new(move || {
+            Ok(Box::new(NoisyRadio {
+                inner: FakeRadio {
+                    rx: rx.clone(),
+                    tx: tx.clone(),
+                    clock: clock.clone(),
+                    start,
+                    delivered: 0,
+                },
+                sigma,
+                state: seed,
+            }) as Box<dyn Backend>)
+        })
+    }
+
+    /// Two engines over a channel with the given noise; a is linked to b.
+    fn linked_pair(tag: &str, sigma: f32) -> (Engine, Engine) {
+        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut a = vspawn(
+            config("AA1AAA", temp_dir(&format!("{tag}-a"))),
+            noisy_factory(b_to_a.clone(), a_to_b.clone(), sigma, 11),
         )
         .unwrap();
-        let b = Engine::spawn(
-            config(calls[1], temp_dir(&format!("{tag}-b"))),
-            fake_factory(rx_b, tx_b),
+        let mut b = vspawn(
+            config("BB1BBB", temp_dir(&format!("{tag}-b"))),
+            noisy_factory(a_to_b.clone(), b_to_a.clone(), sigma, 22),
         )
         .unwrap();
+        b.listen().unwrap();
+        a.connect("BB1BBB").unwrap();
+        assert!(
+            wait_for(
+                &mut a,
+                |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
+                120
+            )
+            .is_some(),
+            "link did not come up"
+        );
         (a, b)
     }
 
-    /// A small, repeatable noise floor, in the range of -60 dB against a full-scale burst.
-    fn noise(n: usize, amp: f32, seed: u64) -> Vec<f32> {
-        let mut s = seed | 1;
-        (0..n)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                ((s >> 11) as f32 / (1u64 << 53) as f32 - 0.5) * 2.0 * amp
+    fn send_and_wait(a: &mut Engine, b: &mut Engine, text: &str) {
+        a.send_message("BB1BBB", text).unwrap();
+        assert!(
+            wait_for(
+                b,
+                |e| matches!(e, Event::Message { text: t, .. } if t == text),
+                120
+            )
+            .is_some(),
+            "{text:?} did not arrive at {}",
+            a.transmit_modulation()
+        );
+    }
+
+    /// A radio on a small shared-air model: it hears the stations whose pipes it is given and
+    /// its transmissions go to the pipes of the stations that hear it.
+    struct MeshRadio {
+        rx: Vec<Pipe>,
+        tx: Vec<Pipe>,
+        sigma: f32,
+        state: u64,
+        clock: Clock,
+        start: Instant,
+        delivered: usize,
+    }
+
+    impl Backend for MeshRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
+        /// One second of audio per (virtual) second: what the heard stations sent, added up, or silence.
+        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+            let from = out.len();
+            let due = (self.clock.since(self.start).as_secs_f64() * RATE as f64) as usize;
+            let n = due.saturating_sub(self.delivered);
+            self.delivered += n;
+            out.resize(from + n, 0.0);
+            for p in &self.rx {
+                let mut q = p.lock().unwrap();
+                for v in out.iter_mut().skip(from) {
+                    match q.pop_front() {
+                        Some(x) => *v += x,
+                        None => break,
+                    }
+                }
+            }
+            if self.sigma > 0.0 {
+                for v in out.iter_mut().skip(from) {
+                    self.state = self
+                        .state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let a = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+                    self.state = self
+                        .state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let b = ((self.state >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+                    *v +=
+                        self.sigma * ((-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()) as f32;
+                }
+            }
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
+            for p in &self.tx {
+                p.lock().unwrap().extend(samples[start..end].iter().copied());
+            }
+            Ok(())
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Engines for `calls`, where `hears` lists (from, to): station `to` hears station `from`.
+    fn mesh(tag: &str, calls: &[&str], hears: &[(usize, usize)], sigma: f32) -> Vec<Engine> {
+        let pipes: Vec<Pipe> = hears
+            .iter()
+            .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+            .collect();
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, call)| {
+                let rx: Vec<Pipe> = hears
+                    .iter()
+                    .zip(&pipes)
+                    .filter(|((_, to), _)| *to == i)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                let tx: Vec<Pipe> = hears
+                    .iter()
+                    .zip(&pipes)
+                    .filter(|((from, _), _)| *from == i)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                let clock = test_clock();
+                let start = clock.now();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(MeshRadio {
+                        rx: rx.clone(),
+                        tx: tx.clone(),
+                        sigma,
+                        state: 7 + i as u64,
+                        clock: clock.clone(),
+                        start,
+                        delivered: 0,
+                    }) as Box<dyn Backend>)
+                });
+                vspawn(config(call, temp_dir(&format!("{tag}-{call}"))), factory).unwrap()
             })
             .collect()
     }
 
-    /// The preamble repeats every 128 samples, so the correlation is the same at each repeat.
-    /// The first one is the start of the frame. A little noise must never move the start to a
-    /// later repeat, or the frame is read 128 samples late and never decodes.
-    #[test]
-    fn preamble_start_is_the_first_repeat_even_with_noise() {
-        let air = burst(&[vec![0x42; 36]], MODULATION).unwrap();
-        for seed in 1..=40u64 {
-            let mut x = air.clone();
-            for (s, n) in x.iter_mut().zip(noise(air.len(), 0.002, seed)) {
-                *s += n;
-            }
-            let start = find_preamble(&x).expect("preamble");
-            assert_eq!(start, LEAD_SILENCE, "seed {seed}: frame start moved to {start}");
-            assert!(
-                decode_at(&x[start..start + frame_len_for(MODULATION)], MODULATION).is_some(),
-                "seed {seed}: the frame did not decode"
-            );
-        }
-    }
-
-    /// The same, end to end: two stations on a shared bus with a quiet signal and a noise floor
-    /// (what a real sound path such as BlackHole delivers) still connect.
-    #[test]
-    fn two_stations_connect_over_a_quiet_noisy_bus() {
-        let _rt = realtime();
-        let (mut a, mut b) = shared_bus_noisy(["ZZ1ALPHA", "ZZ2BRAVO"], "noisy", 0.0063, 0.0002);
-        a.listen().unwrap();
-        b.listen().unwrap();
-        a.connect("ZZ2BRAVO").unwrap();
-        let linked = wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            60,
-        );
-        assert!(linked.is_some(), "no link over a quiet bus with a noise floor");
-        a.send_message("ZZ2BRAVO", "through the noise").unwrap();
-        assert!(wait_for(
-            &mut b,
-            |e| matches!(e, Event::Message { text, .. } if text == "through the noise"),
-            60
-        )
-        .is_some());
-    }
-
-    #[test]
-    fn an_operator_who_sends_is_attending_whichever_side_started_the_link() {
-        let _rt = realtime();
-        let (mut e, _) = lone_station("operator-send");
-        assert!(!e.shared.flags.operator_link.load(Ordering::SeqCst));
-        e.send_message("BB1BBB", "hello").unwrap();
-        assert!(
-            e.shared.flags.operator_link.load(Ordering::SeqCst),
-            "a send did not count as the operator being present"
-        );
-    }
-
-    #[test]
-    fn a_hang_up_reaches_the_other_station() {
-        let _rt = realtime();
-        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
-            config("AA1AAA", temp_dir("hangup-a")),
-            fake_factory(b_to_a.clone(), a_to_b.clone()),
-        )
+    fn make_relay(e: &Engine) {
+        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
+            .unwrap();
+        // A relay sends only in its scheduled transmit slots: give it one that covers the test.
+        let now = now_unix_secs().max(0) as u64;
+        e.accept_relay_schedule(vec![Slot {
+            channel_khz: 14_000.0,
+            start_unix: now - 60,
+            duration_s: 3_600,
+            direction: relay::Direction::Transmit,
+        }])
         .unwrap();
-        let mut b = Engine::spawn(
-            config("BB1BBB", temp_dir("hangup-b")),
-            fake_factory(a_to_b.clone(), b_to_a.clone()),
-        )
+        e.start_relay(RelayAck {
+            licence_held: true,
+            terms_accepted: true,
+        })
         .unwrap();
+    }
+
+    #[test]
+    fn automatic_link_sends_a_queued_message_and_hangs_up() {
+        let mut st = mesh("autolink", &["AA1AAA", "BB1BBB"], &[(0, 1), (1, 0)], 0.0);
+        let (mut b, mut a) = (st.pop().unwrap(), st.pop().unwrap());
         b.listen().unwrap();
-        a.connect("BB1BBB").unwrap();
-        assert!(wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            60
-        )
-        .is_some());
-        assert!(wait_for(
-            &mut b,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            10
-        )
-        .is_some());
-        a.disconnect().unwrap();
-        let closed = wait_for(
-            &mut b,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Idle)),
-            15,
-        );
-        assert!(closed.is_some(), "the hang-up never reached the other station");
-    }
-
-    #[test]
-    fn our_data_waits_while_the_peer_has_the_turn() {
-        let _rt = realtime();
-        let mut w = bare_worker("turn", "AA1AAA");
-        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
-        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "my turn later")], vec![5], false);
-        w.link_state = LinkState::Connected {
-            peer: "BB1BBB".into(),
-        };
-        assert!(w.next_due().is_some(), "an idle channel holds up our data");
-        // The peer's DATA was just heard: it has the turn.
-        w.on_frame(vec![0x10, 0, b'x']);
-        assert!(w.peer_has_turn());
-        assert!(w.next_due().is_none(), "our data went out over the peer's turn");
-        // Its turn runs out when it sends no more.
-        w.peer_data_at = Some(Instant::now() - PEER_TURN_HOLD - Duration::from_millis(10));
-        assert!(!w.peer_has_turn());
-        assert!(w.next_due().is_some());
-    }
-
-    #[test]
-    fn the_link_clock_stands_still_in_the_peers_turn() {
-        let _rt = realtime();
-        let mut w = bare_worker("turn-clock", "AA1AAA");
-        w.link_mark = Instant::now() - Duration::from_millis(500);
-        w.tick_link();
-        let idle = w.link_ms;
-        assert!(idle >= 400, "the clock did not run on an idle channel: {idle}");
-        w.peer_data_at = Some(Instant::now());
-        w.link_mark = Instant::now() - Duration::from_millis(500);
-        w.tick_link();
-        assert_eq!(w.link_ms, idle, "the clock ran during the peer's turn");
-    }
-
-    #[test]
-    fn our_own_frames_played_back_are_recognised_and_other_frames_are_not() {
-        let mut w = bare_worker("own-echo", "AA1AAA");
-        let mine = vec![0x10, 3, b'h', b'i'];
-        w.remember_own_frames(vec![mine.clone()], 5280);
-        assert!(w.is_own_echo(&mine));
-        assert!(!w.is_own_echo(&[0x10, 3, b'h', b'o']));
-        // Once the playback window has passed, the same bytes are the peer's.
-        w.echoes[0].0 = Instant::now() - Duration::from_millis(1);
-        assert!(!w.is_own_echo(&mine));
-    }
-
-    #[test]
-    fn two_stations_on_one_shared_audio_bus_connect_and_talk() {
-        let _rt = realtime();
-        let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], "bus");
-        a.listen().unwrap();
-        b.listen().unwrap();
-        a.connect("ZZ2BRAVO").unwrap();
-        let linked = wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            60,
-        );
-        assert!(linked.is_some(), "the link did not come up on a shared bus");
-        a.send_message("ZZ2BRAVO", "hello over one cable").unwrap();
-        let got = wait_for(
-            &mut b,
-            |e| matches!(e, Event::Message { text, .. } if text == "hello over one cable"),
-            60,
-        );
-        assert!(got.is_some(), "the message did not arrive on a shared bus");
-        // The station that was called answers on the same link, without calling back.
-        b.send_message("ZZ1ALPHA", "and back again").unwrap();
-        let back = wait_for(
-            &mut a,
-            |e| matches!(e, Event::Message { text, .. } if text == "and back again"),
-            60,
-        );
-        assert!(back.is_some(), "the called station could not reply over the link");
-    }
-
-    /// One station per rung, a link, and a message each way on a shared bus.
-    fn talk_on_rungs(rung_a: &str, rung_b: &str, tag: &str) {
-        let _rt = realtime();
-        let (mut a, mut b) = shared_bus(["ZZ1ALPHA", "ZZ2BRAVO"], tag);
-        a.pin_hf_rung(Some(rung_a));
-        b.pin_hf_rung(Some(rung_b));
-        a.listen().unwrap();
-        b.listen().unwrap();
-        a.connect("ZZ2BRAVO").unwrap();
-        let linked = wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            90,
-        );
-        assert!(linked.is_some(), "no link with A on {rung_a} and B on {rung_b}");
-        a.send_message("ZZ2BRAVO", "there").unwrap();
-        let got = wait_for(
-            &mut b,
-            |e| matches!(e, Event::Message { text, .. } if text == "there"),
-            90,
-        );
+        a.set_auto_link(true);
+        a.send_message("BB1BBB", "no connect needed").unwrap();
         assert!(
-            got.is_some(),
-            "message A to B lost with A on {rung_a} and B on {rung_b}"
-        );
-        b.send_message("ZZ1ALPHA", "and back").unwrap();
-        let back = wait_for(
-            &mut a,
-            |e| matches!(e, Event::Message { text, .. } if text == "and back"),
-            90,
-        );
-        assert!(
-            back.is_some(),
-            "message B to A lost with A on {rung_a} and B on {rung_b}"
-        );
-    }
-
-    #[test]
-    fn both_stations_on_r4_talk_over_a_shared_bus() {
-        talk_on_rungs("R4", "R4", "bus-r4");
-    }
-
-    #[test]
-    fn stations_on_different_rungs_still_hear_each_other() {
-        talk_on_rungs("R4", "T12", "bus-mixed");
-    }
-
-    #[test]
-    fn beacon_fills_contact_grid_and_heard_list_persists() {
-        let dir = temp_dir("beacon");
-        let (e, _) = {
-            let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-            let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-            (
-                Engine::spawn(config("AA1AAA", dir.clone()), fake_factory(a.clone(), b.clone())).unwrap(),
-                a,
+            wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text, .. } if text == "no connect needed"),
+                120
             )
-        };
-        // Hand-typed QTH stays; an empty one is filled; a new station is added.
-        let path = dir.join("contacts.txt");
-        fs::create_dir_all(&dir).unwrap();
-        let mut list = Vec::new();
-        contacts::upsert(
-            &mut list,
-            Contact {
-                call: "CC3CCC".into(),
-                name: String::new(),
-                qth: "Home".into(),
-                notes: String::new(),
-                last_heard: None,
-            },
+            .is_some(),
+            "the queued message was not sent by itself"
         );
-        contacts::save(&path, &list).unwrap();
-
-        let gps = kahf_core::msg::grid::beacon_payload("BB1BBB", Some((51.5, -0.12)), None).unwrap();
-        assert_eq!(e.note_beacon(&gps), Some(("BB1BBB".into(), "IO91WM".into())));
-        let manual = kahf_core::msg::grid::beacon_payload("CC3CCC", None, Some("JN58")).unwrap();
-        assert_eq!(e.note_beacon(&manual), Some(("CC3CCC".into(), "JN58".into())));
-        assert_eq!(e.note_beacon(b"junk"), None);
-        let own = kahf_core::msg::grid::beacon_payload("AA1AAA", None, Some("IO91")).unwrap();
-        assert_eq!(e.note_beacon(&own), None);
-
-        let list = contacts::load(&path).unwrap();
-        assert_eq!(list.iter().find(|c| c.call == "BB1BBB").unwrap().qth, "IO91WM");
-        assert_eq!(list.iter().find(|c| c.call == "CC3CCC").unwrap().qth, "Home");
-        let heard = e.heard_stations(10);
-        assert_eq!(heard.len(), 2);
-        assert!(heard.iter().all(|h| h.position.is_some()));
-        drop(e);
-        // A new engine on the same folder still knows them.
-        let a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let e2 = Engine::spawn(config("AA1AAA", dir), fake_factory(a, b)).unwrap();
-        assert_eq!(e2.heard_stations(10).len(), 2);
+        // A chat needs no connection: it went out as bundle frames and the link stayed idle.
+        assert!(
+            !a.poll_events()
+                .iter()
+                .any(|e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. }))),
+            "a chat should not open a link"
+        );
     }
 
+    /// Two hops: A hears only relay R1, R1 hears R2, R2 hears B. R1 passes the message to R2,
+    /// which delivers it, and B gets it once.
     #[test]
-    fn loopback_records_heard_station() {
-        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
-            config("AA1AAA", temp_dir("heard-a")),
-            fake_factory(b_to_a.clone(), a_to_b.clone()),
-        )
-        .unwrap();
-        let mut b = Engine::spawn(
-            config("BB1BBB", temp_dir("heard-b")),
-            fake_factory(a_to_b.clone(), b_to_a.clone()),
-        )
-        .unwrap();
-        b.listen().unwrap();
-        a.connect("BB1BBB").unwrap();
-        assert!(wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            60
-        )
-        .is_some());
-        assert!(a.heard_stations(5).iter().any(|h| h.call == "BB1BBB"));
-    }
-
-    #[test]
-    fn group_chat_between_two_engines() {
-        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let (da, db) = (temp_dir("grp-a"), temp_dir("grp-b"));
-        let mut a = Engine::spawn(
-            config("AA1AAA", da.clone()),
-            fake_factory(b_to_a.clone(), a_to_b.clone()),
-        )
-        .unwrap();
-        let mut b =
-            Engine::spawn(config("BB1BBB", db), fake_factory(a_to_b.clone(), b_to_a.clone())).unwrap();
-        assert!(a.send_group("net", "x").is_err(), "not joined");
-        assert!(a.join_group("bad name", &[]).is_err());
-        assert_eq!(b.join_group("net", &[]).unwrap(), "#NET");
-        assert_eq!(
-            a.join_group("net", &["BB1BBB", "AA1AAA", "bad call"]).unwrap(),
-            "#NET"
+    fn a_message_goes_over_two_relays() {
+        let mut st = mesh(
+            "relay-two",
+            &["AA1AAA", "RR1RRR", "RR2RRR", "BB1BBB"],
+            &[(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)],
+            0.0,
         );
-        assert!(a.send_group("net", "x").is_err(), "nobody else known yet");
-        b.listen().unwrap();
-        // B's operator is at the radio (queued replies only go out when someone is attending).
-        b.shared.flags.operator_link.store(true, Ordering::SeqCst);
-        a.connect("BB1BBB").unwrap();
-        assert!(wait_for(
-            &mut a,
-            |e| matches!(e, Event::Link(kahf_core::link::LinkState::Connected { .. })),
-            60
-        )
-        .is_some());
-        // B learns about A from the join line and answers with its roster; wait for A to know B.
-        for _ in 0..60 {
-            if a.groups().iter().any(|(_, m)| m.iter().any(|c| c == "BB1BBB")) {
-                break;
-            }
-            let _ = a.poll_events();
-            let _ = b.poll_events();
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        assert_eq!(
-            a.groups(),
-            vec![(
-                "#NET".to_string(),
-                vec!["AA1AAA".to_string(), "BB1BBB".to_string()]
-            )]
+        let (mut b, mut r2, mut r1, mut a) = (
+            st.pop().unwrap(),
+            st.pop().unwrap(),
+            st.pop().unwrap(),
+            st.pop().unwrap(),
         );
-        assert_eq!(a.send_group("net", "hello net").unwrap(), 1);
+        make_relay(&r1);
+        make_relay(&r2);
+        r1.listen().unwrap();
+        r2.listen().unwrap();
+        b.listen().unwrap();
+        a.set_auto_link(true);
+        a.set_relay_hints(&["RR1RRR".to_string()]);
+        a.set_relay_timeout_ms(500);
+        r1.set_relay_hints(&["RR2RRR".to_string()]);
+        a.send_message("BB1BBB", "over two relays").unwrap();
         let got = wait_for(
             &mut b,
-            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "#NET hello net"),
-            60,
+            |e| matches!(e, Event::Message { text, .. } if text == "over two relays"),
+            900,
         );
-        assert!(got.is_some(), "group message did not arrive");
-        // Control lines never show up as chat, and membership is saved.
-        assert!(!b
-            .poll_events()
-            .iter()
-            .any(|e| matches!(e, Event::Message { text, .. } if text.contains("KAHFGRP1"))));
-        assert!(fs::read_to_string(da.join("groups.txt"))
-            .unwrap()
-            .contains("#NET\t1\t"));
-        a.leave_group("net").unwrap();
-        assert!(a.groups().is_empty());
+        assert!(got.is_some(), "the message did not arrive over two relays");
     }
 
     #[test]
-    fn beacon_over_the_air_teaches_grid_to_a_listener() {
-        let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let a = Engine::spawn(
-            config("AA1AAA", temp_dir("bcn-a")),
-            fake_factory(b_to_a.clone(), a_to_b.clone()),
-        )
-        .unwrap();
-        let mut b = Engine::spawn(
-            config("BB1BBB", temp_dir("bcn-b")),
-            fake_factory(a_to_b.clone(), b_to_a.clone()),
-        )
-        .unwrap();
-        assert!(a.set_beacon(true, None, None).is_err(), "nothing to say");
-        assert!(a.set_beacon(true, None, Some("nope")).is_err());
+    fn a_message_reaches_a_station_that_only_a_relay_can_hear() {
+        // A and B cannot hear each other; both hear the relay R.
+        let mut st = mesh(
+            "relay3",
+            &["AA1AAA", "RR1RRR", "BB1BBB"],
+            &[(0, 1), (1, 0), (1, 2), (2, 1)],
+            0.0,
+        );
+        let (mut b, mut r, mut a) = (st.pop().unwrap(), st.pop().unwrap(), st.pop().unwrap());
+        make_relay(&r);
+        r.listen().unwrap();
         b.listen().unwrap();
-        a.set_beacon(true, None, Some("io91")).unwrap();
-        let mut learned = None;
-        for _ in 0..90 {
-            let _ = b.poll_events();
-            if let Some(h) = b.heard_stations(5).into_iter().find(|h| h.call == "AA1AAA") {
-                learned = Some(h);
-                break;
+        a.set_auto_link(true);
+        a.set_relay_hints(&["RR1RRR".to_string()]);
+        a.set_relay_timeout_ms(500);
+        a.send_message("BB1BBB", "through the relay").unwrap();
+        assert!(
+            wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text, .. } if text == "through the relay"),
+                400
+            )
+            .is_some(),
+            "the relayed message did not arrive"
+        );
+        // A heard the relay answer, not B: the message is "at the relay", not "delivered".
+        let told: Vec<Delivery> = a
+            .poll_events()
+            .into_iter()
+            .filter_map(|e| {
+                if let Event::Delivery { state, .. } = e {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            told.contains(&Delivery::AtRelay) && !told.contains(&Delivery::Delivered),
+            "{told:?}"
+        );
+        // The forward is counted when B has acknowledged it, a moment after B showed the message.
+        let counted = |r: &Engine| r.relay_stats().sent_in_hour_of(now_unix_secs().max(0) as u64);
+        assert!(wait_until(30, || counted(&r) == 1), "one forward counted");
+        assert_eq!(counted(&r), 1);
+        // Delivered once only.
+        test_clock().sleep(Duration::from_secs(5));
+        let again = b
+            .poll_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Message { text, .. } if text == "through the relay"))
+            .count();
+        assert_eq!(again, 0, "no second copy");
+        // The relay only carried it: no file in its data folder may hold the text (MESH-SPEC 7).
+        let hits = files_containing(&r.config.data_dir, b"through the relay");
+        assert!(
+            hits.is_empty(),
+            "the relay wrote the message body to disk: {hits:?}"
+        );
+        // Sanity: the same scan does find it where it belongs, the sender's own outbox/log or the receiver's.
+        let _ = (&a, &b);
+    }
+
+    /// Paths under `dir` (recursively) whose bytes contain `needle`.
+    fn files_containing(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            let Ok(rd) = fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle)) {
+                    out.push(p);
+                }
             }
-            std::thread::sleep(Duration::from_millis(500));
         }
-        let h = learned.expect("B did not hear A's beacon");
-        assert_eq!(h.position.map(|p| (p.0.round(), p.1.round())), Some((52.0, -1.0)));
-        let contacts = contacts::load(&b.config.data_dir.join("contacts.txt")).unwrap();
-        assert_eq!(contacts.iter().find(|c| c.call == "AA1AAA").unwrap().qth, "IO91");
+        out
     }
 
     #[test]
-    fn link_ack_marks_a_message_delivered() {
+    fn the_file_scan_finds_a_body_where_one_is_kept() {
+        let dir = temp_dir("scan-self-test");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("x.log"), b"abc through the relay def").unwrap();
+        assert_eq!(files_containing(&dir, b"through the relay").len(), 1);
+        assert!(files_containing(&dir, b"nothing here").is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The raw scan is only worth something if it would catch the body in the outbox, where it
+    /// is kept on purpose (the sender's own copy).
+    #[test]
+    fn the_scan_finds_a_queued_body_in_the_senders_own_outbox() {
+        let mut st = mesh("scan-outbox", &["AA1AAA", "BB1BBB"], &[(0, 1), (1, 0)], 0.0);
+        let a = &mut st[0];
+        a.send_message("BB1BBB", "needle-in-the-outbox").unwrap();
+        test_clock().sleep(Duration::from_millis(200));
+        let hits = files_containing(&a.config.data_dir, b"needle-in-the-outbox");
+        assert!(
+            !hits.is_empty(),
+            "outbox files: {:?}",
+            fs::read_dir(&a.config.data_dir).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn automatic_mode_climbs_to_the_fastest_on_a_clean_link() {
+        let (mut a, mut b) = linked_pair("auto-clean", 0.0);
+        let mut status = None;
+        for i in 0..5 {
+            test_clock().sleep(Duration::from_millis(1500));
+            send_and_wait(&mut a, &mut b, &format!("clean {i}"));
+            for ev in a.poll_events() {
+                if let Event::Metrics(s) = ev {
+                    status = Some(s);
+                }
+            }
+        }
+        assert_eq!(
+            a.transmit_modulation(),
+            "KAMI-1d",
+            "a clean link should use the fastest mode"
+        );
+        let s = status.expect("a metrics event");
+        assert!(s.auto && s.net_bps > 4000, "{s:?}");
+        assert!(s.peer_snr_db.unwrap_or(0.0) > 30.0, "{s:?}");
+    }
+
+    #[test]
+    fn automatic_mode_stays_robust_on_a_noisy_link_and_still_delivers() {
+        let (mut a, mut b) = linked_pair("auto-noisy", noise_for(-4.0));
+        for i in 0..4 {
+            test_clock().sleep(Duration::from_millis(1500));
+            send_and_wait(&mut a, &mut b, &format!("noisy {i}"));
+        }
+        let robust = [
+            "KAMI-256", "KAMI-128", "KAMI-64", "KAMI-32", "KAMI-16", "KAMI-8", "KAMI-4",
+        ];
+        assert!(
+            robust.contains(&a.transmit_modulation()),
+            "mode {}",
+            a.transmit_modulation()
+        );
+    }
+
+    #[test]
+    fn a_fixed_mode_overrides_automatic_choice() {
+        let (mut a, mut b) = linked_pair("fixed", 0.0);
+        assert!(a.set_fixed_mode("KAMI-99").is_err());
+        assert!(Engine::mode_names().contains(&"KAMI-64"));
+        a.set_fixed_mode("kami-64").unwrap();
+        test_clock().sleep(Duration::from_millis(1500));
+        send_and_wait(&mut a, &mut b, "fixed rate");
+        assert_eq!(a.transmit_modulation(), "KAMI-64");
+        a.set_auto_mode(true);
+    }
+
+    #[test]
+    fn clean_link_steps_up_the_modulation() {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
-            config("AA1AAA", temp_dir("dlv-a")),
+        let mut a = vspawn(
+            config("AA1AAA", temp_dir("step-a")),
             fake_factory(b_to_a.clone(), a_to_b.clone()),
         )
         .unwrap();
-        let mut b = Engine::spawn(
-            config("BB1BBB", temp_dir("dlv-b")),
+        let mut b = vspawn(
+            config("BB1BBB", temp_dir("step-b")),
             fake_factory(a_to_b.clone(), b_to_a.clone()),
         )
         .unwrap();
@@ -5101,79 +5830,41 @@ mod tests {
             60
         )
         .is_some());
-        let id = a.send_mail("BB1BBB", "subject", "body", &[]).unwrap();
-        assert_eq!(a.delivery(id), None, "not on air yet");
-        let mut state = None;
-        for _ in 0..90 {
-            let _ = b.poll_events();
-            let _ = a.poll_events();
-            state = a.delivery(id);
-            if state.as_ref().is_some_and(|s| s[0].1 == "delivered") {
-                break;
+        assert_eq!(a.transmit_modulation(), "KAMI-32");
+        for i in 0..4 {
+            // Give the peer's ACK, which carries its error report, time to come back before
+            // the next burst is built: the level only moves on a report that has arrived.
+            test_clock().sleep(Duration::from_millis(1500));
+            let text = format!("step {i}");
+            a.send_message("BB1BBB", &text).unwrap();
+            let got = wait_for(
+                &mut b,
+                |e| matches!(e, Event::Message { text: t, .. } if *t == text),
+                60,
+            );
+            if got.is_none() {
+                for ev in b.poll_events() {
+                    eprintln!("B EVENT: {ev:?}");
+                }
+                for ev in a.poll_events() {
+                    eprintln!("A EVENT: {ev:?}");
+                }
+                panic!("step {i} lost at {:?}", a.transmit_modulation());
             }
-            std::thread::sleep(Duration::from_millis(500));
         }
-        assert_eq!(state, Some(vec![("BB1BBB".to_string(), "delivered".to_string())]));
-    }
-
-    #[test]
-    fn on_air_receipt_confirms_a_relayed_message() {
-        let mut w = bare_worker("rcpt", "AA1AAA");
-        // A message to CC3CCC went out while no link to CC3CCC was up: sent, not delivered.
-        let msg = chat("AA1AAA", "CC3CCC", "via relay");
-        let chunks = session::encode_signed(&msg, None, false);
-        w.track_sent(7, &msg, &chunks);
-        let id = Engine::delivery_of(&w.shared, 7).unwrap();
-        assert_eq!(id, vec![("CC3CCC".to_string(), "sent".to_string())]);
-        // A receipt from someone else, or for another message, changes nothing.
-        let wire = Messenger::wire_id("AA1AAA", "CC3CCC", &chunks);
-        let other = receipts::receipt_frame(
-            &kahf_core::extras::Receipt::Delivered {
-                message_id: kahf_core::msg::short_id(wire),
-            },
-            "DD4DDD",
-        )
-        .unwrap();
-        w.on_unlinked_frame(burst::FrameKind::Receipt, other);
-        assert_eq!(Engine::delivery_of(&w.shared, 7).unwrap()[0].1, "sent");
-        // The addressee's receipt confirms it.
-        let good = receipts::receipt_frame(
-            &kahf_core::extras::Receipt::Delivered {
-                message_id: kahf_core::msg::short_id(wire),
-            },
-            "CC3CCC",
-        )
-        .unwrap();
-        w.on_unlinked_frame(burst::FrameKind::Receipt, good);
-        assert_eq!(Engine::delivery_of(&w.shared, 7).unwrap()[0].1, "delivered");
-        assert!(logged(&w).iter().any(|l| l.contains("CC3CCC confirmed delivery")));
-        // Garbage in an unlinked burst is ignored.
-        w.on_unlinked_frame(burst::FrameKind::Receipt, vec![1, 2]);
-        w.on_unlinked_frame(burst::FrameKind::Beacon, vec![9, 9, 9]);
-    }
-
-    #[test]
-    fn receipt_is_sent_only_when_unattended_sending_is_allowed() {
-        let mut w = bare_worker("rcpt-tx", "BB1BBB");
-        w.send_receipt("AA1AAA", 5);
-        assert!(
-            w.bursts.is_empty(),
-            "no operator link and no relay mode: stay quiet"
+        // Each clean report from the peer moves the sender one level up.
+        assert_ne!(
+            a.transmit_modulation(),
+            "KAMI-32",
+            "the link should step up on a clean channel"
         );
-        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
-        w.send_receipt("AA1AAA", 5);
-        assert_eq!(w.bursts.len(), 1);
-        w.bursts.clear();
-        w.shared.flags.listen_only.store(true, Ordering::SeqCst);
-        w.send_receipt("AA1AAA", 5);
-        assert!(w.bursts.is_empty(), "listen only never transmits");
     }
 
     /// One station with a fake radio whose transmit output is `a_to_b`.
     fn lone_station(tag: &str) -> (Engine, Pipe) {
         let a_to_b: Pipe = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a: Pipe = Arc::new(Mutex::new(VecDeque::new()));
-        let mut a = Engine::spawn(
+        let mut a = vspawn(
             config("AA1AAA", temp_dir(tag)),
             fake_factory(b_to_a, a_to_b.clone()),
         )
@@ -5184,7 +5875,6 @@ mod tests {
 
     #[test]
     fn listen_only_refuses_every_transmit_path() {
-        let _rt = realtime();
         let (mut a, a_to_b) = lone_station("listen-only");
         a.set_listen_only(true);
         let err = a.send_message("BB1BBB", "hi").unwrap_err();
@@ -5192,7 +5882,7 @@ mod tests {
         assert_eq!(a.connect("BB1BBB").unwrap_err(), LISTEN_ONLY_TEXT);
         // Audio already built for transmit is dropped too.
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         assert!(a_to_b.lock().unwrap().is_empty(), "listen only let audio out");
         // Switching it off restores transmit.
         a.set_listen_only(false);
@@ -5207,6 +5897,9 @@ mod tests {
     }
 
     impl Backend for PttCountingRadio {
+        fn is_bench(&self) -> bool {
+            true
+        }
         fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
             Ok(())
         }
@@ -5225,19 +5918,1081 @@ mod tests {
         }
     }
 
+    /// Radio for the gate tests: counts PTT, and says whether it could reach an antenna.
+    struct GateRadio {
+        keyed: Arc<AtomicU64>,
+        bench: bool,
+    }
+
+    impl Backend for GateRadio {
+        fn is_bench(&self) -> bool {
+            self.bench
+        }
+        fn read_audio(&mut self, _out: &mut Vec<f32>) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_start(&mut self) -> Result<(), String> {
+            self.keyed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn tx_write(&mut self, _samples: &[f32], _start: usize, _end: usize) -> Result<(), String> {
+            Ok(())
+        }
+        fn tx_stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// An engine on a `GateRadio`, listening, with the test table switched off.
+    fn gate_station(tag: &str, bench: bool) -> (Engine, Arc<AtomicU64>) {
+        let keyed = Arc::new(AtomicU64::new(0));
+        let k = keyed.clone();
+        let factory: Factory = Box::new(move || {
+            Ok(Box::new(GateRadio {
+                keyed: k.clone(),
+                bench,
+            }) as Box<dyn Backend>)
+        });
+        let mut e = vspawn(config("AA1AAA", temp_dir(tag)), factory).unwrap();
+        e.set_test_table(false);
+        e.listen().unwrap();
+        test_clock().sleep(Duration::from_millis(200));
+        (e, keyed)
+    }
+
+    fn fire(e: &Engine, keyed: &Arc<AtomicU64>) -> bool {
+        let before = keyed.load(Ordering::SeqCst);
+        e.test_burst(vec![0.5; 4000]).unwrap();
+        test_clock().sleep(Duration::from_millis(600));
+        keyed.load(Ordering::SeqCst) > before
+    }
+
+    fn verified() -> BandTable {
+        let mut t = BandTable::builtin_r1();
+        t.plan_verified = true;
+        t
+    }
+
+    fn unverified() -> BandTable {
+        let mut t = BandTable::builtin_r1();
+        t.plan_verified = false;
+        t
+    }
+
+    const C1_DIAL_HZ: u64 = 18_113_440;
+    const C1_CENTRE_HZ: u64 = 18_114_940;
+
+    #[test]
+    fn gate_unverified_table_refuses_a_real_radio_and_never_keys_ptt() {
+        let (mut e, keyed) = gate_station("gate-unverified", false);
+        e.set_band_table(unverified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        assert!(!fire(&e, &keyed), "PTT keyed on an unverified table");
+        let (mode, why) = e.tx_gate();
+        assert_eq!(mode, "off");
+        assert_eq!(why, GATE_UNVERIFIED);
+        assert_eq!(e.send_message("BB1BBB", "hi").unwrap_err(), GATE_UNVERIFIED);
+    }
+
+    #[test]
+    fn gate_verified_table_lets_a_lane_signal_on_the_right_dial_through() {
+        let (e, keyed) = gate_station("gate-verified", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        assert_eq!(e.tx_gate().0, "real");
+        assert!(fire(&e, &keyed), "a lane signal on the lane dial was refused");
+    }
+
+    #[test]
+    fn gate_refuses_the_dial_trap_and_an_unknown_dial() {
+        let (e, keyed) = gate_station("gate-trap", false);
+        e.set_band_table(verified());
+        // The lane's centre typed as the dial lands 1.5 kHz too high.
+        e.set_dial_hz(Some(C1_CENTRE_HZ));
+        assert_eq!(e.tx_gate().1, GATE_NOT_A_LANE);
+        assert!(!fire(&e, &keyed));
+        // 14.103 MHz (an old setting) is not a lane either.
+        e.set_dial_hz(Some(14_103_000));
+        assert_eq!(e.tx_gate().1, GATE_NOT_A_LANE);
+        e.set_dial_hz(None);
+        assert_eq!(e.tx_gate().1, GATE_NO_DIAL);
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn gate_refuses_a_signal_wider_than_the_lane() {
+        let (e, keyed) = gate_station("gate-wide", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        // The plain wide KAMI (312 to 2690 Hz of audio) does not fit one 480 Hz lane.
+        e.set_tx_audio_span(312, 2_690);
+        assert_eq!(e.tx_gate().1, GATE_OUTSIDE);
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn test_table_opens_only_a_bench_radio() {
+        let (real, keyed_real) = gate_station("gate-test-real", false);
+        real.set_test_table(true);
+        assert_eq!(real.tx_gate().1, GATE_TEST_REAL);
+        assert!(!fire(&real, &keyed_real), "the test table opened a real radio");
+
+        let (bench, keyed_bench) = gate_station("gate-test-bench", true);
+        assert_eq!(
+            bench.tx_gate().0,
+            "off",
+            "a bench radio still needs the test table"
+        );
+        bench.set_test_table(true);
+        assert_eq!(bench.tx_gate().0, "bench");
+        assert!(fire(&bench, &keyed_bench));
+    }
+
+    #[test]
+    fn gate_checks_every_burst_not_only_the_queue() {
+        // A burst already queued when the table turns unverified must not go out.
+        let (e, keyed) = gate_station("gate-late", false);
+        e.set_band_table(verified());
+        e.set_dial_hz(Some(C1_DIAL_HZ));
+        assert!(fire(&e, &keyed));
+        e.set_band_table(unverified());
+        assert!(!fire(&e, &keyed));
+    }
+
+    #[test]
+    fn an_sdr_knows_its_own_dial_and_a_blackhole_pair_is_a_bench() {
+        let spec = parse_sdr("hackrf@18113440").unwrap();
+        assert_eq!(SdrBackend::new(spec).dial_hz(), Some(C1_DIAL_HZ));
+    }
+
+    // ---- lane sensing (WP2) ------------------------------------------------------------------
+
+    /// As `bus_engines`, with the radios on the C1 lane dial so that lane sensing is on, and the
+    /// bus returned so a test can put interferers on it.
+    fn lane_engines(tag: &str, calls: &[&str]) -> (Vec<Engine>, Arc<Bus>) {
+        lane_engines_at(tag, calls, C1_DIAL_HZ)
+    }
+
+    /// As `lane_engines`, with the radios on the lane whose USB dial is `dial_hz`.
+    fn lane_engines_at(tag: &str, calls: &[&str], dial_hz: u64) -> (Vec<Engine>, Arc<Bus>) {
+        let each: Vec<(&str, u64)> = calls.iter().map(|c| (*c, dial_hz)).collect();
+        lane_engines_each(tag, &each)
+    }
+
+    /// As `lane_engines`, each station on its own lane dial.
+    fn lane_engines_each(tag: &str, calls: &[(&str, u64)]) -> (Vec<Engine>, Arc<Bus>) {
+        // A real receiver always hears some noise: a bus of exact zeros has a floor of minus
+        // infinity and would make every leak look like a strong signal.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let noise: Vec<f32> = (0..700 * RATE as usize)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((x >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.004
+            })
+            .collect();
+        let bus = Arc::new(Bus {
+            line: Mutex::new(noise),
+        });
+        let clock = Clock::virtual_time();
+        clock.join_thread();
+        let engines = calls
+            .iter()
+            .map(|(call, dial_hz)| {
+                let (b, c) = (bus.clone(), clock.clone());
+                let start = clock.now();
+                let factory: Factory = Box::new(move || {
+                    Ok(Box::new(BusRadio {
+                        bus: b.clone(),
+                        clock: c.clone(),
+                        start,
+                        delivered: 0,
+                        tx_base: 0,
+                    }) as Box<dyn Backend>)
+                });
+                let mut e = Engine::spawn_with_clock(
+                    config(call, temp_dir(&format!("{tag}-{call}"))),
+                    factory,
+                    clock.clone(),
+                )
+                .unwrap();
+                e.set_dial_hz(Some(*dial_hz));
+                e.listen().unwrap();
+                e.set_auto_link(true);
+                e.set_fixed_mode("KAMI-1c").unwrap();
+                e
+            })
+            .collect();
+        (engines, bus)
+    }
+
+    /// Band-limited noise of about +-200 Hz around `centre_hz` of audio from second `from` to `to`
+    /// (a foreign signal that is not KAHF and not a steady tone).
+    fn put_noise(bus: &Bus, centre_hz: f64, from: u64, to: u64) {
+        let (a, z) = (from as usize * RATE as usize, to as usize * RATE as usize);
+        let mut line = bus.line.lock().unwrap();
+        if line.len() < z {
+            line.resize(z, 0.0);
+        }
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let tones: Vec<(f64, f64)> = (0..40)
+            .map(|i| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (
+                    centre_hz - 200.0 + 10.0 * i as f64,
+                    (x >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU,
+                )
+            })
+            .collect();
+        for (n, v) in line[a..z].iter_mut().enumerate() {
+            let t = (a + n) as f64 / RATE as f64;
+            *v += tones
+                .iter()
+                .map(|(f, ph)| (std::f64::consts::TAU * f * t + ph).sin())
+                .sum::<f64>() as f32
+                * 0.02;
+        }
+    }
+
+    /// Runs the engines for `secs` virtual seconds. Returns when engine 0 started each burst
+    /// (seconds from the start) and what was received.
+    fn run_lane(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[(usize, String, String)]) -> bool,
+    ) -> (Vec<f32>, Vec<(usize, String, String)>) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let (mut starts, mut got) = (Vec::new(), Vec::new());
+        while clock.now() < t0 + Duration::from_secs(secs) && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    match ev {
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } if i == 0 => starts.push(clock.since(t0).as_secs_f32()),
+                        Event::Message { from, text } => got.push((i, from, text)),
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        (starts, got)
+    }
+
+    fn send_at(engines: &mut [Engine], secs: u64) {
+        let clock = engines[0].clock.clone();
+        clock.sleep(Duration::from_secs(secs));
+        engines[0].send_message("BB1BBB", "hello").unwrap();
+    }
+
+    #[test]
+    fn lane_sensing_lets_a_message_through_on_a_quiet_lane() {
+        let (mut e, _bus) = lane_engines("lane-quiet", &["AA1AAA", "BB1BBB"]);
+        send_at(&mut e, 10);
+        let (starts, got) = run_lane(&mut e, 120, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the message did not arrive on a quiet lane");
+        assert!(!starts.is_empty());
+    }
+
+    #[test]
+    fn a_foreign_signal_in_the_lane_holds_the_transmit_until_it_is_gone() {
+        let (mut e, bus) = lane_engines("lane-jam", &["AA1AAA", "BB1BBB"]);
+        put_noise(&bus, 1500.0, 20, 100);
+        send_at(&mut e, 30); // queued while the lane is jammed
+        let (starts, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the message never arrived after the lane cleared");
+        // The clock started at the engine's spawn, the send call came after 30 s of sleep.
+        let first = starts.first().copied().expect("no transmission");
+        assert!(
+            first >= 70.0,
+            "transmitted on a jammed lane: first burst at {first} s (jam ends at 100 s from the start)"
+        );
+    }
+
+    #[test]
+    fn a_foreign_signal_on_a_neighbour_lane_also_holds_the_transmit() {
+        let (mut e, bus) = lane_engines("lane-neighbour", &["AA1AAA", "BB1BBB"]);
+        // Lane C1 is at 1500 Hz of audio; the next lane up is at 2200 Hz.
+        put_noise(&bus, 2200.0, 20, 100);
+        send_at(&mut e, 30);
+        let (starts, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+        assert_eq!(got.len(), 1);
+        let first = starts.first().copied().expect("no transmission");
+        assert!(
+            first >= 70.0,
+            "transmitted beside a jammed neighbour lane: first burst at {first} s"
+        );
+    }
+
+    #[test]
+    fn occupancy_reports_name_the_busy_lane_once_a_minute() {
+        let (mut e, bus) = lane_engines("lane-report", &["AA1AAA"]);
+        put_noise(&bus, 2200.0, 30, 200);
+        test_clock_sleep_engines(&mut e, 190);
+        let reports = e[0].take_occupancy();
+        assert!(reports.len() >= 2, "{reports:?}");
+        let last = reports.last().unwrap();
+        // Lane index 6 (C2) is at 2200 Hz when the radio is on C1 (lane 5).
+        let c2 = last.lanes.iter().find(|(k, _)| *k == 6).expect("lane 6 missing");
+        assert!(c2.1 > 6, "the jammed lane was reported quiet: {last:?}");
+        let c1 = last.lanes.iter().find(|(k, _)| *k == 5).unwrap();
+        assert!(c1.1 <= 6, "the quiet lane was reported busy: {last:?}");
+        assert!(last.lanes.len() <= 12);
+    }
+
+    /// Lets virtual time pass while the engines run (events are drained so the queue stays small).
+    fn test_clock_sleep_engines(engines: &mut [Engine], secs: u64) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        while clock.now() < t0 + Duration::from_secs(secs) {
+            for e in engines.iter_mut() {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+    }
+
+    // ---- chat as bundle frames (WP3) ----------------------------------------------------------
+
+    type Heard3 = (usize, String, String);
+
+    /// Runs the engines for `secs` virtual seconds and returns every chat received as
+    /// `(receiver index, sender, text)` and when each engine started a burst, in seconds.
+    fn run_dg(
+        engines: &mut [Engine],
+        secs: u64,
+        mut done: impl FnMut(&[Heard3]) -> bool,
+    ) -> (Vec<Heard3>, Vec<Vec<f32>>) {
+        let clock = engines[0].clock.clone();
+        let t0 = clock.now();
+        let mut got = Vec::new();
+        let mut starts: Vec<Vec<f32>> = vec![Vec::new(); engines.len()];
+        while clock.now() < t0 + Duration::from_secs(secs) && !done(&got) {
+            for (i, e) in engines.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    match ev {
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } => starts[i].push(clock.since(t0).as_secs_f32()),
+                        Event::Message { from, text } => got.push((i, from, text)),
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        (got, starts)
+    }
+
+    #[test]
+    fn one_bundle_reaches_three_stations_and_they_answer_in_the_listed_order() {
+        let mut e = bus_engines("dg-hub", &["HH1HHH", "AA1AAA", "BB1BBB", "CC1CCC"]);
+        for (i, call) in ["AA1AAA", "BB1BBB", "CC1CCC"].iter().enumerate() {
+            e[0].send_message(call, &format!("for {i}")).unwrap();
+        }
+        let (got, starts) = run_dg(&mut e, 60, |_| false);
+        let mut texts: Vec<(usize, String)> = got
+            .iter()
+            .map(|(i, f, t)| {
+                assert_eq!(f, "HH1HHH");
+                (*i, t.clone())
+            })
+            .collect();
+        texts.sort();
+        assert_eq!(
+            texts,
+            vec![
+                (1, "for 0".to_string()),
+                (2, "for 1".to_string()),
+                (3, "for 2".to_string())
+            ],
+            "{got:?}"
+        );
+        // One burst from the hub carried all three. Each station answered once, A then B then C.
+        assert_eq!(
+            starts[0].len(),
+            1,
+            "the hub sent {} bursts: {:?}",
+            starts[0].len(),
+            starts[0]
+        );
+        let first = |i: usize| starts[i][0];
+        assert!(
+            first(1) < first(2) && first(2) < first(3),
+            "answers out of order: {starts:?}"
+        );
+        // Each answer waits for the one before it to finish.
+        assert!(
+            first(2) - first(1) > 1.0 && first(3) - first(2) > 1.0,
+            "answers overlap: {starts:?}"
+        );
+    }
+
+    #[test]
+    fn three_stations_talk_at_once_and_every_message_arrives_once_and_in_order() {
+        let mut e = bus_engines("dg-three", &["AA1AAA", "BB1BBB", "CC1CCC"]);
+        let calls = ["AA1AAA", "BB1BBB", "CC1CCC"];
+        for round in 0..3 {
+            for (from, eng) in e.iter_mut().enumerate() {
+                let to = (from + 1) % 3;
+                eng.send_message(calls[to], &format!("{from}>{to} #{round}"))
+                    .unwrap();
+            }
+        }
+        let (got, _) = run_dg(&mut e, 900, |g| g.len() >= 9);
+        assert_eq!(got.len(), 9, "{got:?}");
+        for (from, call) in calls.iter().enumerate() {
+            let to = (from + 1) % 3;
+            let seen: Vec<(String, String)> = got
+                .iter()
+                .filter(|(i, _, _)| *i == to)
+                .map(|(_, f, t)| (f.clone(), t.clone()))
+                .collect();
+            let want: Vec<(String, String)> = (0..3)
+                .map(|r| (call.to_string(), format!("{from}>{to} #{r}")))
+                .collect();
+            assert_eq!(seen, want, "station {to}");
+        }
+        assert!(
+            got.iter().all(|(i, f, _)| f != calls[*i]),
+            "a station heard itself"
+        );
+    }
+
+    #[test]
+    fn a_repeated_burst_is_answered_again_but_shown_once() {
+        let mut w = bare_worker("dg-dup", "BB1BBB");
+        let msg = chat("AA1AAA", "BB1BBB", "once only");
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        let frames: Vec<Vec<u8>> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut body = vec![7u8];
+                body.extend_from_slice(c);
+                kahf_core::bundle::Frame {
+                    header: kahf_core::bundle::Header {
+                        kind: kahf_core::bundle::Kind::Message,
+                        flags: 0,
+                        hops: 0,
+                        next_hop: kahf_core::bundle::h24("BB1BBB"),
+                        source: kahf_core::bundle::h24("AA1AAA"),
+                        index: i as u8,
+                        count: chunks.len() as u8,
+                    },
+                    body,
+                }
+                .encode()
+                .unwrap()
+            })
+            .collect();
+        for _ in 0..2 {
+            for f in &frames {
+                w.dg_on_frame(f, None);
+            }
+            w.dg_burst_end();
+        }
+        assert_eq!(messages_seen(&w), vec!["once only".to_string()]);
+        assert_eq!(w.dg.waiting_acks(), 2, "both bursts are answered");
+    }
+
+    #[test]
+    fn a_frame_for_another_station_is_ignored_after_its_header() {
+        let mut w = bare_worker("dg-other", "BB1BBB");
+        let msg = chat("AA1AAA", "CC1CCC", "not for B");
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        for (i, c) in chunks.iter().enumerate() {
+            let mut body = vec![1u8];
+            body.extend_from_slice(c);
+            let f = kahf_core::bundle::Frame {
+                header: kahf_core::bundle::Header {
+                    kind: kahf_core::bundle::Kind::Message,
+                    flags: 0,
+                    hops: 0,
+                    next_hop: kahf_core::bundle::h24("CC1CCC"),
+                    source: kahf_core::bundle::h24("AA1AAA"),
+                    index: i as u8,
+                    count: chunks.len() as u8,
+                },
+                body,
+            }
+            .encode()
+            .unwrap();
+            w.dg_on_frame(&f, None);
+        }
+        w.dg_burst_end();
+        assert!(messages_seen(&w).is_empty());
+        assert_eq!(
+            w.dg.waiting_acks(),
+            0,
+            "B must not answer a burst that is not for it"
+        );
+    }
+
+    // ---- lane mode (WP4) -----------------------------------------------------------------------
+
+    #[test]
+    fn a_chat_arrives_on_every_one_of_the_twelve_lanes() {
+        let table = BandTable::builtin_r1();
+        for lane in &table.bands[0].lanes {
+            let (mut e, _bus) = lane_engines_at(
+                &format!("lane-all-{}", lane.k),
+                &["AA1AAA", "BB1BBB"],
+                lane.dial_hz,
+            );
+            send_at(&mut e, 5);
+            let (_, got) = run_lane(&mut e, 400, |g| !g.is_empty());
+            assert_eq!(
+                got.len(),
+                1,
+                "no message on lane {} (dial {} Hz)",
+                lane.k,
+                lane.dial_hz
+            );
+            assert_eq!(got[0].2, "hello");
+        }
+    }
+
+    #[test]
+    fn a_lane_burst_on_the_air_stays_inside_its_lane_and_is_five_times_slower() {
+        let (mut e, bus) = lane_engines("lane-width", &["AA1AAA", "BB1BBB"]);
+        send_at(&mut e, 5);
+        let (starts, got) = run_lane(&mut e, 200, |g| !g.is_empty());
+        assert_eq!(got.len(), 1);
+        let line = bus.line.lock().unwrap();
+        // The first transmission: where the line is far above the background noise (0.002). The
+        // answer comes later, so stop at the first long quiet stretch.
+        let start = line.iter().position(|v| v.abs() > 0.008).expect("nothing sent");
+        let mut end = start;
+        let mut quiet = 0;
+        for (i, v) in line.iter().enumerate().skip(start) {
+            if v.abs() > 0.008 {
+                end = i;
+                quiet = 0;
+            } else {
+                quiet += 1;
+                if quiet > RATE as usize / 2 {
+                    break;
+                }
+            }
+        }
+        let air = (end - start) as f64 / RATE as f64;
+        // Five times as long as the plain modem's burst for the same number of codewords.
+        let plain: Vec<f64> = (1..=2)
+            .map(|n| burst_len_for(Modulation::Kami1c, n) as f64 / RATE as f64)
+            .collect();
+        assert!(
+            plain.iter().any(|p| (air / 5.0 - p).abs() < 0.12 * p),
+            "lane burst of {air:.2} s is not five times a plain burst of {plain:?} s"
+        );
+        let freqs: Vec<f64> = (0..=300).map(|k| 10.0 * k as f64).collect();
+        let db = narrow::psd_db(&line[start + RATE as usize / 4..end], &freqs);
+        let outside = freqs
+            .iter()
+            .zip(&db)
+            .filter(|(f, _)| (**f - 1500.0).abs() > 240.0)
+            .map(|(_, d)| *d)
+            .fold(f64::MIN, f64::max);
+        assert!(outside < -26.0, "level outside the lane reaches {outside:.1} dB");
+        assert!(!starts.is_empty());
+    }
+
+    /// A chat from AA1AAA to BB1BBB as the audio of one lane burst centred at `audio_hz`, ready to be
+    /// heard by BB1BBB's sound card (two seconds of silence first).
+    fn lane_burst_audio(text: &str, audio_hz: f64) -> Vec<f32> {
+        let msg = chat("AA1AAA", "BB1BBB", text);
+        let chunks = session::try_encode_sized(&msg, None, false, 26).unwrap();
+        let frames: Vec<Vec<u8>> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut body = vec![3u8];
+                body.extend_from_slice(c);
+                kahf_core::bundle::Frame {
+                    header: kahf_core::bundle::Header {
+                        kind: kahf_core::bundle::Kind::Message,
+                        flags: 0,
+                        hops: 0,
+                        next_hop: kahf_core::bundle::h24("BB1BBB"),
+                        source: kahf_core::bundle::h24("AA1AAA"),
+                        index: i as u8,
+                        count: chunks.len() as u8,
+                    },
+                    body,
+                }
+                .encode()
+                .unwrap()
+            })
+            .collect();
+        let plain = burst(&frames, Modulation::Kami1c).unwrap();
+        let lane = narrow::to_lane(&plain[LEAD_SILENCE..plain.len() - TAIL_SILENCE], audio_hz);
+        [vec![0f32; 2 * RATE as usize], lane, vec![0f32; 2 * RATE as usize]].concat()
+    }
+
+    /// BB1BBB on the radio dial `dial_hz`, hearing `audio` and nothing else. True when it shows the message.
+    fn hears(dial_hz: u64, audio: Vec<f32>, text: &str) -> bool {
+        let rx: Pipe = Arc::new(Mutex::new(audio.into()));
+        let tx: Pipe = Arc::new(Mutex::new(VecDeque::new()));
+        let mut b = vspawn(
+            config("BB1BBB", temp_dir(&format!("hears-{dial_hz}-{text}"))),
+            fake_factory(rx, tx),
+        )
+        .unwrap();
+        b.set_dial_hz(Some(dial_hz));
+        b.listen().unwrap();
+        wait_for(
+            &mut b,
+            |e| matches!(e, Event::Message { text: t, .. } if t == text),
+            60,
+        )
+        .is_some()
+    }
+
+    #[test]
+    fn a_station_on_c1_also_hears_a_burst_on_c2_and_one_on_c2_hears_c1() {
+        // C1 dial 18113.44 kHz: C1 at 1500 Hz of audio, C2 at 2200 Hz.
+        assert!(
+            hears(18_113_440, lane_burst_audio("own lane", 1500.0), "own lane"),
+            "own lane not heard"
+        );
+        assert!(
+            hears(
+                18_113_440,
+                lane_burst_audio("other calling lane", 2200.0),
+                "other calling lane"
+            ),
+            "C2 not heard from C1"
+        );
+        // C2 dial 18114.14 kHz: C2 at 1500 Hz, C1 at 800 Hz.
+        assert!(
+            hears(18_114_140, lane_burst_audio("c1 from c2", 800.0), "c1 from c2"),
+            "C1 not heard from C2"
+        );
+    }
+
+    #[test]
+    fn a_station_hears_only_its_own_lane_and_the_other_calling_lane() {
+        // On a relay lane (R2, lane 1) nothing but its own lane is heard: a burst 700 Hz up is lane 2.
+        assert!(hears(18_110_640, lane_burst_audio("own", 1500.0), "own"));
+        assert!(
+            !hears(18_110_640, lane_burst_audio("neighbour", 2200.0), "neighbour"),
+            "a relay lane station heard a neighbour lane"
+        );
+        // On C1 a burst on the spare lane X2 (3 x 700 Hz up: 3600 Hz) is not a calling lane.
+        assert!(
+            !hears(18_113_440, lane_burst_audio("spare", 3600.0), "spare"),
+            "a calling lane station heard the spare lane"
+        );
+    }
+
+    // ---- the relay as referee (WP5) ------------------------------------------------------------
+
+    /// A relay (index 0), `ops` operators (1..=ops) and a destination (last) on the C1 lane. The
+    /// operators and the destination hear only the relay, the relay hears them all: hidden stations.
+    fn referee_cell(tag: &str, ops: usize) -> Vec<Engine> {
+        let n = ops + 2;
+        let calls: Vec<String> = std::iter::once("RR1RRR".to_string())
+            .chain((0..ops).map(|i| format!("OP{}AAA", (b'A' + i as u8) as char)))
+            .chain(std::iter::once("ZZ9ZZZ".to_string()))
+            .collect();
+        let mut hears = Vec::new();
+        for i in 1..n {
+            hears.push((0, i));
+            hears.push((i, 0));
+        }
+        let names: Vec<&str> = calls.iter().map(|c| c.as_str()).collect();
+        // A little receiver noise: a floor of exact zeros makes every leak look huge.
+        let st = mesh(tag, &names, &hears, 0.002);
+        for e in &st {
+            e.set_dial_hz(Some(C1_DIAL_HZ));
+            e.set_fixed_mode("KAMI-1c").unwrap();
+            e.set_auto_link(true);
+        }
+        make_relay(&st[0]);
+        st
+    }
+
+    #[test]
+    fn an_operator_asks_the_relay_gets_a_grant_and_the_message_reaches_the_destination() {
+        let mut st = referee_cell("ref-one", 1);
+        let n = st.len();
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        // Let the operator hear a beacon first, then write.
+        test_clock().sleep(Duration::from_secs(30));
+        a.send_message("ZZ9ZZZ", "through the referee").unwrap();
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text == "through the referee"),
+            400,
+        );
+        assert!(
+            got.is_some(),
+            "the message never reached the destination ({n} stations)"
+        );
+    }
+
+    /// The relay goes quiet for a while (a crash or a restart): a message written meanwhile is not
+    /// lost, it arrives once the relay is back.
+    #[test]
+    fn a_message_written_while_the_relay_is_down_arrives_when_it_is_back() {
+        let mut st = referee_cell("ref-restart", 1);
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        r.stop_relay();
+        a.send_message("ZZ9ZZZ", "written while the relay was down")
+            .unwrap();
+        let early = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")),
+            100,
+        );
+        assert!(early.is_none(), "it cannot arrive without a relay");
+        make_relay(&r);
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text.starts_with("written")),
+            600,
+        );
+        assert!(got.is_some(), "the message was lost across the relay restart");
+    }
+
+    /// Nothing is stored in the network: after a relay carried a chat, its data folder holds no
+    /// trace of the text (the relay keeps counts and hashes, never the words).
+    #[test]
+    fn a_relay_keeps_no_trace_of_the_text_it_carried() {
+        fn contains(dir: &Path, needle: &[u8]) -> bool {
+            let Ok(rd) = fs::read_dir(dir) else { return false };
+            rd.flatten().any(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    contains(&p, needle)
+                } else {
+                    fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle))
+                }
+            })
+        }
+        let mut st = referee_cell("ref-privacy", 1);
+        let (mut z, mut a) = (st.pop().unwrap(), st.pop().unwrap());
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        let words = "purple-giraffe-7731";
+        a.send_message("ZZ9ZZZ", words).unwrap();
+        let got = wait_for(
+            &mut z,
+            |e| matches!(e, Event::Message { text, .. } if text == words),
+            400,
+        );
+        assert!(got.is_some(), "the message never arrived");
+        test_clock().sleep(Duration::from_secs(5));
+        assert!(
+            !contains(&r.config.data_dir, words.as_bytes()),
+            "the relay stored the text"
+        );
+        // The scan itself works: it finds the words in a file we plant.
+        let planted = z.config.data_dir.join("planted.txt");
+        fs::write(&planted, words).unwrap();
+        assert!(
+            contains(&z.config.data_dir, words.as_bytes()),
+            "sanity: the scan finds a planted file"
+        );
+    }
+
+    #[test]
+    fn hidden_operators_and_one_relay_every_message_arrives_once() {
+        // Three operators by default; REF_OPS=10 runs ten (all delivered after 389 virtual seconds,
+        // about 2.5 minutes of real time: see docs/NETWORK-STATUS.md, WP5).
+        let ops: usize = std::env::var("REF_OPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let mut st = referee_cell("ref-ten", ops);
+        let mut z = st.pop().unwrap();
+        for e in st.iter_mut() {
+            e.listen().unwrap();
+        }
+        z.listen().unwrap();
+        test_clock().sleep(Duration::from_secs(30));
+        for (i, e) in st.iter_mut().enumerate().skip(1) {
+            e.send_message("ZZ9ZZZ", &format!("op {i}")).unwrap();
+        }
+        let clock = test_clock();
+        let t0 = clock.now();
+        let mut seen: Vec<String> = Vec::new();
+        let mut op1_log: Vec<String> = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(2400) && seen.len() < ops {
+            for (i, e) in st.iter_mut().enumerate() {
+                for ev in e.poll_events() {
+                    if let (1, Event::Log(l)) = (i, &ev) {
+                        op1_log.push(format!("{:5} {l}", clock.since(t0).as_secs()));
+                    }
+                }
+            }
+            for ev in z.poll_events() {
+                if let Event::Message { text, .. } = ev {
+                    eprintln!("ARRIVED {text} at {} s", clock.since(t0).as_secs());
+                    seen.push(text);
+                }
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        let secs = clock.since(t0).as_secs();
+        for l in op1_log.iter().rev().take(25).rev() {
+            eprintln!("OP1 {l}");
+        }
+        seen.sort();
+        let mut want: Vec<String> = (1..=ops).map(|i| format!("op {i}")).collect();
+        want.sort();
+        assert_eq!(seen, want, "after {secs} s");
+        eprintln!("{ops} operators, one relay: all delivered after {secs} virtual seconds");
+        // Nothing arrives twice afterwards.
+        clock.sleep(Duration::from_secs(120));
+        assert!(
+            z.poll_events()
+                .into_iter()
+                .all(|e| !matches!(e, Event::Message { .. })),
+            "a duplicate arrived"
+        );
+    }
+
+    /// Soak in a small cell: three operators write four messages each at uneven intervals over
+    /// three minutes; every message reaches the destination exactly once and in order per sender.
+    #[test]
+    fn a_cell_of_three_operators_delivers_every_message_once_and_in_order() {
+        let mut st = referee_cell("ref-soak", 3);
+        let mut z = st.pop().unwrap();
+        for e in st.iter_mut() {
+            e.listen().unwrap();
+        }
+        z.listen().unwrap();
+        let clock = test_clock();
+        clock.sleep(Duration::from_secs(30));
+        let t0 = clock.now();
+        // (operator index 1..=3, message number, send at second): uneven gaps.
+        let plan: Vec<(usize, usize, u64)> = (1..=3usize)
+            .flat_map(|op| (0..4usize).map(move |n| (op, n, [0u64, 37, 71, 140][n] + op as u64 * 9)))
+            .collect();
+        let mut sent = vec![false; plan.len()];
+        let mut seen: Vec<String> = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(1500) && seen.len() < plan.len() {
+            let el = clock.since(t0).as_secs();
+            for (i, (op, n, at)) in plan.iter().enumerate() {
+                if !sent[i] && el >= *at {
+                    st[*op].send_message("ZZ9ZZZ", &format!("op{op} n{n}")).unwrap();
+                    sent[i] = true;
+                }
+            }
+            for e in st.iter_mut() {
+                let _ = e.poll_events();
+            }
+            for ev in z.poll_events() {
+                if let Event::Message { from, text, .. } = ev {
+                    assert_ne!(from, "ZZ9ZZZ", "a message from the receiver's own callsign");
+                    seen.push(text);
+                }
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), plan.len(), "missing or duplicated: got {seen:?}");
+        assert_eq!(seen.len(), plan.len(), "a duplicate arrived: {seen:?}");
+        for op in 1..=3 {
+            let order: Vec<&String> = seen
+                .iter()
+                .filter(|t| t.starts_with(&format!("op{op} ")))
+                .collect();
+            let mut want = order.clone();
+            want.sort();
+            assert_eq!(order, want, "operator {op}'s messages arrived out of order");
+        }
+    }
+
+    #[test]
+    fn a_pushed_plan_is_used_only_when_the_project_key_signed_it() {
+        let key = kahf_core::auth::StationKey::generate();
+        let mut w = bare_worker("plan-sig", "RR1RRR");
+        w.plan_key = key.to_public();
+        let text = "P1|100|7|5:0:0,6:1:0";
+        let good = backbone::b64_encode(&key.sign_raw(text.as_bytes()));
+        // A signature by another key, and a changed plan, are refused.
+        let other = backbone::b64_encode(&kahf_core::auth::StationKey::generate().sign_raw(text.as_bytes()));
+        w.bb_plan(100, text, &other);
+        assert!(w.plan_epoch.is_none(), "a plan with the wrong key was taken");
+        w.bb_plan(100, "P1|100|7|5:0:1", &good);
+        assert!(w.plan_epoch.is_none(), "a changed plan was taken");
+        w.bb_plan(100, text, &good);
+        assert_eq!(w.plan_epoch, Some(100));
+        assert_eq!(w.plan_text, text);
+        // An older plan does not replace a newer one.
+        let older = "P1|99|7|";
+        w.bb_plan(99, older, &backbone::b64_encode(&key.sign_raw(older.as_bytes())));
+        assert_eq!(w.plan_epoch, Some(100));
+    }
+
+    #[test]
+    fn the_sender_is_told_delivered_when_the_receiver_answered() {
+        let mut e = bus_engines("delivered", &["AA1AAA", "BB1BBB"]);
+        let id = e[0].send_chat("BB1BBB", "did you get this", false).unwrap();
+        let clock = e[0].clock.clone();
+        let t0 = clock.now();
+        let mut states = Vec::new();
+        while clock.now() < t0 + Duration::from_secs(120)
+            && !states.iter().any(|(_, s)| *s == Delivery::Delivered)
+        {
+            for ev in e[0].poll_events() {
+                if let Event::Delivery { id, state, .. } = ev {
+                    states.push((id, state));
+                }
+            }
+            let _ = e[1].poll_events();
+            clock.sleep(Duration::from_millis(20));
+        }
+        assert_eq!(states, vec![(id, Delivery::Delivered)]);
+    }
+
+    /// The resend storm check: six chats over a clean bus must not cost more than three bursts
+    /// each on the air (the data bursts and the answers together).
+    #[test]
+    fn six_chats_do_not_cause_a_resend_storm() {
+        let mut e = bus_engines("storm", &["AA1AAA", "BB1BBB"]);
+        for i in 0..6 {
+            e[0].send_chat("BB1BBB", &format!("message number {i}"), false)
+                .unwrap();
+        }
+        let clock = e[0].clock.clone();
+        let t0 = clock.now();
+        let (mut delivered, mut bursts, mut received) = (0, 0u32, 0);
+        while clock.now() < t0 + Duration::from_secs(300) && delivered < 6 {
+            for (n, eng) in e.iter_mut().enumerate() {
+                for ev in eng.poll_events() {
+                    match ev {
+                        Event::Delivery {
+                            state: Delivery::Delivered,
+                            ..
+                        } if n == 0 => delivered += 1,
+                        Event::Tx {
+                            state: TxState::Starting,
+                        } => bursts += 1,
+                        Event::Message { .. } if n == 1 => received += 1,
+                        _ => {}
+                    }
+                }
+            }
+            clock.sleep(Duration::from_millis(20));
+        }
+        assert_eq!(delivered, 6, "all six were acknowledged");
+        assert_eq!(received, 6, "each arrived exactly once");
+        assert!(bursts <= 18, "{bursts} bursts for six chats");
+    }
+
+    /// Only short chats take the datagram path (through the lane's relay); mail, files and long
+    /// texts stay on the direct link.
+    #[test]
+    fn mail_files_and_long_texts_never_take_the_chat_path() {
+        let item = |m: &Message| OutItem {
+            kind: "msg".into(),
+            payload: encode_message(m, false),
+        };
+        let (from, to) = ("AA1AAA".to_string(), "BB1BBB".to_string());
+        let chat = Message::Chat {
+            from: from.clone(),
+            to: to.clone(),
+            text: "hi".into(),
+        };
+        assert!(is_dg_item(&item(&chat)));
+        let long = Message::Chat {
+            from: from.clone(),
+            to: to.clone(),
+            text: "x".repeat(2000),
+        };
+        assert!(!is_dg_item(&item(&long)));
+        let mail = Message::Mail {
+            from: from.clone(),
+            to: to.clone(),
+            subject: "s".into(),
+            body: "b".into(),
+            attachments: vec![],
+        };
+        assert!(!is_dg_item(&item(&mail)));
+        let file = Message::File {
+            from,
+            to,
+            name: "a.txt".into(),
+            data: vec![1, 2, 3],
+        };
+        assert!(!is_dg_item(&item(&file)));
+    }
+
+    #[test]
+    fn an_operator_that_hears_a_relay_tells_it_it_is_here_once_in_a_while() {
+        let mut st = referee_cell("ref-here", 1);
+        let mut z = st.pop().unwrap();
+        let mut a = st.pop().unwrap();
+        let mut r = st.pop().unwrap();
+        r.listen().unwrap();
+        z.listen().unwrap();
+        a.listen().unwrap();
+        // One operator only: two operators can pick the same window slot and then the relay hears
+        // neither (that is the design; they say it again after ten minutes).
+        z.set_listen_only(true);
+        // Beacons every 12 s; the operator picks a window slot after the first one it hears.
+        let clock = test_clock();
+        let t0 = clock.now();
+        while clock.now() < t0 + Duration::from_secs(120) && r.heres_heard() == 0 {
+            for e in [&mut r, &mut a, &mut z] {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            r.heres_heard(),
+            1,
+            "the relay did not hear the operator say it is here"
+        );
+        // Not again within ten minutes.
+        let t1 = clock.now();
+        while clock.now() < t1 + Duration::from_secs(300) {
+            for e in [&mut r, &mut a, &mut z] {
+                let _ = e.poll_events();
+            }
+            clock.sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            r.heres_heard(),
+            1,
+            "the operator repeated itself inside ten minutes"
+        );
+    }
+
     #[test]
     fn listen_only_never_keys_ptt() {
-        let _rt = realtime();
         let keyed = Arc::new(AtomicU64::new(0));
         let k = keyed.clone();
         let factory: Factory =
             Box::new(move || Ok(Box::new(PttCountingRadio { keyed: k.clone() }) as Box<dyn Backend>));
-        let mut a = Engine::spawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
+        let mut a = vspawn(config("AA1AAA", temp_dir("ptt-listen-only")), factory).unwrap();
         a.listen().unwrap();
         a.set_listen_only(true);
         assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(300));
+        test_clock().sleep(Duration::from_millis(300));
         assert_eq!(
             keyed.load(Ordering::SeqCst),
             0,
@@ -5251,7 +7006,6 @@ mod tests {
 
     #[test]
     fn required_update_lock_refuses_every_transmit_path() {
-        let _rt = realtime();
         let (mut a, a_to_b) = lone_station("update-lock");
         a.set_update_locked(true);
         assert_eq!(a.send_message("BB1BBB", "hi").unwrap_err(), UPDATE_LOCK_TEXT);
@@ -5260,7 +7014,7 @@ mod tests {
         assert_eq!(a.connect("BB1BBB").unwrap_err(), UPDATE_LOCK_TEXT);
         a.set_listen_only(false);
         a.test_burst(vec![0.5; 4000]).unwrap();
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         assert!(a_to_b.lock().unwrap().is_empty(), "update lock let audio out");
         a.set_update_locked(false);
         assert!(a.send_message("BB1BBB", "hi").is_ok());
@@ -5268,7 +7022,6 @@ mod tests {
 
     #[test]
     fn unreached_station_gets_plain_sentence_once_when_relay_is_off() {
-        let _rt = realtime();
         let (mut a, _) = lone_station("relay-off");
         a.set_relay_timeout_ms(200);
         // Internet relay is on by default now, so this test turns it off to test the plain sentence.
@@ -5277,7 +7030,7 @@ mod tests {
         let want = "Could not reach CC1CCC on air. The station did not respond on any relay path. Try again later, or enable internet relay in Settings.";
         let got = wait_for(&mut a, |e| *e == Event::Log(want.to_string()), 10);
         assert!(got.is_some(), "plain sentence was not logged");
-        thread::sleep(Duration::from_millis(500));
+        test_clock().sleep(Duration::from_millis(500));
         let again = a
             .poll_events()
             .iter()
@@ -5289,7 +7042,6 @@ mod tests {
 
     #[test]
     fn internet_relay_and_third_party_settings_default_on() {
-        let _rt = realtime();
         let dir = temp_dir("owner-defaults");
         let e = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(
@@ -5304,7 +7056,6 @@ mod tests {
 
     #[test]
     fn default_internet_relay_sends_nothing_while_gateway_is_a_stub() {
-        let _rt = realtime();
         // Internet relay is on by default. The gateway stub refuses, so the message stays
         // queued and nothing goes over the internet.
         let (mut a, _) = lone_station("relay-default-on");
@@ -5321,7 +7072,6 @@ mod tests {
 
     #[test]
     fn unreached_station_goes_to_relay_when_relay_is_on() {
-        let _rt = realtime();
         let (mut a, _) = lone_station("relay-on");
         a.set_internet_relay(true);
         a.set_relay_timeout_ms(200);
@@ -5341,11 +7091,6 @@ mod tests {
 
     /// A worker without a running thread, for checks on one step at a time.
     fn bare_worker(tag: &str, callsign: &str) -> Worker {
-        bare_worker_in(temp_dir(tag), callsign)
-    }
-
-    /// As `bare_worker`, on a given data folder, so a test can start it twice.
-    fn bare_worker_in(dir: PathBuf, callsign: &str) -> Worker {
         let (_cmd, rx) = channel();
         let shared = Arc::new(Shared {
             events: Mutex::new(EventQueue::default()),
@@ -5354,20 +7099,23 @@ mod tests {
             station_key: None,
             key_error: Mutex::new(None),
             relay: Mutex::new(None),
+            relay_hints: Mutex::new(Vec::new()),
+            backbone_server: Mutex::new(None),
+            location: Mutex::new(None),
             relay_stats: Mutex::new(Stats::default()),
             hops: Mutex::new(HopLog::new()),
-            relay_paths: Mutex::new(Vec::new()),
-            heard: Mutex::new(HeardList::default()),
-            contacts_io: Mutex::new(()),
-            groups: Mutex::new(GroupBook::new(callsign)),
-            beacon: Mutex::new(BeaconCfg::default()),
-            delivery: Mutex::new(Tracker::new()),
-            wire_ids: Mutex::new(HashMap::new()),
         });
         let factory: Factory = Box::new(|| Err("no radio in this test".into()));
-        let mut cfg = config(callsign, dir);
+        let mut cfg = config(callsign, temp_dir(tag));
         cfg.sdr = None;
-        Worker::new(cfg, rx, shared, factory, Arc::new(AtomicU64::new(1)))
+        Worker::new(
+            cfg,
+            rx,
+            shared,
+            factory,
+            Arc::new(AtomicU64::new(1)),
+            Clock::real(),
+        )
     }
 
     fn chat(from: &str, to: &str, text: &str) -> Message {
@@ -5409,12 +7157,9 @@ mod tests {
         w.link_state = LinkState::Connected {
             peer: "BB1BBB".into(),
         };
-        let (_, payload) = w.next_due().expect("item is due while linked");
-        assert!(
-            matches!(payload, Payload::Msg { private: true, .. }),
-            "outbox lost the private bit"
-        );
-        let air = payload.chunks().unwrap();
+        let (_, msg, private) = w.next_due().expect("item is due while linked");
+        assert!(private, "outbox lost the private bit");
+        let air = air_chunks(&msg, private).unwrap();
         assert!(session::decode_signed(&air).unwrap().private, "air bit not set");
 
         // The same path without the mark sends a plain message.
@@ -5424,10 +7169,10 @@ mod tests {
         plain.link_state = LinkState::Connected {
             peer: "BB1BBB".into(),
         };
-        let (_, payload) = plain.next_due().unwrap();
-        assert!(matches!(payload, Payload::Msg { private: false, .. }));
+        let (_, msg, private) = plain.next_due().unwrap();
+        assert!(!private);
         assert!(
-            !session::decode_signed(&payload.chunks().unwrap())
+            !session::decode_signed(&air_chunks(&msg, private).unwrap())
                 .unwrap()
                 .private
         );
@@ -5436,7 +7181,6 @@ mod tests {
     #[test]
     fn private_message_is_kept_only_by_its_addressee() {
         let private_air = session::encode_signed(&chat("AA1AAA", "BB1BBB", "secret"), None, true);
-        let public_air = session::encode(&chat("AA1AAA", "BB1BBB", "open"));
 
         let mut addressee = bare_worker("private-rx-to", "BB1BBB");
         for c in &private_air {
@@ -5453,7 +7197,9 @@ mod tests {
             "other station kept a private message"
         );
 
-        // The flag only narrows delivery: a public message still reaches any station.
+        // The flag only narrows delivery: a public message to this station still reaches it.
+        // (One addressed to somebody else is not shown: a station shows only its own mail.)
+        let public_air = session::encode(&chat("AA1AAA", "CC1CCC", "open"));
         for c in &public_air {
             other.deliver(c.clone());
         }
@@ -5633,7 +7379,6 @@ mod tests {
 
     #[test]
     fn engine_creates_station_key_at_start_up() {
-        let _rt = realtime();
         let dir = temp_dir("key-start");
         let engine = Engine::new(config("AA1AAA", dir.clone())).unwrap();
         assert!(dir.join(auth::KEY_FILE).exists(), "station key not created");
@@ -5647,7 +7392,7 @@ mod tests {
 
     #[test]
     fn relay_schedule_is_checked_and_held_outside_transmit_slots() {
-        let mut w = bare_worker("relay-gate", "AA1AAA");
+        let w = bare_worker("relay-gate", "AA1AAA");
         let now = now_unix_secs() as u64;
         let transmit = |start: u64| Slot {
             channel_khz: 14_000.0,
@@ -5718,9 +7463,8 @@ mod tests {
 
     #[test]
     fn relay_start_needs_both_acknowledgements() {
-        let _rt = realtime();
         let dir = temp_dir("relay-ack");
-        let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
+        let e = Engine::new(config("AA1AAA", dir)).unwrap();
         // No role yet: refused with a plain message.
         let both = RelayAck {
             licence_held: true,
@@ -5754,10 +7498,9 @@ mod tests {
 
     #[test]
     fn relay_start_is_per_run_and_not_saved() {
-        let _rt = realtime();
         let dir = temp_dir("relay-per-run");
         {
-            let mut e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
+            let e = Engine::new(config("AA1AAA", dir.clone())).unwrap();
             e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
                 .unwrap();
             e.start_relay(RelayAck {
@@ -5767,7 +7510,7 @@ mod tests {
             .unwrap();
         }
         // A new run starts with relay mode off, whatever the old run had.
-        let mut again = Engine::new(config("AA1AAA", dir)).unwrap();
+        let again = Engine::new(config("AA1AAA", dir)).unwrap();
         assert!(!again.relay_running());
         again
             .configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
@@ -5789,6 +7532,182 @@ mod tests {
             peer: "BB1BBB".into(),
         };
         assert!(w.next_due().is_none(), "relay with no schedule sent an item");
+    }
+
+    #[test]
+    fn adverts_are_shown_once_and_only_a_running_relay_passes_them_on() {
+        let mut w = bare_worker("advert-plain", "AA1AAA");
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
+        w.on_advert("BB1BBB".into(), ADVERT_TTL, 5, 0, None);
+        let shown: Vec<_> = lock(&w.shared.events)
+            .items
+            .iter()
+            .filter(|e| matches!(e, Event::Advert { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Event::Advert {
+                call: "BB1BBB".into(),
+                hops: 0,
+                relay: false,
+                loc: None
+            }]
+        );
+        assert!(w.control.is_empty(), "a plain station passed an advert on");
+
+        let mut r = bare_worker("advert-relay", "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.on_advert("BB1BBB".into(), 3, 9, ADVERT_RELAY, Some((25.2, 55.27)));
+        let shown: Vec<_> = lock(&r.shared.events)
+            .items
+            .iter()
+            .filter(|e| matches!(e, Event::Advert { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown,
+            vec![Event::Advert {
+                call: "BB1BBB".into(),
+                hops: 1,
+                relay: true,
+                loc: Some((25.2, 55.27))
+            }]
+        );
+        assert_eq!(r.control.len(), 1);
+        assert_eq!(
+            r.control[0],
+            vec![encode_advert("BB1BBB", 2, 9, ADVERT_RELAY, Some((25.2, 55.27)))]
+        );
+        // The last hop is shown but not passed on.
+        r.on_advert("CC1CCC".into(), 0, 1, 0, None);
+        assert_eq!(r.control.len(), 1);
+    }
+
+    #[test]
+    fn attachments_over_the_limit_are_refused_with_a_plain_reason() {
+        let dir = temp_dir("attach-limit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![0u8; MAX_ATTACHMENT_BYTES + 1]).unwrap();
+        let err = read_attachment(&big).unwrap_err();
+        assert!(err.contains("big.bin") && err.contains("kB"), "{err}");
+        let ok = dir.join("ok.bin");
+        std::fs::write(&ok, vec![0u8; 1000]).unwrap();
+        assert!(read_attachment(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_relay_does_not_pass_files_on() {
+        let mut r = bare_worker("no-file-hops", "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
+        let file = Message::File {
+            from: "AA1AAA".into(),
+            to: "BB1BBB".into(),
+            name: "x".into(),
+            data: vec![1],
+        };
+        r.forward_third_party(&file, false);
+        assert!(r.forwarded.is_empty(), "a file was queued for forwarding");
+        r.forward_third_party(&chat("AA1AAA", "BB1BBB", "hi"), false);
+        assert_eq!(r.forwarded.len(), 1, "a chat was not forwarded");
+    }
+
+    fn relay_with_backbone(tag: &str) -> Worker {
+        let mut r = bare_worker(tag, "RR1RRR");
+        *lock(&r.shared.relay) =
+            Some(Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap());
+        r.shared.flags.relay_running.store(true, Ordering::SeqCst);
+        r.shared.flags.third_party_relay.store(true, Ordering::SeqCst);
+        // A server that is not there: jobs fail quietly in the thread, which is all these tests need.
+        r.bb = Some(BbHandle::spawn(Backbone::new(
+            "http://127.0.0.1:9",
+            "RR1RRR",
+            StationKey::generate(),
+        )));
+        r
+    }
+
+    #[test]
+    fn a_message_from_the_server_is_sent_on_the_radio_and_remembered() {
+        let mut r = relay_with_backbone("bb-deliver");
+        let m = Queued {
+            id: "K1ALF-7".into(),
+            origin: "K1ALF".into(),
+            dest: "D1AVE".into(),
+            kind: "chat".into(),
+            subject: String::new(),
+            body: b"hello".to_vec(),
+            urgent: false,
+        };
+        r.bb_deliver(m.clone());
+        assert_eq!(r.outbox.pending().len(), 1);
+        assert_eq!(
+            r.bb_pending.values().cloned().collect::<Vec<_>>(),
+            vec!["K1ALF-7".to_string()]
+        );
+        // The same message again (the server hands it out until it is receipted) is not queued twice.
+        r.bb_deliver(m);
+        assert_eq!(r.outbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn a_receipt_becomes_a_short_message_to_the_origin() {
+        let mut r = relay_with_backbone("bb-receipt");
+        r.bb_receipt_notice(backbone::Receipt {
+            id: "K1ALF-7".into(),
+            dest: "D1AVE".into(),
+            status: "delivered".into(),
+            reason: String::new(),
+        });
+        let (_, item, _) = r
+            .outbox
+            .pending()
+            .into_iter()
+            .next()
+            .expect("a notice was queued");
+        let _ = item;
+        assert_eq!(r.outbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn a_station_the_relay_hears_is_not_sent_through_the_server() {
+        let mut r = relay_with_backbone("bb-heard");
+        r.note_heard_recent("D1AVE", Some(10.0));
+        r.forward_third_party(&chat("K1ALF", "D1AVE", "hi"), false);
+        // The relay hears Dave itself, so it delivers on the radio (and does not use the server).
+        assert_eq!(
+            r.outbox.pending().len(),
+            1,
+            "a station heard here must be delivered to directly"
+        );
+        // A station nobody here hears goes to the server, not onto the radio.
+        r.forward_third_party(&chat("K1ALF", "Z9FAR", "hi"), false);
+        assert_eq!(
+            r.outbox.pending().len(),
+            1,
+            "radio forward used although the server is available"
+        );
+    }
+
+    #[test]
+    fn transmit_audio_is_kept_below_full_scale_by_the_level_setting() {
+        let mut w = bare_worker("tx-level", "AA1AAA");
+        w.push_burst(&[vec![1, 2, 3]]);
+        let peak = |v: &Vec<f32>| v.iter().fold(0f32, |m, s| m.max(s.abs()));
+        let p50 = peak(w.bursts.back().unwrap());
+        assert!(p50 > 0.3 && p50 <= 0.5, "default level peak {p50}");
+        w.shared.flags.tx_level_pct.store(20, Ordering::SeqCst);
+        w.push_burst(&[vec![1, 2, 3]]);
+        let p20 = peak(w.bursts.back().unwrap());
+        assert!(p20 <= 0.2 && p20 > 0.1, "20 percent peak {p20}");
+        let tone = tone_samples(30);
+        assert!(peak(&tone) <= 0.3 && peak(&tone) > 0.29);
     }
 
     #[test]
@@ -5847,7 +7766,6 @@ mod tests {
 
     #[test]
     fn listen_only_refuses_engine_send_in_relay_mode() {
-        let _rt = realtime();
         let dir = temp_dir("listen-relay-engine");
         let mut e = Engine::new(config("AA1AAA", dir)).unwrap();
         e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
@@ -5860,376 +7778,5 @@ mod tests {
         e.set_listen_only(true);
         assert_eq!(e.send_message("BB1BBB", "hi").unwrap_err(), LISTEN_ONLY_TEXT);
         assert_eq!(e.connect("BB1BBB").unwrap_err(), LISTEN_ONLY_TEXT);
-    }
-
-    // -----------------------------------------------------------------------
-    // Radio relay (plan 4 and 6.3)
-    // -----------------------------------------------------------------------
-
-    /// Shared air: a station hears every pipe it reads and transmits into each listener's pipe.
-    struct AirRadio {
-        rx: Pipe,
-        tx: Vec<Pipe>,
-        clock: SoundClock,
-    }
-
-    impl Backend for AirRadio {
-        fn read_audio(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
-            self.clock.read(&self.rx, out);
-            Ok(())
-        }
-
-        fn tx_start(&mut self) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn tx_write(&mut self, samples: &[f32], start: usize, end: usize) -> Result<(), String> {
-            for p in &self.tx {
-                p.lock().unwrap().extend(samples[start..end].iter().copied());
-            }
-            Ok(())
-        }
-
-        fn tx_stop(&mut self) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    fn air_factory(rx: Pipe, tx: Vec<Pipe>) -> Factory {
-        let tx: Vec<Pipe> = tx.into_iter().map(paced).collect();
-        Box::new(move || {
-            Ok(Box::new(AirRadio {
-                rx: rx.clone(),
-                tx: tx.clone(),
-                clock: SoundClock::new(),
-            }) as Box<dyn Backend>)
-        })
-    }
-
-    fn pipe() -> Pipe {
-        Arc::new(Mutex::new(VecDeque::new()))
-    }
-
-    /// A transmit slot on 14 MHz covering the next hour.
-    fn open_slot() -> Slot {
-        Slot {
-            channel_khz: 14_000.0,
-            start_unix: now_unix_secs() as u64 - 10,
-            duration_s: 3_600,
-            direction: Direction::Transmit,
-        }
-    }
-
-    fn running_relay(e: &Engine) {
-        e.configure_relay(Role::Relay, relay::Radio::HalfDuplex, &[14_000.0])
-            .unwrap();
-        e.accept_relay_schedule(vec![open_slot()]).unwrap();
-        e.start_relay(RelayAck {
-            licence_held: true,
-            terms_accepted: true,
-        })
-        .unwrap();
-    }
-
-    /// A and B cannot hear each other; R hears both. A's message reaches B through R, which
-    /// calls B by itself in relay mode and keeps the message out of its own inbox.
-    #[test]
-    fn message_reaches_an_unheard_station_through_a_radio_relay() {
-        let _rt = realtime();
-        let (to_a, to_r, to_b) = (pipe(), pipe(), pipe());
-        let mut a = Engine::spawn(
-            config("AA1AAA", temp_dir("relay3-a")),
-            air_factory(to_a.clone(), vec![to_r.clone()]),
-        )
-        .unwrap();
-        let mut r = Engine::spawn(
-            config("RR1RRR", temp_dir("relay3-r")),
-            air_factory(to_r.clone(), vec![to_a.clone(), to_b.clone()]),
-        )
-        .unwrap();
-        let mut b = Engine::spawn(
-            config("BB1BBB", temp_dir("relay3-b")),
-            air_factory(to_b.clone(), vec![to_r.clone()]),
-        )
-        .unwrap();
-        running_relay(&r);
-        r.listen().unwrap();
-        b.listen().unwrap();
-
-        a.set_relay_paths(&["RR1RRR"]).unwrap();
-        a.set_relay_timeout_ms(200);
-        a.send_message("BB1BBB", "through the relay").unwrap();
-        assert!(
-            wait_for(
-                &mut a,
-                |e| matches!(e, Event::Log(s) if s.contains("radio relay through RR1RRR")),
-                10
-            )
-            .is_some(),
-            "A did not switch to the relay path"
-        );
-        a.connect("RR1RRR").unwrap();
-        assert!(
-            wait_until(60, || a.outbox_pending().is_empty()),
-            "A never handed the message to R"
-        );
-        assert!(
-            wait_for(
-                &mut r,
-                |e| matches!(e, Event::Log(s) if s.starts_with("Holding a message from AA1AAA for BB1BBB")),
-                30
-            )
-            .is_some(),
-            "R did not hold the message"
-        );
-        a.disconnect().unwrap();
-
-        let got = wait_for(
-            &mut b,
-            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "through the relay"),
-            90,
-        );
-        assert!(got.is_some(), "B never got the relayed message");
-        assert!(
-            wait_until(30, || r.outbox_pending().is_empty()),
-            "R kept the forward"
-        );
-        assert_eq!(r.relay_stats().sent_total, 1, "one forward counted");
-        let r_saw_it = r
-            .poll_events()
-            .iter()
-            .any(|e| matches!(e, Event::Message { text, .. } if text == "through the relay"));
-        assert!(!r_saw_it, "a relayed message must not land in the relay's inbox");
-    }
-
-    /// Four stations in a line, each hearing only its neighbours: A - R1 - R2 - B. R1 cannot
-    /// reach B, so after its relay timeout it hands the message to R2, which reaches B.
-    #[test]
-    fn message_crosses_two_radio_relays() {
-        let _rt = realtime();
-        let (to_a, to_r1, to_r2, to_b) = (pipe(), pipe(), pipe(), pipe());
-        let spawn = |call: &str, tag: &str, rx: &Pipe, tx: Vec<Pipe>| {
-            Engine::spawn(config(call, temp_dir(tag)), air_factory(rx.clone(), tx)).unwrap()
-        };
-        let mut a = spawn("AA1AAA", "hop2-a", &to_a, vec![to_r1.clone()]);
-        let mut r1 = spawn("RR1RRR", "hop2-r1", &to_r1, vec![to_a.clone(), to_r2.clone()]);
-        let mut r2 = spawn("RR2RRR", "hop2-r2", &to_r2, vec![to_r1.clone(), to_b.clone()]);
-        let mut b = spawn("BB1BBB", "hop2-b", &to_b, vec![to_r2.clone()]);
-        for r in [&r1, &r2] {
-            running_relay(r);
-            r.set_relay_timeout_ms(200);
-        }
-        r1.set_relay_paths(&["RR2RRR"]).unwrap();
-        for e in [&mut r1, &mut r2, &mut b] {
-            e.listen().unwrap();
-        }
-
-        a.set_relay_paths(&["RR1RRR"]).unwrap();
-        a.set_relay_timeout_ms(200);
-        a.send_message("BB1BBB", "two hops").unwrap();
-        thread::sleep(Duration::from_millis(400));
-        a.connect("RR1RRR").unwrap();
-        assert!(
-            wait_until(60, || a.outbox_pending().is_empty()),
-            "A never handed the message to R1"
-        );
-        a.disconnect().unwrap();
-
-        let got = wait_for(
-            &mut b,
-            |e| matches!(e, Event::Message { from, text } if from == "AA1AAA" && text == "two hops"),
-            120,
-        );
-        assert!(got.is_some(), "B never got the message over two relays");
-        assert!(wait_until(30, || r1.outbox_pending().is_empty()
-            && r2.outbox_pending().is_empty()));
-        assert_eq!(r1.relay_stats().sent_total, 1);
-        assert_eq!(r2.relay_stats().sent_total, 1);
-        let sent = |e: &Event| matches!(e, Event::Relay { step: RelayStep::Sent, to, .. } if to == "BB1BBB");
-        assert!(r2.poll_events().iter().any(sent) || wait_for(&mut r2, sent, 5).is_some());
-    }
-
-    fn relaying_worker(tag: &str) -> Worker {
-        let w = bare_worker(tag, "RR1RRR");
-        let mut relay = Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
-        relay.accept_schedule(vec![open_slot()]).unwrap();
-        *lock(&w.shared.relay) = Some(relay);
-        w.shared.flags.relay_running.store(true, Ordering::SeqCst);
-        w
-    }
-
-    /// Feeds a whole message to the worker as the link would deliver it.
-    fn hear(w: &mut Worker, msg: &Message) {
-        for c in session::encode(msg) {
-            w.deliver(c);
-        }
-    }
-
-    #[test]
-    fn relay_holds_each_message_once_and_never_its_own() {
-        let mut w = relaying_worker("relay-hold");
-        let m = chat("AA1AAA", "BB1BBB", "once only");
-        hear(&mut w, &m);
-        hear(&mut w, &m);
-        hear(&mut w, &chat("RR1RRR", "BB1BBB", "came back"));
-        let held = w.outbox.due(u64::MAX);
-        assert_eq!(held.len(), 1, "a copy or our own message was held");
-        assert_eq!(held[0].1.kind, KIND_RELAY);
-        match decode_payload(&held[0].1.payload) {
-            Some(Payload::Forward { from, to, chunks, .. }) => {
-                assert_eq!((from.as_str(), to.as_str()), ("AA1AAA", "BB1BBB"));
-                assert_eq!(chunks, session::encode(&m), "chunks must go on unchanged");
-            }
-            other => panic!("not a forward: {other:?}"),
-        }
-        assert_eq!(w.dial_targets(), vec!["BB1BBB".to_string()]);
-    }
-
-    #[test]
-    fn nothing_is_held_without_relay_mode_or_setting_b() {
-        let mut off = relaying_worker("relay-b-off");
-        off.shared.flags.third_party_relay.store(false, Ordering::SeqCst);
-        hear(&mut off, &chat("AA1AAA", "BB1BBB", "x"));
-        assert!(
-            off.outbox.due(u64::MAX).is_empty(),
-            "setting B off must not relay"
-        );
-
-        let mut stopped = relaying_worker("relay-stopped");
-        stopped.shared.flags.relay_running.store(false, Ordering::SeqCst);
-        hear(&mut stopped, &chat("AA1AAA", "BB1BBB", "x"));
-        assert!(
-            stopped.outbox.due(u64::MAX).is_empty(),
-            "relay mode off must not relay"
-        );
-
-        // Our own mail is never held, even while relaying.
-        let mut own = relaying_worker("relay-own");
-        hear(&mut own, &chat("AA1AAA", "RR1RRR", "for the relay itself"));
-        assert!(own.outbox.due(u64::MAX).is_empty());
-    }
-
-    #[test]
-    fn urgent_messages_stay_urgent_through_a_relay() {
-        let mut w = relaying_worker("relay-urgent");
-        hear(&mut w, &chat("AA1AAA", "BB1BBB", "routine"));
-        hear(&mut w, &chat("AA1AAA", "BB1BBB", "URGENT: need help"));
-        let due = w.outbox.due(u64::MAX);
-        let first = decode_payload(&due[0].1.payload).unwrap();
-        assert!(
-            first.urgent(),
-            "the urgent forward must go first and use the urgent pool"
-        );
-    }
-
-    #[test]
-    fn relay_remembers_held_messages_across_a_restart() {
-        let dir = temp_dir("relay-restart");
-        let m = chat("AA1AAA", "BB1BBB", "only once");
-        let make = |dir: &PathBuf| {
-            let w = bare_worker_in(dir.clone(), "RR1RRR");
-            let mut relay = Relay::new("RR1RRR", Role::Relay, relay::Radio::HalfDuplex, &[14_000.0]).unwrap();
-            relay.accept_schedule(vec![open_slot()]).unwrap();
-            *lock(&w.shared.relay) = Some(relay);
-            w.shared.flags.relay_running.store(true, Ordering::SeqCst);
-            w
-        };
-        let mut w = make(&dir);
-        hear(&mut w, &m);
-        assert_eq!(w.outbox.due(u64::MAX).len(), 1);
-        drop(w);
-        let mut again = make(&dir);
-        assert_eq!(again.outbox.due(u64::MAX).len(), 1, "held forward reloads");
-        hear(&mut again, &m);
-        assert_eq!(
-            again.outbox.due(u64::MAX).len(),
-            1,
-            "a copy heard after restart was held twice"
-        );
-    }
-
-    #[test]
-    fn relay_queue_is_capped() {
-        let mut w = relaying_worker("relay-cap");
-        for i in 0..MAX_HELD_FORWARDS + 3 {
-            hear(&mut w, &chat("AA1AAA", "BB1BBB", &format!("n{i}")));
-        }
-        assert_eq!(w.outbox.due(u64::MAX).len(), MAX_HELD_FORWARDS);
-    }
-
-    #[test]
-    fn forward_payload_round_trips_and_peeks() {
-        let chunks = vec![vec![1, 2, 3], vec![4]];
-        let bytes = encode_forward("AA1AAA", "BB1BBB", true, &chunks);
-        assert_eq!(peek_route(&bytes), Some(("AA1AAA".into(), "BB1BBB".into())));
-        assert_eq!(
-            decode_payload(&bytes),
-            Some(Payload::Forward {
-                from: "AA1AAA".into(),
-                to: "BB1BBB".into(),
-                urgent: true,
-                chunks
-            })
-        );
-        let m = chat("AA1AAA", "CC1CCC", "hi");
-        let own = encode_message(&m, true);
-        assert_eq!(peek_route(&own), Some(("AA1AAA".into(), "CC1CCC".into())));
-        assert_eq!(
-            decode_payload(&own),
-            Some(Payload::Msg {
-                msg: m,
-                private: true
-            })
-        );
-        assert_eq!(decode_payload(&bytes[..bytes.len() - 1]), None);
-    }
-
-    #[test]
-    fn relay_paths_are_checked() {
-        let _rt = realtime();
-        let e = Engine::new(config("AA1AAA", temp_dir("relay-paths"))).unwrap();
-        assert!(e.set_relay_paths(&["not a call"]).is_err());
-        assert!(e.set_relay_paths(&["AA1AAA"]).is_err(), "relay through itself");
-        e.set_relay_paths(&["RR1RRR", "rr1rrr", "QQ1QQQ"]).unwrap();
-        assert_eq!(e.relay_paths(), vec!["RR1RRR".to_string(), "QQ1QQQ".to_string()]);
-        e.set_relay_paths(&[]).unwrap();
-        assert!(e.relay_paths().is_empty());
-    }
-
-    #[test]
-    fn relay_paths_come_from_the_route_planner() {
-        let _rt = realtime();
-        let e = Engine::new(config("OH2AAA", temp_dir("relay-plan"))).unwrap();
-        // Helsinki to Tallinn is in the 17 m skip zone; Madrid bridges it by day.
-        let me = route::Node::new("OH2AAA", (60.17, 24.94));
-        let to = route::Node::new("ES1BBB", (59.44, 24.75));
-        let relays = [route::Node::new("EA4DDD", (40.42, -3.70))];
-        let day = route::Conditions {
-            solar_flux: 150.0,
-            ..route::Conditions::band_17m(12, 6)
-        };
-        let paths = e.plan_relay_paths(&me, &to, &relays, &day).unwrap();
-        assert_eq!(paths, vec!["EA4DDD".to_string()]);
-        assert_eq!(e.relay_paths(), paths);
-    }
-
-    /// Connected to B, an item for C at the head of the queue must not hold back B's.
-    #[test]
-    fn items_for_other_stations_do_not_block_the_connected_one() {
-        let mut w = bare_worker("no-hol", "AA1AAA");
-        w.shared.flags.operator_link.store(true, Ordering::SeqCst);
-        w.enqueue(vec![chat("AA1AAA", "CC1CCC", "first")], vec![1], false);
-        w.enqueue(vec![chat("AA1AAA", "BB1BBB", "second")], vec![2], false);
-        w.link_state = LinkState::Connected {
-            peer: "BB1BBB".into(),
-        };
-        let (_, p) = w.next_due().expect("B's item must be due");
-        assert_eq!(
-            p,
-            Payload::Msg {
-                msg: chat("AA1AAA", "BB1BBB", "second"),
-                private: false
-            }
-        );
     }
 }

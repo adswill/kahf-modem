@@ -12,6 +12,9 @@ kahf-sdr = { path = "../kahf-sdr" }
 kahf-radio = { path = "../kahf-radio" }
 kahf-rig = { path = "../kahf-rig" }
 kahf-log = { path = "../kahf-log" }
+serde_json = "1.0.154"
+# The relay's push link to the mesh: a blocking WebSocket, TLS through rustls (owner approved 2026-11-19).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 kahf-prop = { path = "../kahf-prop" }
 sha2 = "0.11.1"
 

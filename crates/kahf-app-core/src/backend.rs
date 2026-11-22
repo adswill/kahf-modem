@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kahf_daemon::{Area, Config, Engine, RelayAck, ServerSync, ServerSyncOptions, RELAY_SERVER_URL};
+use kahf_daemon::{Config, Engine};
+
+/// The kahf.dev relay mesh: where a running relay links to, and the public station list.
+const RELAY_SERVER_URL: &str = "https://kahf.dev";
 use serde_json::{json, Value};
 
 use convert::{event_json, Ctx, Pending};
@@ -33,9 +36,7 @@ pub struct Shared {
     link: Mutex<Option<String>>,
     /// Outbox ids this app queued (the last few hundred).
     own_ids: Mutex<Vec<u64>>,
-    /// Keeps this relay registered and scheduled on kahf.dev while relay mode runs.
-    sync: Mutex<Option<ServerSync>>,
-    /// Why the server sync is not running while relay mode is, if it is not.
+    /// Why the relay is not linked to the kahf.dev mesh while relay mode runs, if it is not.
     sync_note: Mutex<Option<String>>,
 }
 
@@ -89,7 +90,6 @@ impl Shared {
             voice: voice::Voice::default(),
             link: Mutex::new(None),
             own_ids: Mutex::new(Vec::new()),
-            sync: Mutex::new(None),
             sync_note: Mutex::new(None),
         }
     }
@@ -212,20 +212,20 @@ pub fn engine_start(state: &Shared, settings: Value) -> Res<()> {
             .iter()
             .filter_map(|x| x.as_str().map(String::from))
             .collect();
-        let refs: Vec<&str> = calls.iter().map(String::as_str).collect();
-        if let Err(e) = engine.set_relay_paths(&refs) {
-            state.log(e);
-        }
+        engine.set_relay_hints(&calls);
     }
     engine.set_listen_only(s.listen_only);
+    engine.set_dial_hz(s.dial_hz());
     *state.link.lock().map_err(|e| e.to_string())? = None;
     *state.engine.lock().map_err(|e| e.to_string())? = Some(engine);
     Ok(())
 }
 
 fn stop_server_sync(state: &Shared) {
-    if let Ok(mut g) = state.sync.lock() {
-        *g = None;
+    if let Ok(e) = state.engine.lock() {
+        if let Some(e) = e.as_ref() {
+            e.set_backbone(None);
+        }
     }
     if let Ok(mut g) = state.sync_note.lock() {
         *g = None;
@@ -261,40 +261,12 @@ fn send_linked(
         .map_err(|e| e.to_string())?
         .as_deref()
         .is_some_and(|l| l.eq_ignore_ascii_case(to.trim()));
-    let data_dir = state.data_dir.clone();
     with_engine(state, |e| {
         if !linked {
             e.connect(to)?;
         }
-        plan_paths(e, &data_dir, to);
         send(e)
     })
-}
-
-/// Points the engine's relay paths at the best 17 m relays toward `to`, using the grid
-/// locators of this station and of the known stations. Does nothing when this station or `to`
-/// has no position; the message then waits for `to` directly.
-fn plan_paths(e: &Engine, data_dir: &std::path::Path, to: &str) {
-    use kahf_prop::route::{Conditions, Node};
-    let v = settings::load(data_dir);
-    // Relays the person named win over the planner.
-    if v["relayHints"].as_array().is_some_and(|a| !a.is_empty()) {
-        return;
-    }
-    let (Some(lat), Some(lon)) = (v["location"]["lat"].as_f64(), v["location"]["lon"].as_f64()) else {
-        return;
-    };
-    let known: Vec<Node> = live::read_contacts(data_dir)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|c| live::locator_position(&c.qth).map(|p| Node::new(&c.call, p)))
-        .collect();
-    let Some(dest) = known.iter().find(|n| n.call.eq_ignore_ascii_case(to.trim())) else {
-        return;
-    };
-    let me = Node::new(&EngineSettings::from_json(&v).callsign(), (lat, lon));
-    let (hour, month) = live::utc_hour_month(live::now_unix());
-    let _ = e.plan_relay_paths(&me, dest, &known, &Conditions::band_17m(hour, month));
 }
 
 pub fn engine_send(state: &Shared, id: String, to: String, text: String, kind: String) -> Res<()> {
@@ -328,8 +300,14 @@ pub fn map_share(state: &Shared) -> Res<String> {
     if v["location"]["lat"].as_f64().is_none() {
         return Err("Enter your position in Settings first.".into());
     }
-    if state.sync.lock().map_err(|e| e.to_string())?.is_some() {
-        Ok("This relay is registered on kahf.dev and listed on the map.".into())
+    let running = state
+        .engine
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .is_some_and(Engine::relay_running);
+    if running {
+        Ok("This relay announces itself on the air and links to the kahf.dev mesh.".into())
     } else {
         Ok("The map lists relays. Turn on relay mode to appear on it.".into())
     }
@@ -346,54 +324,20 @@ pub fn engine_set_relay(state: &Shared, on: bool, licence_held: bool, terms_acce
         stop_server_sync(state);
         return Ok(());
     }
-    let channels: Vec<f32> = settings::channels_khz().iter().map(|k| *k as f32).collect();
+    let Some(channel) = settings::channels_khz().first().map(|k| *k as f32) else {
+        return Err("No relay channel is set.".into());
+    };
+    with_engine(state, |e| e.enable_relay(channel, licence_held, terms_accepted))?;
+    // Link to the kahf.dev relay mesh so messages can also travel over the internet. The engine
+    // connects in the background; without internet the relay still works on the radio.
     with_engine(state, |e| {
-        e.configure_relay(
-            kahf_core::relay::Role::Relay,
-            kahf_core::relay::Radio::HalfDuplex,
-            &channels,
-        )?;
-        e.start_relay(RelayAck {
-            licence_held,
-            terms_accepted,
-        })
+        e.set_backbone(Some(RELAY_SERVER_URL));
+        Ok(())
     })?;
-    // Register with the server in the background and keep the schedule fresh. Without a shared
-    // position, or without internet, the relay still works on the radio and says so.
-    let v = settings::load(&state.data_dir);
-    let loc = &v["location"];
-    let note = |text: &str| {
-        if let Ok(mut g) = state.sync_note.lock() {
-            *g = Some(text.to_string());
-        }
-    };
-    let (Some(lat), Some(lon)) = (loc["lat"].as_f64(), loc["lon"].as_f64()) else {
-        note("Relay works on the radio only: enter your position in Settings to join the network.");
-        return Ok(());
-    };
-    if loc["mode"].as_str().unwrap_or("off") == "off" {
-        note("Relay works on the radio only: location sharing is off, so kahf.dev cannot list this relay.");
-        return Ok(());
-    }
-    let started = match Area::from_position(lat, lon) {
-        Ok(area) => with_engine(state, |e| {
-            e.start_server_sync(ServerSyncOptions {
-                base_url: RELAY_SERVER_URL.to_string(),
-                area,
-                requests: Vec::new(),
-            })
-        }),
-        Err(e) => Err(e),
-    };
-    match started {
-        Ok(sync) => {
-            *state.sync.lock().map_err(|e| e.to_string())? = Some(sync);
-            *state.sync_note.lock().map_err(|e| e.to_string())? = None;
-        }
-        Err(why) => {
-            note("Relay works on the radio only: kahf.dev could not be reached to register.");
-            state.log(why);
-        }
+    if let Ok(mut g) = state.sync_note.lock() {
+        *g = Some(
+            "Relay is set to link to the kahf.dev mesh. Without internet it works on the radio only.".into(),
+        );
     }
     Ok(())
 }
@@ -542,15 +486,15 @@ pub fn relay_status(state: &Shared) -> Res<Value> {
         .unwrap_or_default();
     let hops: Vec<live::HopView> = engine
         .map(|e| {
-            e.recent_hops(live::HOP_ROWS)
+            e.relay_recent(live::HOP_ROWS)
+                .0
                 .iter()
                 .map(live::HopView::from)
                 .collect()
         })
         .unwrap_or_default();
-    let slots: Vec<live::SlotView> = engine
-        .map(|e| e.relay_schedule().iter().map(live::SlotView::from).collect())
-        .unwrap_or_default();
+    // The engine plans its own transmit slot; no server schedule exists to show.
+    let slots: Vec<live::SlotView> = Vec::new();
     let outbox: Vec<Value> = engine
         .map(|e| {
             e.outbox_pending()
@@ -559,12 +503,7 @@ pub fn relay_status(state: &Shared) -> Res<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    let server = state
-        .sync
-        .lock()
-        .map_err(|e| e.to_string())?
-        .as_ref()
-        .map(|s| live::SyncView::from(&s.status()));
+    let server: Option<Value> = None;
     let note = state.sync_note.lock().map_err(|e| e.to_string())?.clone();
     Ok(json!({
         "running": running,
@@ -579,6 +518,7 @@ pub fn relay_status(state: &Shared) -> Res<Value> {
         "outbox": outbox,
         "server": server,
         "serverNote": note,
+        "referee": engine.map(|e| { let (r, q, g) = e.referee_counts(); json!({ "rounds": r, "requests": q, "grants": g, "heres": e.heres_heard() }) }),
         "area": if running { area } else { None },
         "nowUnix": live::now_unix(),
     }))
@@ -598,9 +538,31 @@ pub fn relay_directory(state: &Shared, refresh: bool) -> Res<Vec<Value>> {
     blocking(move || directory::directory(&dir, here, &manual, refresh)).map_err(|e| e.to_string())?
 }
 
+/// The radio's dial changed (the person chose another lane): tell the transmit gate.
+pub fn engine_set_dial(state: &Shared, khz: f64) -> Res<()> {
+    with_engine(state, |e| {
+        e.set_dial_hz(Some((khz * 1000.0).round() as u64));
+        Ok(())
+    })
+}
+
+/// What the transmit gate says, for the Radio screen: `state` is "off", "bench" or "real".
+pub fn tx_gate_status(state: &Shared) -> Res<Value> {
+    let guard = state.engine.lock().map_err(|e| e.to_string())?;
+    Ok(match guard.as_ref() {
+        Some(e) => {
+            let (st, why) = e.tx_gate();
+            json!({ "state": st, "reason": why })
+        }
+        None => json!({ "state": "off", "reason": "The radio engine is not running." }),
+    })
+}
+
 pub fn engine_set_relay_hints(state: &Shared, calls: Vec<String>) -> Res<()> {
-    let refs: Vec<&str> = calls.iter().map(String::as_str).collect();
-    with_engine(state, |e| e.set_relay_paths(&refs))
+    with_engine(state, |e| {
+        e.set_relay_hints(&calls);
+        Ok(())
+    })
 }
 
 /// Stations from the address book (most recently heard first) and the logbook (newest first).

@@ -46,17 +46,16 @@ pub fn view(k: &Kahf) -> V {
     .align_center()]
     .gap(12.0);
     c = c.push(
-        caption("Every contact KAHF logs is kept in a plain text file in your data folder. Export writes the same list as an ADIF file (logbook.adi) that other logging programs and the online logbooks can read.")
-            .dim()
-            .fill_w(),
+        para("Every contact KAHF logs is kept in a plain text file in your data folder. Export writes the same list as an ADIF file (logbook.adi) that other logging programs and the online logbooks can read.", 100),
     );
     if let Some(e) = &k.m.book.error {
         c = c.push(note(format!("A data file could not be read: {e}"), true));
     }
     if total == 0 {
-        c = c.push(
-            text("Nothing logged yet. Contacts appear here, newest first, as soon as KAHF logs them.").dim(),
-        );
+        c = c.push(para(
+            "Nothing logged yet. Contacts appear here, newest first, as soon as KAHF logs them.",
+            100,
+        ));
     } else if rows.is_empty() {
         c = c.push(text(format!("No contact matches \"{}\".", k.ui.book_filter.trim())).dim());
     } else {
@@ -124,7 +123,7 @@ fn uploads(k: &Kahf, total: usize) -> V {
             })
             .into()
     };
-    c = c.push(caption("Nothing is sent until you press a button. The keys and passwords below are kept on this computer, in the settings file, as plain text.").dim().fill_w());
+    c = c.push(para("Nothing is sent until you press a button. The keys and passwords below are kept on this computer, in the settings file, as plain text.", 100));
     c = c.push(titled(
         "QRZ Logbook",
         col![

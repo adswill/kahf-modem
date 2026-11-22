@@ -8,8 +8,7 @@ pub fn view(_k: &Kahf) -> V {
     col![
         heading("Welcome to KAHF").display(),
         text("No internet needed").heading(),
-        text("KAHF connects your computer to an amateur radio and sends what you write to other people's computers, even where there is no phone signal at all.")
-            .dim(),
+        para("KAHF connects your computer to an amateur radio and sends what you write to other people's computers, even where there is no phone signal at all.", 100),
         col![
             step("You write", "a message, a voice note or a file, to someone's callsign."),
             step("Your radio sends it", "as a short burst of sound, through the air."),

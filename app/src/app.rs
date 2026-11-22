@@ -742,6 +742,8 @@ impl Kahf {
             return;
         }
         self.set(|s| s.freq_khz = khz);
+        // The transmit gate checks the dial, so the engine must know it at once.
+        self.spawn(move |st| core::engine_set_dial(st, khz), |_, _| {});
     }
 
     // ---- tests ("Test" buttons: they only listen or look, never transmit) --------------------
@@ -1176,6 +1178,13 @@ impl Kahf {
         if !self.m.settings.setup_done {
             return;
         }
+        self.spawn(core::tx_gate_status, |k, r| {
+            if let Ok(v) = r {
+                if let Ok(g) = parse::<TxGate>(v) {
+                    k.m.tx_gate = g;
+                }
+            }
+        });
         if self.m.relay.running || self.m.page == Page::Relay {
             self.spawn(core::relay_status, |k, r| {
                 if let Ok(v) = r {

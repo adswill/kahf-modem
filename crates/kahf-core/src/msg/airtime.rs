@@ -84,7 +84,7 @@ mod tests {
         let p = plan(1000, 100.0, 2.0);
         assert!(p.chunks > 1000 / CHUNK_DATA);
         let back = max_body_for(p.seconds, 100.0, 2.0);
-        assert!(back >= 1000 - CHUNK_DATA && back <= 1000 + CHUNK_DATA, "{back}");
+        assert!((1000 - CHUNK_DATA..=1000 + CHUNK_DATA).contains(&back), "{back}");
         assert!(plan(0, 100.0, 1.0).chunks >= 1);
         assert!(plan(10, 0.0, 1.0).seconds.is_infinite());
         assert_eq!(max_body_for(0.0, 100.0, 1.0), 0);
