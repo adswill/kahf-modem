@@ -5973,12 +5973,19 @@ mod tests {
         t
     }
 
+    fn unverified() -> BandTable {
+        let mut t = BandTable::builtin_r1();
+        t.plan_verified = false;
+        t
+    }
+
     const C1_DIAL_HZ: u64 = 18_113_440;
     const C1_CENTRE_HZ: u64 = 18_114_940;
 
     #[test]
     fn gate_unverified_table_refuses_a_real_radio_and_never_keys_ptt() {
         let (mut e, keyed) = gate_station("gate-unverified", false);
+        e.set_band_table(unverified());
         e.set_dial_hz(Some(C1_DIAL_HZ));
         assert!(!fire(&e, &keyed), "PTT keyed on an unverified table");
         let (mode, why) = e.tx_gate();
@@ -6048,7 +6055,7 @@ mod tests {
         e.set_band_table(verified());
         e.set_dial_hz(Some(C1_DIAL_HZ));
         assert!(fire(&e, &keyed));
-        e.set_band_table(BandTable::builtin_r1());
+        e.set_band_table(unverified());
         assert!(!fire(&e, &keyed));
     }
 

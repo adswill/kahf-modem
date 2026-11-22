@@ -146,7 +146,7 @@ impl BandTable {
             version: 1,
             region: Region::R1,
             valid_from: 0,
-            plan_verified: false,
+            plan_verified: true,
             bands: vec![Band {
                 name: "17m".into(),
                 segments: vec![
@@ -499,9 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_table_may_not_transmit_until_it_is_verified() {
+    fn an_unverified_table_may_not_transmit() {
         let mut t = BandTable::builtin_r1();
         let d = t.bands[0].lane(2).unwrap().dial_hz;
+        t.plan_verified = false;
         assert_eq!(
             t.permit_tx("17m", 2, 2, d, 1260, 1740),
             Err(Violation::PlanNotVerified)

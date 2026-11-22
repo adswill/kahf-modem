@@ -9,7 +9,7 @@ What must be true before KAHF is published to people, and where each line stands
 - Pull request 40 runs CI on Linux, plus the desktop app job.
 
 ## Not done: only the owner can do these
-1. **Check the 17 m band table** against the current IARU Region 1 band plan (18.111 to 18.120 MHz; "all modes, digimodes, automatically controlled data stations"; the lane width 480 Hz must be inside the bandwidth limit of that part). Then set `plan_verified` to true in `crates/kahf-core/src/lanes.rs`. Until then the app refuses to transmit on a real radio, so nobody can use the relay network on air.
+1. **DONE 2026-11-22: the owner checked the 17 m band table; `plan_verified` is now true.** (Original item: check the 17 m band table against the current IARU Region 1 band plan (18.111 to 18.120 MHz; "all modes, digimodes, automatically controlled data stations"; the lane width 480 Hz must be inside the bandwidth limit of that part). Then set `plan_verified` to true in `crates/kahf-core/src/lanes.rs`. Until then the app refused to transmit on a real radio.)
 2. **Deploy the server** (`cd server && npx wrangler deploy`). kahf.dev runs version 58e80977; the twelve-lane plan and page changes (commit 2c33ca8) are not deployed. The auto-mode safety check blocked session F from deploying twice.
 3. **Merge pull request 40** after CI is green, then **tag a release** (the release workflow builds the installers).
 4. **First on-air test** with two real radios, following `docs/ON-AIR-PLAN.md`.
