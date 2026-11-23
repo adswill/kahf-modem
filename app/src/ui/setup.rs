@@ -1,4 +1,5 @@
-//! First-run setup: who you are, the radio, the channel, the place, ready.
+//! First-run setup: who you are, the radio, the place, ready. The lane starts on C1 (where
+//! stations call each other); it can be changed later on the Radio screen.
 
 use alloy_ui::prelude::*;
 
@@ -8,7 +9,7 @@ use super::widgets::spectrum;
 use crate::app::*;
 use crate::model::Page;
 use crate::types::LocationMode;
-use crate::util::{bands, callsign, fmt, geo};
+use crate::util::{callsign, fmt, geo};
 
 fn can_next(k: &Kahf) -> bool {
     let s = &k.ui.setup;
@@ -18,11 +19,20 @@ fn can_next(k: &Kahf) -> bool {
                 || (callsign::valid(&callsign::normalise(&s.draft.callsign))
                     && callsign::problem(&s.draft.callsign).is_none())
         }
-        3 => {
+        2 => {
             s.draft.location.mode == LocationMode::Off
                 || (geo::valid_lat(s.pos.lat()) && geo::valid_lon(s.pos.lon()))
         }
         _ => true,
+    }
+}
+
+/// Why "Continue" is greyed, in words. Empty when it is not.
+fn why_not_next(k: &Kahf) -> &'static str {
+    match (can_next(k), k.ui.setup.step) {
+        (true, _) => "",
+        (false, 0) => "Type your callsign to continue, or choose listening only.",
+        (false, _) => "Enter a valid position, or turn the map off.",
     }
 }
 
@@ -38,8 +48,7 @@ pub fn view(k: &Kahf) -> V {
     let body: V = match step {
         0 => who(k),
         1 => radio(k),
-        2 => channel(k),
-        3 => place(k),
+        2 => place(k),
         _ => ready(k),
     };
     let cancel_to = if k.m.settings.setup_done {
@@ -58,6 +67,7 @@ pub fn view(k: &Kahf) -> V {
         .align_center(),
         steps,
         scroll(col![body].pad(4.0)).fill(),
+        text(why_not_next(k)).caption().dim(),
         row![
             button("Back").enabled(step > 0).act(|k: &mut Kahf| {
                 k.ui.setup.step = k.ui.setup.step.saturating_sub(1);
@@ -168,31 +178,6 @@ fn radio(k: &Kahf) -> V {
     c.into()
 }
 
-fn channel(k: &Kahf) -> V {
-    let st = &k.ui.setup;
-    let mut c = col![
-        heading("Where do you listen?"),
-        para("KAHF uses one band, 17 metres (18.111 to 18.120 MHz), in twelve narrow lanes. Start with C1, where stations call each other. You can change lane later on the Radio screen.", 100),
-    ]
-    .gap(10.0);
-    for ch in bands::channels() {
-        let sel = (st.draft.freq_khz - ch.khz).abs() < 0.001;
-        let sub = if ch.name == "C1" {
-            "Set your radio to upper sideband and to this dial frequency. Best by day over long distances, roughly 1000 to 4000 km, and mostly closed at night."
-        } else {
-            ch.what
-        };
-        let khz = ch.khz;
-        c = c.push(choice(
-            sel,
-            &format!("Lane {}   dial {}", ch.name, fmt::mhz(khz)),
-            sub,
-            move |k| k.ui.setup.draft.freq_khz = khz,
-        ));
-    }
-    c.into()
-}
-
 fn place(k: &Kahf) -> V {
     col![
         heading("Do you want to be on the map?"),
@@ -246,4 +231,15 @@ fn ready(k: &Kahf) -> V {
     ]
     .gap(8.0)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_has_no_channel_step_and_starts_on_the_calling_lane() {
+        assert_eq!(SETUP_STEPS, ["You", "Radio", "Place", "Ready"]);
+        assert!((crate::util::bands::default_khz() - 18_113.44).abs() < 0.01);
+    }
 }

@@ -212,13 +212,25 @@ fn start_panel(k: &Kahf) -> V {
     ]
     .gap(10.0);
     for s in k.m.steps() {
-        c = c.push(
-            row![
-                text(if s.done { "✓" } else { "○" }).accent_if(s.done),
-                col![text(s.title).label(), caption(s.why).dim()].gap(0.0),
-            ]
-            .gap(10.0),
-        );
+        let mut line = row![
+            text(if s.done { "✓" } else { "○" }).accent_if(s.done),
+            col![text(s.title).label(), caption(s.why).dim()].gap(0.0),
+        ]
+        .gap(10.0)
+        .align_center();
+        // A step that is not done says where to fix it.
+        if !s.done {
+            match s.id {
+                "call" => {
+                    line = line.push(button("Set up").act(|k: &mut Kahf| k.go(Page::Setup)));
+                }
+                "radio" => {
+                    line = line.push(button("Open the radio page").act(|k: &mut Kahf| k.go(Page::Radio)));
+                }
+                _ => {}
+            }
+        }
+        c = c.push(line);
     }
     c = c.push(
         row![

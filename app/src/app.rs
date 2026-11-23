@@ -171,7 +171,7 @@ pub const PTTS: [(&str, &str); 4] = [
 pub const BAUDS: [u32; 6] = [4800, 9600, 19_200, 38_400, 57_600, 115_200];
 
 /// The steps of setup.
-pub const SETUP_STEPS: [&str; 5] = ["You", "Radio", "Channel", "Place", "Ready"];
+pub const SETUP_STEPS: [&str; 4] = ["You", "Radio", "Place", "Ready"];
 
 /// Text fields behind the position editor.
 #[derive(Debug, Clone, Default, PartialEq)]
