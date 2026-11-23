@@ -195,7 +195,9 @@ pub fn open(text: &str) -> Result<Box<dyn Rig>, String> {
         }
         m => {
             let baud = spec.baud.or_else(|| model_info(m).map(|i| i.1)).unwrap_or(9600);
-            with_port(&spec, Box::new(SerialLink::open(&spec.device, baud)?))
+            // Yaesu CAT ports use RTS as flow control; keep it asserted unless RTS is the PTT line.
+            let rts_high = rts_high_on_open(m, spec.ptt);
+            with_port(&spec, Box::new(SerialLink::open(&spec.device, baud, rts_high)?))
         }
     }
 }
@@ -221,6 +223,25 @@ impl Rig for RigctldRig {
     }
     fn set_mode(&mut self, _mode: Mode) -> Result<(), String> {
         Ok(()) // rigctld's set-mode needs a radio-specific passband; leave the mode as is.
+    }
+}
+
+/// Whether RTS is asserted when the serial port opens. Yaesu CAT ports use RTS as flow
+/// control and stay silent while it is low; everywhere else, and whenever RTS is the PTT line,
+/// it starts low so that opening the port never keys the radio.
+fn rts_high_on_open(model: &str, ptt: PttMethod) -> bool {
+    dialect(model) == Some(text::YAESU) && ptt != PttMethod::Rts
+}
+
+#[cfg(test)]
+mod rts_tests {
+    use super::*;
+
+    #[test]
+    fn yaesu_cat_ports_open_with_rts_high_unless_rts_is_the_ptt_line() {
+        assert!(rts_high_on_open("ft991a", PttMethod::Cat));
+        assert!(!rts_high_on_open("ft991a", PttMethod::Rts));
+        assert!(!rts_high_on_open("ic7300", PttMethod::Cat));
     }
 }
 

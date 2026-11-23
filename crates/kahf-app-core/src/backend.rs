@@ -616,7 +616,15 @@ pub fn rig_direct_models() -> Vec<Value> {
 /// transmitter.
 pub fn rig_test_spec(spec: String) -> Res<String> {
     blocking(move || {
-        let mut rig = kahf_rig::open(spec.trim())?;
+        let mut rig = kahf_rig::open(spec.trim()).map_err(|e| {
+            if e.contains("denied") || e.contains("busy") || e.contains("in use") {
+                format!(
+                    "{e}. The serial port is already open: if KAHF is running with this radio, it is using the port, so the radio is connected. Otherwise close the other program that has it (rigctld, flrig, WSJT-X, a logger)."
+                )
+            } else {
+                e
+            }
+        })?;
         let hz = rig.freq_hz()?;
         Ok(format!(
             "{} answered. Dial at {:.3} kHz.",

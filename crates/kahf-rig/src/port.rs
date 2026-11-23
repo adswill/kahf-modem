@@ -19,13 +19,16 @@ pub struct SerialLink {
 }
 
 impl SerialLink {
-    pub fn open(path: &str, baud: u32) -> Result<Self, String> {
+    /// `rts_high` leaves RTS asserted. Yaesu radios use RTS as flow control on their CAT port
+    /// (FT-991A menu "CAT RTS" defaults to ENABLE) and stay silent while it is low.
+    pub fn open(path: &str, baud: u32, rts_high: bool) -> Result<Self, String> {
         let mut port = serialport::new(path, baud)
             .timeout(Duration::from_millis(50))
             .open()
             .map_err(|e| format!("open {path}: {e}"))?;
-        // Lines start low so opening the port never keys the radio.
-        port.write_request_to_send(false).ok();
+        // Lines start low so opening the port never keys the radio, except RTS where it is
+        // the radio's flow control and not PTT.
+        port.write_request_to_send(rts_high).ok();
         port.write_data_terminal_ready(false).ok();
         Ok(SerialLink { port })
     }

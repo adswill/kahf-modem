@@ -646,8 +646,12 @@ impl Engine {
     }
 
     /// The USB dial the radio is on, in Hz (the app's lane setting). `None` = not known.
+    /// Also tunes the radio itself when it has rig control (CAT or rigctld).
     pub fn set_dial_hz(&self, dial_hz: Option<u64>) {
         lock(&self.shared.flags.policy).dial_hz = dial_hz;
+        if let Some(hz) = dial_hz {
+            let _ = self.send_cmd(Cmd::Tune(hz));
+        }
     }
 
     /// Overrides the audio span the modem fills, in Hz (normally the lane mode's 1260 to 1740).
@@ -1161,9 +1165,12 @@ fn validate(c: &Config) -> Result<(), String> {
         }
     }
     if let Some(addr) = &c.rigctld {
-        match addr.rsplit_once(':') {
-            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
-            _ => return Err(format!("bad rigctld address {addr:?} (want host:port)")),
+        // Either a rigctld `host:port`, or a direct radio spec such as `ft991a:COM9:4800:cat`.
+        let host_port = matches!(addr.rsplit_once(':'),
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok());
+        if !host_port {
+            kahf_rig::parse_spec(addr)
+                .map_err(|e| format!("bad radio control setting {addr:?}: {e}"))?;
         }
     }
     if let Some(s) = &c.sdr {
@@ -1185,6 +1192,8 @@ enum Cmd {
     },
     Disconnect,
     Listen,
+    /// Set the radio's dial (Hz) through its rig control, if it has any.
+    Tune(u64),
     /// Announce this station to everyone who can hear it, and through relays to those who cannot.
     Advertise,
     /// A steady test tone for setting the radio's drive.
@@ -1226,6 +1235,30 @@ trait Backend {
     fn dial_hz(&self) -> Option<u64> {
         None
     }
+    /// Sets the radio's dial through its rig control. A radio without any does nothing.
+    fn tune(&mut self, _hz: u64) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Radio control from the setting: a rigctld `host:port`, or a direct radio spec
+/// (`model:port[:baud][:ptt]`) that KAHF drives itself over the serial port.
+fn open_rig_control(addr: &str) -> Result<Box<dyn RigControl>, String> {
+    let host_port = matches!(addr.rsplit_once(':'),
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok());
+    if host_port {
+        return Ok(Box::new(RigctldClient::connect(addr)?));
+    }
+    struct Direct(Box<dyn kahf_rig::Rig>);
+    impl RigControl for Direct {
+        fn set_ptt(&mut self, on: bool) -> Result<(), String> {
+            self.0.set_ptt(on)
+        }
+        fn set_freq_hz(&mut self, hz: u64) -> Result<(), String> {
+            self.0.set_freq_hz(hz)
+        }
+    }
+    Ok(Box::new(Direct(kahf_rig::open(addr)?)))
 }
 
 fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
@@ -1235,7 +1268,7 @@ fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
     let input = AudioIn::open(cfg.audio_in.as_deref())?;
     let output = AudioOut::open(cfg.audio_out.as_deref())?;
     let rig: Option<Box<dyn RigControl>> = match &cfg.rigctld {
-        Some(addr) => Some(Box::new(RigctldClient::connect(addr)?)),
+        Some(addr) => Some(open_rig_control(addr)?),
         None => None,
     };
     let named_blackhole = |n: &Option<String>| {
@@ -1306,6 +1339,13 @@ impl Backend for AudioBackend {
 
     fn tx_stop(&mut self) -> Result<(), String> {
         set_ptt(&mut self.rig, false)
+    }
+
+    fn tune(&mut self, hz: u64) -> Result<(), String> {
+        match self.rig.as_mut() {
+            Some(r) => r.set_freq_hz(hz),
+            None => Ok(()),
+        }
     }
 }
 
@@ -2478,6 +2518,15 @@ impl Worker {
             Cmd::Listen => {
                 if let Err(e) = self.ensure_radio() {
                     self.log(e);
+                }
+            }
+            Cmd::Tune(hz) => {
+                let r = self
+                    .ensure_radio()
+                    .and_then(|()| self.backend.as_mut().map_or(Ok(()), |b| b.tune(hz)));
+                match r {
+                    Ok(()) => {}
+                    Err(e) => self.log(format!("cannot tune the radio to {hz} Hz: {e}")),
                 }
             }
             Cmd::Queue { msgs, ids, private } => {
@@ -4530,6 +4579,17 @@ mod tests {
         let d = std::env::temp_dir().join(format!("kahf-daemon-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn the_radio_setting_takes_a_rigctld_address_or_a_direct_radio_spec() {
+        let mut c = config("AA1AAA", PathBuf::from("."));
+        for ok in ["localhost:4532", "ft991a:COM9:4800:cat"] {
+            c.rigctld = Some(ok.into());
+            assert!(validate(&c).is_ok(), "{ok}");
+        }
+        c.rigctld = Some("nonsense".into());
+        assert!(validate(&c).is_err());
     }
 
     fn config(callsign: &str, dir: PathBuf) -> Config {
