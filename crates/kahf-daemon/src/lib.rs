@@ -1249,6 +1249,13 @@ fn open_rig_control(addr: &str) -> Result<Box<dyn RigControl>, String> {
     if host_port {
         return Ok(Box::new(RigctldClient::connect(addr)?));
     }
+    Ok(direct_control(kahf_rig::open(addr)?))
+}
+
+/// A directly controlled radio as engine radio control. KAHF's modem needs the radio in upper
+/// sideband data mode, so it is set when the radio is taken over; a radio that refuses (or one
+/// fixed to a digital mode) is left as it is.
+fn direct_control(mut rig: Box<dyn kahf_rig::Rig>) -> Box<dyn RigControl> {
     struct Direct(Box<dyn kahf_rig::Rig>);
     impl RigControl for Direct {
         fn set_ptt(&mut self, on: bool) -> Result<(), String> {
@@ -1258,7 +1265,8 @@ fn open_rig_control(addr: &str) -> Result<Box<dyn RigControl>, String> {
             self.0.set_freq_hz(hz)
         }
     }
-    Ok(Box::new(Direct(kahf_rig::open(addr)?)))
+    let _ = rig.set_mode(kahf_rig::Mode::UsbData);
+    Box::new(Direct(rig))
 }
 
 fn open_radio(cfg: &Config) -> Result<Box<dyn Backend>, String> {
@@ -4579,6 +4587,35 @@ mod tests {
         let d = std::env::temp_dir().join(format!("kahf-daemon-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn a_directly_controlled_radio_is_put_in_usb_data_mode() {
+        use std::sync::{Arc, Mutex};
+        struct Fake(Arc<Mutex<Vec<kahf_rig::Mode>>>);
+        impl RigControl for Fake {
+            fn set_ptt(&mut self, _: bool) -> Result<(), String> {
+                Ok(())
+            }
+            fn set_freq_hz(&mut self, _: u64) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        impl kahf_rig::Rig for Fake {
+            fn name(&self) -> String {
+                "fake".into()
+            }
+            fn freq_hz(&mut self) -> Result<u64, String> {
+                Ok(0)
+            }
+            fn set_mode(&mut self, m: kahf_rig::Mode) -> Result<(), String> {
+                self.0.lock().unwrap().push(m);
+                Ok(())
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _control = direct_control(Box::new(Fake(seen.clone())));
+        assert_eq!(*seen.lock().unwrap(), vec![kahf_rig::Mode::UsbData]);
     }
 
     #[test]
