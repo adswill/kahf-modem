@@ -144,6 +144,12 @@ const KEEP_MAIL: usize = 300;
 const KEEP_HEARD: usize = 80;
 const WATERFALL_ROWS: usize = 90;
 
+/// A radio test that passes while the banner says the radio is not running means the engine
+/// has to start again, or the banner and the test keep disagreeing.
+pub fn restart_after_radio_test(test_passed: bool, engine_error: &str) -> bool {
+    test_passed && !engine_error.is_empty()
+}
+
 /// Turns what the engine said into advice.
 pub fn explain_start_error(raw: &str) -> String {
     let t = raw.to_lowercase();
@@ -941,6 +947,13 @@ mod tests {
             3000,
         );
         assert!(!m.receiving);
+    }
+
+    #[test]
+    fn a_passing_radio_test_restarts_an_engine_that_is_not_running() {
+        assert!(restart_after_radio_test(true, "KAHF could not reach the radio control program."));
+        assert!(!restart_after_radio_test(true, ""));
+        assert!(!restart_after_radio_test(false, "boom"));
     }
 
     #[test]

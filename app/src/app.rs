@@ -764,6 +764,28 @@ impl Kahf {
         });
     }
 
+    /// A radio test. When it passes while the banner says the radio is not running, the engine
+    /// is started again with the saved settings, so the banner never disagrees with the test.
+    fn run_radio_test(
+        &mut self,
+        key: &str,
+        work: impl FnOnce(&Shared) -> Result<String, String> + Send + 'static,
+    ) {
+        let key = key.to_string();
+        self.ui.tests.insert(key.clone(), TestState::Running);
+        self.spawn(work, move |k, r| {
+            let state = match r {
+                Ok(text) => TestState::Done { ok: true, text },
+                Err(text) => TestState::Done { ok: false, text },
+            };
+            let passed = matches!(state, TestState::Done { ok: true, .. });
+            k.ui.tests.insert(key, state);
+            if crate::model::restart_after_radio_test(passed, &k.m.engine_error) {
+                k.start_engine(|_, _| {});
+            }
+        });
+    }
+
     pub fn test_audio_in(&mut self, key: &str, device: String) {
         self.run_test(key, move |_| core::test_audio_in(device));
     }
@@ -782,17 +804,17 @@ impl Kahf {
     }
 
     pub fn test_rig_address(&mut self, key: &str, addr: String) {
-        self.run_test(key, move |_| core::test_rig(addr));
+        self.run_radio_test(key, move |_| core::test_rig(addr));
     }
 
     pub fn test_rig_spec(&mut self, key: &str, spec: String) {
-        self.run_test(key, move |_| core::rig_test_spec(spec));
+        self.run_radio_test(key, move |_| core::rig_test_spec(spec));
     }
 
     /// Starts Hamlib's radio control for the chosen radio and reads its frequency.
     pub fn test_rig_model(&mut self, key: &str, hw: RigChoice) {
         let Some(model) = hw.model else { return };
-        self.run_test(key, move |s| {
+        self.run_radio_test(key, move |s| {
             let hz = core::rig_connect(s, model, hw.port.clone(), hw.baud)?;
             Ok(format!("Connected. Your radio is on {:.6} MHz.", hz as f64 / 1e6))
         });
@@ -1268,9 +1290,10 @@ impl Kahf {
         self.spawn(
             move |sh| core::engine_start(sh, v),
             |k, r| {
-                if let Err(e) = r {
-                    k.m.engine_error = explain_start_error(&e);
-                }
+                k.m.engine_error = match r {
+                    Ok(()) => String::new(),
+                    Err(e) => explain_start_error(&e),
+                };
             },
         );
     }
