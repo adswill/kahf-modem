@@ -12,6 +12,7 @@ fn rig(
         device: "sim".into(),
         baud: None,
         ptt,
+        ptt_device: None,
     };
     let (p, st) = SimPort::new(proto, start);
     (with_port(&spec, Box::new(p)).unwrap(), st)
@@ -60,6 +61,7 @@ fn icom_wrong_address_times_out_politely() {
         device: "sim".into(),
         baud: None,
         ptt: PttMethod::Cat,
+        ptt_device: None,
     };
     let (p, _) = SimPort::new(Proto::Civ(0xA4), 0);
     let mut r = with_port(&spec, Box::new(p)).unwrap();

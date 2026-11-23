@@ -81,6 +81,9 @@ pub struct RigSpec {
     pub device: String,
     pub baud: Option<u32>,
     pub ptt: PttMethod,
+    /// A second serial port whose RTS or DTR line keys the radio (`rts@COM10`). `None` = the
+    /// radio's own port.
+    pub ptt_device: Option<String>,
 }
 
 pub fn parse_ptt(s: &str) -> Result<PttMethod, String> {
@@ -98,9 +101,19 @@ pub fn parse_spec(text: &str) -> Result<RigSpec, String> {
     let model = parts.remove(0).to_ascii_lowercase();
     let net = model == "flrig" || model == "rigctld";
     let mut ptt = PttMethod::Cat;
+    let mut ptt_device = None;
     if let Some(last) = parts.last() {
-        if let Ok(p) = parse_ptt(last) {
+        // `rts@COM10`: the line of a second port keys the radio.
+        let (method, dev) = match last.split_once('@') {
+            Some((m, d)) if !d.is_empty() => (m, Some(d.to_string())),
+            _ => (*last, None),
+        };
+        if let Ok(p) = parse_ptt(method) {
+            if dev.is_some() && !matches!(p, PttMethod::Rts | PttMethod::Dtr) {
+                return Err("only rts or dtr can use a second port (for example rts@COM10)".into());
+            }
             ptt = p;
+            ptt_device = dev;
             parts.pop();
         }
     }
@@ -128,6 +141,7 @@ pub fn parse_spec(text: &str) -> Result<RigSpec, String> {
         device,
         baud,
         ptt,
+        ptt_device,
     })
 }
 
@@ -196,9 +210,50 @@ pub fn open(text: &str) -> Result<Box<dyn Rig>, String> {
         m => {
             let baud = spec.baud.or_else(|| model_info(m).map(|i| i.1)).unwrap_or(9600);
             // Yaesu CAT ports use RTS as flow control; keep it asserted unless RTS is the PTT line.
-            let rts_high = rts_high_on_open(m, spec.ptt);
-            with_port(&spec, Box::new(SerialLink::open(&spec.device, baud, rts_high)?))
+            // With a second PTT port the radio's own port never keys it.
+            let own_ptt = if spec.ptt_device.is_some() { PttMethod::Cat } else { spec.ptt };
+            let rts_high = rts_high_on_open(m, own_ptt);
+            let mut own = spec.clone();
+            own.ptt = own_ptt;
+            let rig = with_port(&own, Box::new(SerialLink::open(&spec.device, baud, rts_high)?))?;
+            match &spec.ptt_device {
+                // Both lines start low so opening the port never keys the radio.
+                Some(dev) => Ok(Box::new(SplitPtt {
+                    inner: rig,
+                    port: Box::new(SerialLink::open(dev, 9600, false)?),
+                    method: spec.ptt,
+                })),
+                None => Ok(rig),
+            }
         }
+    }
+}
+
+/// A rig whose transmitter is keyed by a line of another serial port.
+struct SplitPtt {
+    inner: Box<dyn Rig>,
+    port: Box<dyn Port>,
+    method: PttMethod,
+}
+
+impl RigControl for SplitPtt {
+    fn set_ptt(&mut self, on: bool) -> Result<(), String> {
+        line_ptt(self.port.as_mut(), self.method, on)
+    }
+    fn set_freq_hz(&mut self, hz: u64) -> Result<(), String> {
+        self.inner.set_freq_hz(hz)
+    }
+}
+
+impl Rig for SplitPtt {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn freq_hz(&mut self) -> Result<u64, String> {
+        self.inner.freq_hz()
+    }
+    fn set_mode(&mut self, mode: Mode) -> Result<(), String> {
+        self.inner.set_mode(mode)
     }
 }
 
@@ -242,6 +297,62 @@ mod rts_tests {
         assert!(rts_high_on_open("ft991a", PttMethod::Cat));
         assert!(!rts_high_on_open("ft991a", PttMethod::Rts));
         assert!(!rts_high_on_open("ic7300", PttMethod::Cat));
+    }
+
+    #[test]
+    fn a_second_port_ptt_is_parsed_and_only_for_line_methods() {
+        let s = parse_spec("ft991a:COM9:4800:rts@COM10").unwrap();
+        assert_eq!(
+            (s.device.as_str(), s.baud, s.ptt, s.ptt_device.as_deref()),
+            ("COM9", Some(4800), PttMethod::Rts, Some("COM10"))
+        );
+        let s = parse_spec("ft991a:COM9:dtr@/dev/ttyUSB1").unwrap();
+        assert_eq!((s.ptt, s.ptt_device.as_deref()), (PttMethod::Dtr, Some("/dev/ttyUSB1")));
+        assert!(parse_spec("ft991a:COM9:cat@COM10").is_err());
+        assert_eq!(parse_spec("ft991a:COM9:rts").unwrap().ptt_device, None);
+    }
+
+    struct LinePort(std::sync::Arc<std::sync::Mutex<(bool, bool)>>);
+    impl Port for LinePort {
+        fn write_all(&mut self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_until(&mut self, _: u8, _: std::time::Duration) -> Result<Vec<u8>, String> {
+            Err("none".into())
+        }
+        fn set_rts(&mut self, on: bool) -> Result<(), String> {
+            self.0.lock().unwrap().0 = on;
+            Ok(())
+        }
+        fn set_dtr(&mut self, on: bool) -> Result<(), String> {
+            self.0.lock().unwrap().1 = on;
+            Ok(())
+        }
+        fn clear_input(&mut self) {}
+    }
+
+    #[test]
+    fn split_ptt_keys_the_second_port_and_leaves_the_radio_port_alone() {
+        let lines = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
+        let spec = RigSpec {
+            model: "ft991a".into(),
+            device: "sim".into(),
+            baud: None,
+            ptt: PttMethod::Cat,
+            ptt_device: None,
+        };
+        let (own, st) = crate::sim::SimPort::new(crate::sim::Proto::Text(9), 14_074_000);
+        let inner = with_port(&spec, Box::new(own)).unwrap();
+        let mut rig = SplitPtt {
+            inner,
+            port: Box::new(LinePort(lines.clone())),
+            method: PttMethod::Rts,
+        };
+        rig.set_ptt(true).unwrap();
+        assert_eq!(*lines.lock().unwrap(), (true, false));
+        rig.set_ptt(false).unwrap();
+        assert_eq!(*lines.lock().unwrap(), (false, false));
+        let _ = st;
     }
 }
 
