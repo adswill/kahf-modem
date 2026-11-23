@@ -236,7 +236,8 @@ pub struct Ui {
     pub mail_compose: bool,
     pub mail_view: MailView,
     pub hw: Hw,
-    pub devices: Vec<String>,
+    pub devices_in: Vec<String>,
+    pub devices_out: Vec<String>,
     pub sdrs: Vec<String>,
     pub rig_available: Option<bool>,
     pub rig_models: Vec<RigModel>,
@@ -287,7 +288,8 @@ impl Ui {
             mail_compose: false,
             mail_view: MailView::Inbox,
             hw: Hw::from_settings(settings),
-            devices: Vec::new(),
+            devices_in: Vec::new(),
+            devices_out: Vec::new(),
             sdrs: Vec::new(),
             rig_available: None,
             rig_models: Vec::new(),
@@ -604,7 +606,7 @@ impl Kahf {
                 )
             },
             |k, (d, s, r)| {
-                k.ui.devices = d;
+                (k.ui.devices_in, k.ui.devices_out) = d;
                 k.ui.sdrs = s;
                 k.ui.direct_rigs = r.into_iter().filter_map(|v| parse::<DirectRig>(v).ok()).collect();
             },

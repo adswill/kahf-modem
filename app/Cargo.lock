@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-app"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "alloy-ui",
  "chrono",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-app-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "codec2",
  "kahf-audio",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-audio"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "cpal",
  "kahf-core",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "ed25519-dalek",
  "png 0.18.1",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-daemon"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "kahf-audio",
  "kahf-core",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-export"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "kahf-log",
  "ureq",
@@ -1506,11 +1506,11 @@ dependencies = [
 
 [[package]]
 name = "kahf-log"
-version = "1.1.0"
+version = "1.1.1"
 
 [[package]]
 name = "kahf-net"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "base64",
  "kahf-core",
@@ -1520,18 +1520,18 @@ dependencies = [
 
 [[package]]
 name = "kahf-prop"
-version = "1.1.0"
+version = "1.1.1"
 
 [[package]]
 name = "kahf-radio"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "libloading",
 ]
 
 [[package]]
 name = "kahf-rig"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "kahf-core",
  "serialport",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "kahf-sdr"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "kahf-core",
  "libloading",

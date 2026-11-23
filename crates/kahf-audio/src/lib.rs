@@ -201,18 +201,40 @@ fn find_device(name: Option<&str>, input: bool) -> Result<cpal::Device, String> 
             };
             dev.ok_or_else(|| format!("no default {dir} device"))
         }
-        Some(want) => host
-            .devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| {
-                let dir_ok = if input {
-                    d.supports_input()
-                } else {
-                    d.supports_output()
-                };
-                dir_ok && d.description().map(|x| x.name() == want).unwrap_or(false)
-            })
-            .ok_or_else(|| format!("no {dir} device named {want:?}")),
+        Some(want) => {
+            let devs: Vec<cpal::Device> = host
+                .devices()
+                .map_err(|e| e.to_string())?
+                .filter(|d| if input { d.supports_input() } else { d.supports_output() })
+                .collect();
+            let names: Vec<String> = devs
+                .iter()
+                .map(|d| d.description().map(|x| x.name().to_string()).unwrap_or_default())
+                .collect();
+            match match_name(&names, want) {
+                Some(i) => Ok(devs.into_iter().nth(i).expect("index from the same list")),
+                None => Err(no_device_message(dir, want, &names)),
+            }
+        }
+    }
+}
+
+/// Index of the device `want` names: exact first, then ignoring case and surrounding spaces.
+fn match_name(names: &[String], want: &str) -> Option<usize> {
+    names
+        .iter()
+        .position(|n| n == want)
+        .or_else(|| names.iter().position(|n| n.trim().eq_ignore_ascii_case(want.trim())))
+}
+
+fn no_device_message(dir: &str, want: &str, names: &[String]) -> String {
+    if names.is_empty() {
+        format!("no {dir} device named {want:?}; this computer lists no {dir} devices")
+    } else {
+        format!(
+            "no {dir} device named {want:?}. Devices that can be used as {dir}: {}",
+            names.join(", ")
+        )
     }
 }
 
@@ -512,6 +534,22 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_names_match_exactly_then_ignoring_case_and_spaces() {
+        let n = vec!["CABLE Output (VB-Audio Virtual Cable)".to_string(), "Mikrofon".to_string()];
+        assert_eq!(match_name(&n, "Mikrofon"), Some(1));
+        assert_eq!(match_name(&n, " mikrofon "), Some(1));
+        assert_eq!(match_name(&n, "CABLE Input (VB-Audio Virtual Cable)"), None);
+    }
+
+    #[test]
+    fn a_missing_device_error_lists_what_can_be_used() {
+        let n = vec!["CABLE Output (VB-Audio Virtual Cable)".to_string()];
+        let m = no_device_message("input", "CABLE Input (VB-Audio Virtual Cable)", &n);
+        assert!(m.contains("CABLE Output"), "{m}");
+        assert!(no_device_message("input", "x", &[]).contains("lists no input devices"));
+    }
+
     use super::*;
 
     fn tone(freq: f64, rate: f64, n: usize) -> Vec<f32> {

@@ -107,8 +107,10 @@ pub fn save_settings(state: &Shared, settings: Value) -> Res<()> {
     settings::save(&state.data_dir, &settings)
 }
 
-pub fn list_audio_devices() -> Vec<String> {
-    kahf_audio::list_devices()
+/// Sound devices for the pickers: what can record, then what can play. A picker for the
+/// radio's sound in must never offer a playback device (and the other way round).
+pub fn list_audio_devices() -> (Vec<String>, Vec<String>) {
+    (kahf_audio::device_names(true), kahf_audio::device_names(false))
 }
 
 /// The receivers KAHF can talk to, judged by which driver libraries are installed.
