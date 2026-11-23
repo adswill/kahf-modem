@@ -236,6 +236,8 @@ pub struct Ui {
     pub mail_compose: bool,
     pub mail_view: MailView,
     pub hw: Hw,
+    /// The Radio screen shows the lane buttons only when asked.
+    pub lanes_open: bool,
     pub devices: Vec<String>,
     pub sdrs: Vec<String>,
     pub rig_available: Option<bool>,
@@ -287,6 +289,7 @@ impl Ui {
             mail_compose: false,
             mail_view: MailView::Inbox,
             hw: Hw::from_settings(settings),
+            lanes_open: false,
             devices: Vec::new(),
             sdrs: Vec::new(),
             rig_available: None,

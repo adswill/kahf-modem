@@ -40,39 +40,45 @@ pub fn view(k: &Kahf) -> V {
 
     let current = bands::index_of(s.freq_khz);
     let lanes = bands::channels();
+    // What a person has to set comes first: how the radio is heard, then radio control.
+    // The lane is already C1; the rest of the lane buttons wait behind "Change lane".
     let mut side = col![
+        heading("How the radio is heard").sub(),
+        audio_picker(k, Where::Radio),
+        heading("Radio control").sub(),
+        para("Optional. KAHF can read and set your radio's frequency, so you never touch the dial. Sound still comes through the sound card.", 60),
+        rig_picker(k, Where::Radio),
         heading("Lane").sub(),
         row![
             text(current.map_or("not a KAHF lane".to_string(), |i| lanes[i].name.clone())).heading(),
             text(format!("dial {}", fmt::mhz(s.freq_khz))),
+            button(if k.ui.lanes_open { "Hide lanes" } else { "Change lane" })
+                .ghost()
+                .act(|k: &mut Kahf| k.ui.lanes_open = !k.ui.lanes_open),
         ]
         .gap(10.0)
         .align_center(),
-        para("KAHF uses 17 metres only (18.111 to 18.120 MHz), in twelve narrow lanes, each 480 Hz wide. Set your radio to upper sideband and to the dial shown for the lane. C1 is where stations call each other; R lanes belong to relays. Relays take care of the rest, so start with C1.", 60),
+        para("Set your radio to upper sideband and to this dial frequency. C1 is where stations call each other, so start with C1.", 60),
     ]
     .gap(10.0);
-    for half in lanes.chunks(6) {
-        let mut r = row![].gap(6.0);
-        for ch in half {
-            let khz = ch.khz;
-            r = r.push(
-                button(ch.name.clone())
-                    .nav(current == Some(ch.index))
-                    .act(move |k: &mut Kahf| k.set_frequency(khz)),
-            );
+    if k.ui.lanes_open {
+        side = side.push(para("KAHF uses 17 metres only (18.111 to 18.120 MHz), in twelve narrow lanes, each 480 Hz wide. R lanes belong to relays, which take care of the rest.", 60));
+        for half in lanes.chunks(6) {
+            let mut r = row![].gap(6.0);
+            for ch in half {
+                let khz = ch.khz;
+                r = r.push(
+                    button(ch.name.clone())
+                        .nav(current == Some(ch.index))
+                        .act(move |k: &mut Kahf| k.set_frequency(khz)),
+                );
+            }
+            side = side.push(r);
         }
-        side = side.push(r);
+        if let Some(i) = current {
+            side = side.push(caption(format!("{}: {}.", lanes[i].name, lanes[i].what)).dim());
+        }
     }
-    if let Some(i) = current {
-        side = side.push(caption(format!("{}: {}.", lanes[i].name, lanes[i].what)).dim());
-    }
-    side = side.push(col![
-        heading("How the radio is heard").sub(),
-        audio_picker(k, Where::Radio),
-        heading("Radio control").sub(),
-        para("Optional. KAHF can read and set your radio's frequency through Hamlib, so you never touch the dial. Sound still comes through the sound card.", 60),
-        rig_picker(k, Where::Radio),
-    ].gap(10.0));
     if k.hardware_dirty() {
         side = side.push(
             row![
