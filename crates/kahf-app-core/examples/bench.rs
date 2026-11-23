@@ -42,8 +42,15 @@ fn main() {
     std::thread::sleep(Duration::from_secs(70));
     println!(
         "file b->a: {:?}",
-        engine_send_file(&b, "3".into(), "K1ALF".into(), "/tmp/kahf-bench-clip.bin".into())
+        engine_send_file(
+            &b,
+            "3".into(),
+            "K1ALF".into(),
+            std::env::var("BENCH_FILE").unwrap_or_else(|_| "/tmp/kahf-bench-clip.bin".into())
+        )
     );
-    std::thread::sleep(Duration::from_secs(150));
+    // BENCH_TAIL_S: how long to wait for the file (default 150 s). BENCH_FILE: what to send.
+    let tail = std::env::var("BENCH_TAIL_S").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+    std::thread::sleep(Duration::from_secs(tail));
     drop(b);
 }
