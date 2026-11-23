@@ -171,7 +171,7 @@ pub const PTTS: [(&str, &str); 4] = [
 pub const BAUDS: [u32; 6] = [4800, 9600, 19_200, 38_400, 57_600, 115_200];
 
 /// The steps of setup.
-pub const SETUP_STEPS: [&str; 5] = ["You", "Radio", "Channel", "Place", "Ready"];
+pub const SETUP_STEPS: [&str; 4] = ["You", "Radio", "Place", "Ready"];
 
 /// Text fields behind the position editor.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -236,6 +236,8 @@ pub struct Ui {
     pub mail_compose: bool,
     pub mail_view: MailView,
     pub hw: Hw,
+    /// The Radio screen shows the lane buttons only when asked.
+    pub lanes_open: bool,
     pub devices: Vec<String>,
     pub sdrs: Vec<String>,
     pub rig_available: Option<bool>,
@@ -287,6 +289,7 @@ impl Ui {
             mail_compose: false,
             mail_view: MailView::Inbox,
             hw: Hw::from_settings(settings),
+            lanes_open: false,
             devices: Vec::new(),
             sdrs: Vec::new(),
             rig_available: None,

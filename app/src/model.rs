@@ -271,7 +271,9 @@ impl Model {
                 id: "radio",
                 title: "KAHF can hear your radio",
                 why: "A sound card or receiver is chosen.",
-                done: s.setup_done && (!s.audio_in.is_empty() || !s.sdr.is_empty()),
+                // "Computer default" is a choice too: the radio is heard when it was set up and the
+                // engine started without a problem.
+                done: s.setup_done && self.engine_error.is_empty(),
             },
             Step {
                 id: "listen",
@@ -954,6 +956,17 @@ mod tests {
         assert!(restart_after_radio_test(true, "KAHF could not reach the radio control program."));
         assert!(!restart_after_radio_test(true, ""));
         assert!(!restart_after_radio_test(false, "boom"));
+    }
+
+    #[test]
+    fn the_radio_step_is_done_after_setup_when_the_engine_runs_even_on_the_default_device() {
+        let mut m = Model::default();
+        m.settings.setup_done = true;
+        m.settings.callsign = "KA1ABC".into();
+        let radio = |m: &Model| m.steps().into_iter().find(|s| s.id == "radio").unwrap().done;
+        assert!(radio(&m));
+        m.engine_error = "boom".into();
+        assert!(!radio(&m));
     }
 
     #[test]
