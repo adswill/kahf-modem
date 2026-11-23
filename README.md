@@ -56,8 +56,6 @@ cargo run -p kahf-cli -- rx message.wav -o decoded.bin
 | `kahf-node` | Headless station and relay node for a Raspberry Pi or any always-on computer |
 | `kahf-winlink` | Winlink bridge: B2F protocol, LZHUF, message format and mail mapping |
 | `kahf-cli` | Command-line tool: `tx`, `rx`, `sim-tx`, `bler`, `e2e` |
-| `kahf-gui` | Older desktop interface, no longer built (replaced by the Alloy UI app) |
-| `kahf-ui` | Older egui interface, no longer built (replaced by the Alloy UI app) |
 
 The native desktop app lives in `app/`, which is its own Cargo workspace.
 

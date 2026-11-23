@@ -166,6 +166,10 @@ pub fn rig_stop(state: &Shared) {
 }
 
 /// Starts (or restarts) the engine with the person's settings.
+fn auto_link_setting(settings: &Value) -> bool {
+    settings["autoLink"].as_bool().unwrap_or(true)
+}
+
 pub fn engine_start(state: &Shared, settings: Value) -> Res<()> {
     let s = EngineSettings::from_json(&settings);
     // The old engine goes first, so it lets go of the sound device, the radio port and the SDR
@@ -215,6 +219,9 @@ pub fn engine_start(state: &Shared, settings: Value) -> Res<()> {
         engine.set_relay_hints(&calls);
     }
     engine.set_listen_only(s.listen_only);
+    // Without this a station that was called could only acknowledge: it refused to send its
+    // own messages back over the link. On unless the person turned it off.
+    engine.set_auto_link(auto_link_setting(&settings));
     engine.set_dial_hz(s.dial_hz());
     *state.link.lock().map_err(|e| e.to_string())? = None;
     *state.engine.lock().map_err(|e| e.to_string())? = Some(engine);
@@ -940,6 +947,13 @@ mod tests {
         assert!(settle_pending(&s, &[7]).is_empty());
         assert_eq!(settle_pending(&s, &[]), vec!["a".to_string()]);
         assert!(s.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn engine_start_turns_auto_link_on_unless_told_otherwise() {
+        assert!(auto_link_setting(&serde_json::json!({})));
+        assert!(auto_link_setting(&serde_json::json!({"autoLink": true})));
+        assert!(!auto_link_setting(&serde_json::json!({"autoLink": false})));
     }
 
     #[test]
