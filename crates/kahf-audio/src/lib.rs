@@ -17,7 +17,10 @@ use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample, StreamConf
 pub const RATE: u32 = 8000;
 
 /// Ring capacity in samples at [`RATE`] (2 seconds).
-const RING_CAP: usize = RATE as usize * 2;
+/// How much audio the buffers hold. The engine decodes and transmits on one thread, so a long
+/// decode must not starve the output (a gap in the middle of a seven-second burst ruins it) or
+/// overflow the input (dropped audio shifts the timing of everything after it).
+const RING_CAP: usize = RATE as usize * 8;
 
 type Ring = Arc<Mutex<VecDeque<f32>>>;
 type ErrSlot = Arc<Mutex<Option<String>>>;
@@ -341,12 +344,12 @@ where
             }
             out.clear();
             rs.process(&mono, &mut out);
-            // Never block the audio thread: drop this block if the reader holds the lock.
-            if let Ok(mut q) = ring.try_lock() {
-                q.extend(out.iter().copied());
-                while q.len() > RING_CAP {
-                    q.pop_front();
-                }
+            // The reader holds the lock only for a moment, so waiting is better than dropping
+            // a block: a dropped block shifts the timing of the rest of a burst.
+            let mut q = lock(&ring);
+            q.extend(out.iter().copied());
+            while q.len() > RING_CAP {
+                q.pop_front();
             }
         },
         move |e| set_err(&err_slot, e.to_string()),
@@ -477,7 +480,8 @@ where
             let frames = data.len() / channels;
             while pending.len() < frames {
                 src.clear();
-                if let Ok(mut q) = ring.try_lock() {
+                {
+                    let mut q = lock(&ring);
                     let n = q.len().min(4096);
                     src.extend(q.drain(..n));
                 }

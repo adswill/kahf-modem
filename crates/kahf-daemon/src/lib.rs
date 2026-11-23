@@ -218,7 +218,7 @@ const EVENT_CAP: usize = 1024;
 /// TX is written in chunks of this many audio samples (0.1 s).
 const TX_CHUNK: usize = RATE as usize / 10;
 /// Audio is handed to the device at most this far ahead of real time.
-const TX_AHEAD_S: f64 = 1.0;
+const TX_AHEAD_S: f64 = 4.0;
 /// PTT stays on this long after the last sample's nominal end.
 const TX_TAIL_S: f64 = 0.1;
 /// Wait after a failed RX read before trying the radio again.
@@ -3237,6 +3237,14 @@ impl Worker {
         let now_ms = self.clock.since(self.started).as_millis() as u64;
         let now_s = now_ms / 1000;
         // Foreign users are found by what they are, then kept out of for a while.
+        // A KAHF burst is long (seven seconds in lane mode) and looks like a steady carrier
+        // while it arrives. Its frame is only decoded at the end, which is too late: the lane
+        // would already be kept out of for ten minutes. So a lane with a KAHF preamble locked
+        // on counts as KAHF's from that moment.
+        if self.kami_at.is_some() || self.rx_locked {
+            let own = w.ks[w.own];
+            self.kahf_seen.insert(own, now_ms);
+        }
         if now_ms >= w.classified_ms + SENSE_CLASSIFY_MS {
             w.classified_ms = now_ms;
             for (i, k) in w.ks.clone().into_iter().enumerate() {
@@ -6197,6 +6205,19 @@ mod tests {
         let (starts, got) = run_lane(&mut e, 120, |g| !g.is_empty());
         assert_eq!(got.len(), 1, "the message did not arrive on a quiet lane");
         assert!(!starts.is_empty());
+    }
+
+    #[test]
+    fn a_long_kahf_burst_does_not_put_its_own_lane_in_quarantine() {
+        let (mut e, _bus) = lane_engines("lane-own-burst", &["AA1AAA", "BB1BBB"]);
+        send_at(&mut e, 10);
+        let (_, got) = run_lane(&mut e, 120, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the first message did not arrive");
+        // The first burst was seven seconds long. If the sensor took it for a foreign carrier
+        // the lane would now be kept out of for ten minutes and this one would never go.
+        e[0].send_message("BB1BBB", "second").unwrap();
+        let (_, got) = run_lane(&mut e, 200, |g| !g.is_empty());
+        assert_eq!(got.len(), 1, "the lane was kept out of after our own burst");
     }
 
     #[test]
