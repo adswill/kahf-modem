@@ -323,7 +323,8 @@ mod controls {
         let mut k = Kahf::for_tests(dir);
         k.m.settings.setup_done = true;
         k.m.page = Page::Radio;
-        k.ui.devices = vec!["BlackHole 2ch".into(), "MacBook Microphone".into()];
+        k.ui.devices_in = vec!["BlackHole 2ch".into(), "MacBook Microphone".into()];
+        k.ui.devices_out = vec!["BlackHole 2ch".into(), "MacBook Speakers".into()];
         Harness::new(sketch(k, |k: &Kahf| view(k)), 1360.0, 800.0)
     }
 

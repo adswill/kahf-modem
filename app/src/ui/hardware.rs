@@ -51,13 +51,13 @@ pub fn audio_picker(k: &Kahf, w: Where) -> V {
             row![
                 lab(
                     "From the radio",
-                    device_pick(k, "audio_in", &k.ui.devices, &ain, move |k, d| hw_mut(k, w)
+                    device_pick(k, "audio_in", &k.ui.devices_in, &ain, move |k, d| hw_mut(k, w)
                         .audio_in = d)
                 )
                 .fill_w(),
                 lab(
                     "To the radio",
-                    device_pick(k, "audio_out", &k.ui.devices, &aout, move |k, d| hw_mut(k, w)
+                    device_pick(k, "audio_out", &k.ui.devices_out, &aout, move |k, d| hw_mut(k, w)
                         .audio_out =
                         d)
                 )
