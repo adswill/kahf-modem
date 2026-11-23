@@ -184,10 +184,15 @@ fn station(k: &Kahf) -> V {
 }
 
 fn radio(k: &Kahf) -> V {
+    // The radio is set on the Radio page only: one place, one status.
+    let _ = k;
     col![
         heading("Radio"),
-        hardware::audio_picker(k, Where::Settings),
-        hardware::rig_picker(k, Where::Settings),
+        para("The sound card, the radio and the lane are set on the Radio page.", 60),
+        button("Open the Radio page").primary().act(|k: &mut Kahf| {
+            k.m.settings_open = false;
+            k.go(Page::Radio);
+        }),
     ]
     .gap(14.0)
     .into()
